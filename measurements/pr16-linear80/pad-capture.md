@@ -150,3 +150,13 @@ empty FIFO or proof of layer displacement. Sub-13-ns value changes require
 more than 76.9 million real updates/s; interpolation cannot change that
 arithmetic at a fixed 40-MS/s output clock. RF-off pad tests do not establish
 the cause of the user's RF-dependent sawteeth/layers.
+
+## INCR16 physical result (4cdd026)
+
+All six captures and sweep completed. Increasing pad TX bursts to 64 bytes
+did not change the pass/fail pattern at CPU240: direct TX40 and Phase5 TX40
+match all 4096 captured codes with no FIFO-empty; linear80 TX40 and every
+TX80 control fail alignment with FIFO-empty (raw IRQ before/after 1/3).
+Raw captures are burst64-0.bin through burst64-5.bin and burst64-trace.bin.
+The burst change has no demonstrated benefit and must not be promoted to
+the live path as a fix. CPU/burst tuning has not validated the 80-MS/s path.
