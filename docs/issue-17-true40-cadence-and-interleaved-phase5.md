@@ -117,7 +117,13 @@ Live analog hardware testing of the soft-saturated True40 build on the ESP32-C5 
    - Despite eliminating catastrophic rail clipping ($\ge 32$ codes down to 0.08%), sporadic large horizontal tears and spikes periodically cut through the fine 25 ns edge texture.
    - **Root Cause**: This is the direct visual manifestation of the **15.10% tail of jumps $\ge 16$ codes** (and 27.20% jumps $\ge 8$ codes) measured in the benchmark.
    - **Physical Mechanism**: In adjacent 25 ns differentiation with 5-wire Cartesian compression ($Q[3:1], I[3:2]$), discarding the lower bits ($Q_0, I_0, I_1$) causes the measured phase to jump by up to $\pm 40.4^\circ$ whenever the RF phasor crosses quadrant boundaries or approaches the origin under noise. When adjacent 25 ns samples straddle such a boundary, the evaluated frequency deviation spikes by 15–25 DAC codes. On an analog video monitor, this single-sample 25 ns impulse appears as an isolated horizontal spike ("enorme kartel") protruding well beyond the edge.
-   - **Contrast with Full Phase5**: In baseline Phase5, full 8-bit $Q4/I4$ atan2 quantization and 50 ns boxcar integration restricts jumps $\ge 16$ codes to only **3.06%** (and Linear40 to **1.19%**). This proves that eliminating the large tears permanently requires multi-sample integration (such as the 2-bundle Interleaved 50 ns core) or full 8-bit Cartesian phase quantization.
+4. **Elevated Background Static Compared to Phase5**:
+   - Live observation confirms that the overall background static level remains noticeably higher than in previous Phase5 builds.
+   - **Root Cause & Physics**:
+     1. **Triangular Noise Density without Notch (+6 dB)**: An FM discriminator exhibits triangular noise power density ($S_N(f) \propto f^2$). The baseline Phase5 demodulator evaluates deltas over 50 ns ($(1 - z^{-2}) = (1 - z^{-1})(1 + z^{-1})$), placing a transmission zero at $f = 20\text{ MHz}$. Adjacent 25 ns differentiation ($1 - z^{-1}$) eliminates this zero and requires doubling the gain factor, increasing high-frequency noise power by **+6 dB**.
+     2. **Continuous 40 MHz Noise Updates**: In Phase5, identical byte pairs `[A, A]` provided an implicit 50 ns zero-order hold filter. In True40, every 25 ns sample updates independently with unfiltered phase noise.
+     3. **5-Wire Quantization Noise Floor**: Reducing 8-bit Q4/I4 (256 states) to 5 wires (32 states) raises the intrinsic Cartesian phase quantization noise floor by ~18 dB.
+   - **Architectural Conclusion**: To achieve the low static floor of Phase5 at 40 MS/s cadence, the architecture must either use **Interleaved 50 ns differentiation** (which restores the 20 MHz boxcar notch and standard gain) or linear reconstruction from full 8-bit Phase5 lookups.
 
 ---
 
