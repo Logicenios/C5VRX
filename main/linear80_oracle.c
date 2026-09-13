@@ -8,6 +8,7 @@
 #include "driver/parlio_tx.h"
 #include "driver/parlio_rx.h"
 #include "parlio_priv.h" /* IDF 6.0.1: decorator-owned BS teardown */
+#include "esp_private/gdma.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
@@ -125,6 +126,14 @@ static void pad_capture(uint8_t *raw, uint8_t *capture, unsigned trial)
         .bit_pack_order=PARLIO_BIT_PACK_ORDER_LSB,
     };
     esp_err_t err=parlio_new_tx_unit(&tc,&tx);
+    if (err!=ESP_OK) goto cleanup;
+    /* Internal SRAM only: C5 supports 64-byte INCR16 bursts, whereas the
+     * generic PARLIO driver limits its PSRAM-capable setup to 32 bytes.
+     * This changes DMA delivery, not output clock or CPU sample work. */
+    const gdma_transfer_config_t dma_cfg={.max_data_burst_size=64,.access_ext_mem=false};
+    err=gdma_config_transfer(tx->dma_chan,&dma_cfg);
+    if (err!=ESP_OK) goto cleanup;
+    err=gdma_get_alignment_constraints(tx->dma_chan,&tx->int_mem_align,&tx->ext_mem_align);
     if (err!=ESP_OK) goto cleanup;
     if (mode!=1) {
         err=parlio_tx_unit_decorate_bitscrambler(tx);
@@ -259,7 +268,7 @@ esp_err_t c5vrx2_linear80_oracle_run(void)
     const c5vrx2_calibration_t *cal=c5vrx2_calibration_get();
     if (cal->pedestal_code!=20 || cal->discriminator_gain!=2 || cal->polarity!=0)
         return ESP_ERR_INVALID_STATE;
-    uint8_t *raw=heap_caps_malloc(INPUT_BYTES,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
+    uint8_t *raw=heap_caps_aligned_alloc(64,INPUT_BYTES,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
     uint8_t *actual=heap_caps_malloc(OUTPUT_CAPACITY,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
     uint8_t *expected=malloc(OUTPUT_BYTES);
     uint8_t *base=malloc(INPUT_BYTES/2);

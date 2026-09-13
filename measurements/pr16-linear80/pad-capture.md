@@ -130,3 +130,23 @@ has been demonstrated. Next investigation must target peripheral delivery
 and instruction/output scheduling, using the byte-exact TX40 controls to
 avoid treating FIFO replay as valid video. No additional flash was performed
 when recovering this A/B result; C5 remains in download mode.
+
+## Internal-SRAM INCR16 delivery candidate
+
+Next pad test reconfigures the TX GDMA channel before enable to use 64-byte
+bursts with access_ext_mem=false. IDF v6.0.1 C5 ahb_dma_ll.h explicitly maps
+64 bytes to INCR16; the standard PARLIO driver requests PSRAM-capable DMA,
+which limits its default bursts to 32 bytes. Raw input is now 64-byte aligned
+internal DMA SRAM; the handle's alignment constraints are refreshed after
+configuration. Descriptor allocation/max input length remain unchanged.
+No priorities, bus clocks, pin order or video rates change. CPU remains 240
+for a direct comparison against the preceding CPU240 run. This is a candidate
+for reducing delivery overhead, not a guaranteed throughput fix. The finite
+EOF sweep remains at its previous DMA setting; only pad replay is tuned.
+
+Signal interpretation: 40 MS/s means 25 ns between available updates;
+duplicating each 20-MS/s value holds it for 50 ns. Neither is by itself an
+empty FIFO or proof of layer displacement. Sub-13-ns value changes require
+more than 76.9 million real updates/s; interpolation cannot change that
+arithmetic at a fixed 40-MS/s output clock. RF-off pad tests do not establish
+the cause of the user's RF-dependent sawteeth/layers.
