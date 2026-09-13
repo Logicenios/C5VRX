@@ -83,3 +83,25 @@ the raw sticky flag, and explicitly disables the decorator-owned BS after
 stopping TX, before freeing it. No live sample processing changes. Pad header
 word 15 records TX status after RX completion. These changes repair evidence
 collection/teardown; they do not yet establish the cause of the bad patterns.
+
+## Sticky-FIFO physical result (667d48f, CPU160)
+
+All six pad trials and the full sweep completed. Direct TX40 and Phase5 TX40
+again match all 4096 captured six-bit samples; FIFO-empty bit remains zero
+before/after capture (raw IRQ 0/2). Linear80 at TX40 and all three TX80 trials
+fail alignment and have FIFO-empty already latched before capture (IRQ 1/3).
+Their distinct-code counts are respectively 3,8,9,6 for linear40, linear80,
+direct80, Phase5-80. Thus the failed pattern observations coincide with
+hardware TX FIFO-empty events; this is not merely a parser mismatch.
+
+Every linear80 finite timing trial also reports FIFO-empty=1, including all
+eight DATA_LEN trials which return ESP_OK. Their successful completion must
+NOT be treated as passing throughput evidence. Earlier zero snapshots were
+misleading because the driver ISR cleared the flag.
+
+Next A/B uses identical source and capture clocks with CPU default 240 MHz
+instead of 160 MHz. This does not by itself establish faster peripheral
+clocks. Build uses sdkconfig.cpu240.defaults last and separate generated
+SDKCONFIG=build-linear80-oracle/sdkconfig.cpu240. The existing build directory
+is reused; its resulting binaries now belong to CPU240, not the earlier
+CPU160 build. No per-sample CPU DSP or live firmware changes are introduced.
