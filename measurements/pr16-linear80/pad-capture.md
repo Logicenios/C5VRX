@@ -178,3 +178,21 @@ samples are compared after alignment. Tests cover both fractional phases and
 corruption. Faster-than-RX output remains incompletely observed. No analog
 or RF causation claim follows from this test. The finite EOF sweep remains
 at its prior 40/80 MHz settings and should not be confused with pad rates.
+
+## Intermediate-rate physical result (8156a1b)
+
+All seven pad trials and final sweep completed. Driver-selected rates match
+40/48/60 MHz requests. Direct TX40 again matches all 4096 samples with raw
+IRQ 0/2. Direct TX48 and TX60 fail reference alignment with FIFO-empty
+(IRQ 1/3), 14 and 11 distinct codes respectively. Phase5 TX60 and linear80
+TX40/TX60 also fail with FIFO-empty (5,10,12 distinct codes respectively).
+
+Important control regression: Phase5 TX40 fails the signature comparison in
+this run despite no FIFO-empty (IRQ 0/2), with 45 distinct codes. Prior runs
+matched exactly; do not omit this inconsistency or attribute it to a proven
+speed ceiling. Sampling phase, test ordering/state and output integrity need
+separate validation. No faster-than-40 MHz reliable path is demonstrated by
+these measurements, but they do not prove that every possible implementation
+on the chip is limited to 40 MHz. Files: intermediate-trace.bin and
+intermediate-0.bin through intermediate-6.bin. No new firmware flashed during
+result recovery; device remains in download mode, RF off.
