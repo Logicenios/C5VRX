@@ -108,7 +108,20 @@ Benchmarking on 16,384 bytes of physical RF capture (`vtx_real_capture_v3.bin`) 
 
 ---
 
-## 6. Verification and Flashing Guide
+## 6. Empirical Hardware Observation: Sporadic Large Tears ("Enorme Kartels")
+
+Live analog hardware testing of the soft-saturated True40 build on the ESP32-C5 confirmed:
+1. **White/Black Rail Static Eliminated**: The previous full-scale 0/63 static flashes and "color bombs" are completely gone due to the soft-saturation LUT clamp [4..60] and 0.00% rail clipping.
+2. **Fine Cadence Texture ("Kleine Kartels")**: The 40 MS/s DAC cadence produces distinct 25 ns analog updates ("kleine kartels") instead of the 50 ns flat holds of Phase5.
+3. **Sporadic Large Tears ("Enorme Kartel door de kleine kartels heen")**:
+   - Despite eliminating catastrophic rail clipping ($\ge 32$ codes down to 0.08%), sporadic large horizontal tears and spikes periodically cut through the fine 25 ns edge texture.
+   - **Root Cause**: This is the direct visual manifestation of the **15.10% tail of jumps $\ge 16$ codes** (and 27.20% jumps $\ge 8$ codes) measured in the benchmark.
+   - **Physical Mechanism**: In adjacent 25 ns differentiation with 5-wire Cartesian compression ($Q[3:1], I[3:2]$), discarding the lower bits ($Q_0, I_0, I_1$) causes the measured phase to jump by up to $\pm 40.4^\circ$ whenever the RF phasor crosses quadrant boundaries or approaches the origin under noise. When adjacent 25 ns samples straddle such a boundary, the evaluated frequency deviation spikes by 15–25 DAC codes. On an analog video monitor, this single-sample 25 ns impulse appears as an isolated horizontal spike ("enorme kartel") protruding well beyond the edge.
+   - **Contrast with Full Phase5**: In baseline Phase5, full 8-bit $Q4/I4$ atan2 quantization and 50 ns boxcar integration restricts jumps $\ge 16$ codes to only **3.06%** (and Linear40 to **1.19%**). This proves that eliminating the large tears permanently requires multi-sample integration (such as the 2-bundle Interleaved 50 ns core) or full 8-bit Cartesian phase quantization.
+
+---
+
+## 7. Verification and Flashing Guide
 
 To build and flash the verified clean True40 firmware:
 
@@ -126,3 +139,4 @@ To build and flash the verified clean True40 firmware:
    ```bash
    python tools/test_true40_oracle.py
    ```
+
