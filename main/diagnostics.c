@@ -1,5 +1,6 @@
 #include "diagnostics.h"
 #include "trajectory_reference.h"
+#include "true40_reference.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -133,7 +134,9 @@ static DRAM_ATTR uint8_t s_modem_parlio_capture[MODEM_PARLIO_BYTES]
 #define TX_WBFM_PACKED_BYTES (TX_WBFM_OUTPUT_BYTES / 2u)
 #define TX_WBFM_MAGIC        0x31584254u /* little-endian "TBX1" */
 #define TX_WBFM_VALID_GPIO   GPIO_NUM_23
-#if CONFIG_C5VRX2_WBFM_TRAJECTORY
+#if CONFIG_C5VRX2_WBFM_TRUE40
+#define TX_WBFM_TEST_VARIANT 17 /* True 40 MS/s adjacent candidate (Issue 17) */
+#elif CONFIG_C5VRX2_WBFM_TRAJECTORY
 #define TX_WBFM_TEST_VARIANT 8 /* middle-sample trajectory candidate */
 #elif CONFIG_C5VRX2_WBFM_PHASE5_QUALITY
 #define TX_WBFM_TEST_VARIANT 5 /* embedded uniform phase5 production core */
@@ -457,6 +460,11 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
         s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
         sizeof(s_tx_wbfm_expected));
 #endif
+#elif TX_WBFM_TEST_VARIANT == 17
+    uint8_t previous_iq5 = 0;
+    expected_bytes = c5vrx2_true40_reference(
+        s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
+        sizeof(s_tx_wbfm_expected), &previous_iq5);
 #elif TX_WBFM_TEST_VARIANT == 8
     uint8_t previous_phase = 0;
     expected_bytes = c5vrx2_trajectory_reference(
@@ -484,12 +492,14 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
     uint32_t loop_first_mismatch = UINT32_MAX;
 #if TX_WBFM_TEST_VARIANT == 3 || \
     (TX_WBFM_TEST_VARIANT == 4 && !TX_WBFM_CONSTANT_LUT_ORACLE) || \
-    TX_WBFM_TEST_VARIANT == 5 || TX_WBFM_TEST_VARIANT == 8
+    TX_WBFM_TEST_VARIANT == 5 || TX_WBFM_TEST_VARIANT == 8 || TX_WBFM_TEST_VARIANT == 17
     bitscrambler_handle_t loop_bs = NULL;
     loop_error = bitscrambler_loopback_create(
         &loop_bs, SOC_BITSCRAMBLER_ATTACH_I2S0, TX_WBFM_INPUT_BYTES);
     if (loop_error == ESP_OK)
-        loop_error = TX_WBFM_TEST_VARIANT == 8 ?
+        loop_error = TX_WBFM_TEST_VARIANT == 17 ?
+                     c5vrx2_wbfm_q4_configure_true40(loop_bs) :
+                     TX_WBFM_TEST_VARIANT == 8 ?
                      c5vrx2_wbfm_q4_configure_trajectory(loop_bs) :
                      TX_WBFM_TEST_VARIANT == 3 ?
                      c5vrx2_wbfm_q4_configure_lut3(loop_bs) :
@@ -573,7 +583,9 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
     /* Configure through the decorator-owned TX handle. The phase5 and IQ5
      * production programs carry their LUT in the program image so the table
      * is installed by the same load that starts the bounded transaction. */
-    setup_err = TX_WBFM_TEST_VARIANT == 8 ?
+    setup_err = TX_WBFM_TEST_VARIANT == 17 ?
+                c5vrx2_wbfm_q4_configure_true40(tx->bs_handle) :
+                TX_WBFM_TEST_VARIANT == 8 ?
                 c5vrx2_wbfm_q4_configure_trajectory(tx->bs_handle) :
                 TX_WBFM_TEST_VARIANT == 3 ?
                 c5vrx2_wbfm_q4_configure_lut3(tx->bs_handle) :
@@ -672,6 +684,8 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
             c5vrx2_wbfm_q4_lut3_program(),
 #elif TX_WBFM_TEST_VARIANT == 4
             c5vrx2_wbfm_q4_iq5_program(),
+#elif TX_WBFM_TEST_VARIANT == 17
+            c5vrx2_wbfm_q4_true40_program(),
 #elif TX_WBFM_TEST_VARIANT == 8
             c5vrx2_wbfm_q4_trajectory_program(),
 #elif TX_WBFM_TEST_VARIANT == 5
