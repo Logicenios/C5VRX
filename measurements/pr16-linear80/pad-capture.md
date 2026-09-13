@@ -105,3 +105,10 @@ clocks. Build uses sdkconfig.cpu240.defaults last and separate generated
 SDKCONFIG=build-linear80-oracle/sdkconfig.cpu240. The existing build directory
 is reused; its resulting binaries now belong to CPU240, not the earlier
 CPU160 build. No per-sample CPU DSP or live firmware changes are introduced.
+
+SDK clock check: IDF v6.0.1 `esp_hw_support/port/esp32c5/rtc_clk.c`,
+`rtc_clk_cpu_freq_to_pll_160_mhz` and `_240_mhz`, both select AHB=40 MHz
+(root dividers 4 and 6). Their source comments constrain AHB to <=48 MHz.
+Therefore the CPU240 A/B does not automatically raise AHB bandwidth. No bus
+overclock is applied by this experiment. This is configuration evidence,
+not a measured hardware throughput ceiling.
