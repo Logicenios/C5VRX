@@ -105,7 +105,8 @@ class True40OracleTests(unittest.TestCase):
         raw_bytes = capture_path.read_bytes()
         raw = np.frombuffer(raw_bytes[64:] if raw_bytes[:4] == b'CBV1' else raw_bytes, dtype=np.uint8)
 
-        sim_out = bs_model.simulate(self.asm_text, bytes(raw), 4096)
+        eval_len = min(len(raw), 16384)
+        sim_out = bs_model.simulate(self.asm_text, bytes(raw), eval_len)
         sim_dac = np.array(sim_out[3:], dtype=np.float64) # aligned with delay=3 relative to np.diff
 
         ref_ideal = ideal_reference_40m(raw)[:len(sim_dac)]
@@ -116,15 +117,17 @@ class True40OracleTests(unittest.TestCase):
         h8 = float(np.mean(err >= 8.0) * 100.0)
         h16 = float(np.mean(err >= 16.0) * 100.0)
         h32 = float(np.mean(err >= 32.0) * 100.0)
+        n_levels = len(np.unique(sim_dac))
 
         print(f"\n--- True40 Physical RF Capture Verification ---")
         print(f"  MAE: {mae:.3f} codes (Target: <= 5.0)")
         print(f"  RMS: {rms:.3f} codes")
         print(f"  Hard Error Tail: >=8: {h8:.2f}%, >=16: {h16:.2f}%, >=32: {h32:.2f}%")
-        print(f"  Unique output levels: {len(np.unique(sim_dac))}")
+        print(f"  Unique output levels: {n_levels}")
 
         self.assertLessEqual(mae, 5.0, f"MAE {mae:.3f} must meet target <= 5.0")
         self.assertLessEqual(h32, 1.0, f"Catastrophic jumps >=32 must be <= 1.0%")
+        self.assertGreaterEqual(n_levels, 32, f"Levels {n_levels} must be >= 32")
 
 if __name__ == "__main__":
     unittest.main()
