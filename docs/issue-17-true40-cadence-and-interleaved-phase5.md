@@ -127,22 +127,50 @@ Live analog hardware testing of the soft-saturated True40 build on the ESP32-C5 
 
 ---
 
-## 7. Verification and Flashing Guide
+## 7. The Golden Quality Baseline: Phase5 Quality Mode
 
-To build and flash the verified clean True40 firmware:
+Reflashing the baseline `Phase5 Quality` firmware (`build-live/c5vrx2_realtime_iq.bin`) immediately produced an outstanding, highly stable video image on live hardware:
+> *"wow deze is echt fantastisch goed... kleine kartels, bijna geen static."*
 
-1. **Build Firmware**:
+### Why Phase5 Delivers Superior Quality:
+1. **Full 8-Bit Cartesian Precision ($Q4/I4 \to \text{atan2}$)**:
+   - Phase5 feeds the complete 8-bit packed $Q4/I4$ byte (all 256 states) into the first LUT stage to extract uniform 5-bit phase.
+   - Zero bits are discarded before the demodulator. The phase quantization noise floor remains at the theoretical minimum (~0.5 LSB angular precision).
+2. **Inherent 20 MHz Boxcar Noise Notch ($(1 - z^{-2})$)**:
+   - Differentiating over 50 ns ($x[n] - x[n-2]$) places a transmission zero directly at $f = 20\text{ MHz}$, eliminating the high-frequency triangular noise peak without requiring an external low-pass filter.
+3. **Controlled 50 ns Zero-Order Hold**:
+   - The DAC operates at 40 MHz PARLIO clock, emitting identical byte pairs `[A, A]`.
+   - The resulting 50 ns analog steps produce clean, uniform, and stable horizontal edge pixels ("kleine kartels") with zero sporadic phase tears ($\ge 16$ code jumps are only **3.06%**, vs 15.10% in adjacent25).
+4. **Physical Clock Alignment**:
+   - `CVBS_RATE_HZ = 40000000u` in `main/realtime.c`.
+   - Clean rising-edge PARLIO RX clock sampling (`CONFIG_C5VRX2_PARLIO_RX_NEG_EDGE=n`).
+
+### Definitive Quality Gate for Issue #17:
+Phase5 Quality Mode serves as the uncompromised golden baseline for video fidelity. Any future 40 MS/s architecture (such as 2-bundle Interleaved 50 ns) must match or exceed the low static floor and tight error distribution ($\le 3\%$ jumps $\ge 16$) of Phase5 before being considered production-ready.
+
+---
+
+## 8. Verification and Flashing Guide
+
+To build and flash the verified firmware configurations:
+
+1. **Build Golden Phase5 Firmware (`build-live`)**:
+   ```bash
+   idf.py -B build-live -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.flash40.defaults" build
+   ```
+2. **Build True40 Firmware (`build-true40`)**:
    ```bash
    idf.py -B build-true40 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.true40.defaults" build
    ```
-2. **Flash to ESP32-C5**:
+3. **Flash to ESP32-C5**:
    - Hold `BOOT` button on the XIAO ESP32-C5, tap `RESET`, and release `BOOT` to enter the ROM bootloader.
    - Run:
      ```bash
-     python -m esptool --chip esp32c5 -p COM10 -b 460800 write_flash 0x0 build-true40/bootloader/bootloader.bin 0x10000 build-true40/c5vrx2_realtime_iq.bin 0x8000 build-true40/partition_table/partition-table.bin
+     python -m esptool --chip esp32c5 -p COM10 -b 460800 write_flash 0x2000 build-live/bootloader/bootloader.bin 0x8000 build-live/partition_table/partition-table.bin 0x10000 build-live/c5vrx2_realtime_iq.bin
      ```
-3. **Verify Host Oracles**:
+4. **Verify Host Oracles**:
    ```bash
    python tools/test_true40_oracle.py
    ```
+
 
