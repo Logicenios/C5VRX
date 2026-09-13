@@ -47,6 +47,7 @@ def analyze(path):
                 replay_mode=['linear80','direct','phase5'][mode],
                 tx_error=h[6],rx_error=h[7],result=h[8],rx_elapsed_us=h[10],
                 irq_before=h[9],irq_after=h[11],unique_codes=len(set(v&63 for v in capture)),
+                tx_status=h[15],
                 comparison=compare([v&63 for v in capture],template,h[4]//h[5]) if valid else None,
                 limitation='TX80 observes nominally every second sample; rates/phase must be verified independently')
 

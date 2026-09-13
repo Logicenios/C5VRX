@@ -64,3 +64,22 @@ finished immediately before calling TX transmit. Both occur before TX starts.
 The expected source pattern, capture format, pin order and comparison stay
 unchanged. Only records with completion markers from this boot are current;
 unreached flash slots can still contain earlier captures.
+
+## Direct-first physical result (d77f905)
+
+All six captures completed and the full sweep end marker was present.
+Direct TX40 matches all 4096 six-bit pad samples (64 distinct codes);
+Phase5 TX40 also matches all 4096 (31 distinct codes). Linear80 TX40
+does not align (5 codes). All three TX80 captures fail alignment, including
+the undecorated direct control (10 codes), Phase5 (5), linear80 (8).
+Thus RX40/pad mapping works for the direct and Phase5 controls at TX40;
+the TX80 measurement is not yet validated even without BitScrambler.
+
+IDF 6.0.1 source inspection found two diagnostic defects: TX FIFO-empty ISR
+logs and clears the event, invalidating a zero raw snapshot as evidence of
+no underrun; interrupted/loop TX disable does not invoke BS disable, although
+normal EOF ISR does. Next image masks the FIFO-empty interrupt while retaining
+the raw sticky flag, and explicitly disables the decorator-owned BS after
+stopping TX, before freeing it. No live sample processing changes. Pad header
+word 15 records TX status after RX completion. These changes repair evidence
+collection/teardown; they do not yet establish the cause of the bad patterns.

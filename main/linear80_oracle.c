@@ -7,6 +7,7 @@
 #include "driver/parlio_bitscrambler.h"
 #include "driver/parlio_tx.h"
 #include "driver/parlio_rx.h"
+#include "parlio_priv.h" /* IDF 6.0.1: decorator-owned BS teardown */
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
@@ -52,6 +53,8 @@ static esp_err_t timed_tx_mode(uint8_t *raw, uint32_t rate, uint32_t *rows, cons
     err=parlio_tx_unit_enable(tx);
     if (err!=ESP_OK) goto cleanup;
     enabled=true;
+    /* Keep FIFO-empty evidence sticky: stock ISR logs and clears it. */
+    parlio_ll_enable_interrupt(&PARL_IO,PARLIO_LL_EVENT_TX_FIFO_EMPTY,false);
     const parlio_transmit_config_t tr={
         .idle_value=20, .bitscrambler_program=program,
     };
@@ -82,7 +85,12 @@ static esp_err_t timed_tx_mode(uint8_t *raw, uint32_t rate, uint32_t *rows, cons
     }
 cleanup:
     if (enabled) (void)parlio_tx_unit_disable(tx);
-    if (decorated) (void)parlio_tx_unit_undecorate_bitscrambler(tx);
+    if (decorated) {
+        /* Stock unit disable does not disable BS on interrupted/loop TX;
+         * stock EOF ISR does. Freeing a still-enabled BS leaks routing. */
+        (void)bitscrambler_disable(tx->bs_handle);
+        (void)parlio_tx_unit_undecorate_bitscrambler(tx);
+    }
     (void)parlio_del_tx_unit(tx);
     return err;
 }
@@ -143,6 +151,7 @@ static void pad_capture(uint8_t *raw, uint8_t *capture, unsigned trial)
     err=parlio_tx_unit_enable(tx);
     if (err!=ESP_OK) goto cleanup;
     te=true;
+    parlio_ll_enable_interrupt(&PARL_IO,PARLIO_LL_EVENT_TX_FIFO_EMPTY,false);
     const parlio_receive_config_t receive={.delimiter=delimiter};
     err=parlio_rx_unit_receive(rx,capture,4096,&receive);
     if (err!=ESP_OK) goto cleanup;
@@ -159,6 +168,7 @@ static void pad_capture(uint8_t *raw, uint8_t *capture, unsigned trial)
     err=parlio_rx_soft_delimiter_start_stop(rx,delimiter,true);
     if (err==ESP_OK) err=parlio_rx_unit_wait_all_done(rx,1000);
     h[7]=err;h[10]=esp_timer_get_time()-start;h[11]=PARL_IO.int_raw.val;
+    h[15]=PARL_IO.tx_st0.val;
 cleanup:
     if (re) {
         (void)parlio_rx_soft_delimiter_start_stop(rx,delimiter,false);
@@ -167,7 +177,10 @@ cleanup:
     if (te) (void)parlio_tx_unit_disable(tx);
     if (delimiter) (void)parlio_del_rx_delimiter(delimiter);
     if (rx) (void)parlio_del_rx_unit(rx);
-    if (decorated) (void)parlio_tx_unit_undecorate_bitscrambler(tx);
+    if (decorated) {
+        (void)bitscrambler_disable(tx->bs_handle);
+        (void)parlio_tx_unit_undecorate_bitscrambler(tx);
+    }
     if (tx) (void)parlio_del_tx_unit(tx);
     h[8]=err;h[12]=fnv(capture,4096);h[13]=fnv(raw,INPUT_BYTES);
     const esp_partition_t *p=esp_partition_find_first(ESP_PARTITION_TYPE_DATA,0x42,"diagcap");
