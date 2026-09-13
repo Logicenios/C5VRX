@@ -112,3 +112,21 @@ SDK clock check: IDF v6.0.1 `esp_hw_support/port/esp32c5/rtc_clk.c`,
 Therefore the CPU240 A/B does not automatically raise AHB bandwidth. No bus
 overclock is applied by this experiment. This is configuration evidence,
 not a measured hardware throughput ceiling.
+
+## CPU240 physical A/B result
+
+The saved L80O header confirms configured CPU=240000000, written=32768,
+loopback mismatches=0. Every pad trial and final sweep marker completed.
+Direct TX40 and Phase5 TX40 each match all 4096 six-bit samples without
+FIFO-empty (raw IRQ 0/2). Linear80 TX40 and all TX80 variants fail reference
+alignment with FIFO-empty latched (raw IRQ 1/3), exactly the CPU160 pass/fail
+pattern. Their code counts are 5/9/11/5 for linear40/linear80/direct80/Phase5-80.
+CPU240 does not fix the demonstrated transmission fault. Finite counted-EOF
+transactions again finish with FIFO-empty, so completion remains insufficient.
+
+Raw files: cpu240-trace.bin, cpu240-header.bin, cpu240-0.bin through -5.bin.
+The tested firmware remains RF-off; no live 80 MS/s or analog improvement
+has been demonstrated. Next investigation must target peripheral delivery
+and instruction/output scheduling, using the byte-exact TX40 controls to
+avoid treating FIFO replay as valid video. No additional flash was performed
+when recovering this A/B result; C5 remains in download mode.
