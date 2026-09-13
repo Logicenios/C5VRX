@@ -98,6 +98,16 @@ config C5VRX2_WBFM_SELFTEST_ONCE
         program through its hardware loopback, compare against the C reference,
         and persist input/actual/expected data in diagcap. RF is not started.
 
+config C5VRX2_WBFM_TRUE40
+    bool "Test True 40 MS/s adjacent demodulator (issue 17 candidate)"
+    depends on C5VRX2_MODE_LIVE || C5VRX2_MODE_TX_WBFM_TEST
+    default n
+    help
+        Two-bundle 40 MS/s IQ to true 40 MS/s DAC candidate with an embedded
+        adjacent 5-bit Cartesian/polar discriminator LUT. Emits two distinct
+        adjacent demodulated DAC codes every 50 ns (25 ns DAC cadence),
+        achieving full 40 MS/s DAC resolution without PARLIO overclocking.
+
 config C5VRX2_WBFM_TRAJECTORY
     bool "Test middle-sample trajectory LUT (issue 9 candidate)"
     depends on C5VRX2_MODE_LIVE || C5VRX2_MODE_TX_WBFM_TEST
