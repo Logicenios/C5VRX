@@ -160,3 +160,21 @@ TX80 control fail alignment with FIFO-empty (raw IRQ before/after 1/3).
 Raw captures are burst64-0.bin through burst64-5.bin and burst64-trace.bin.
 The burst change has no demonstrated benefit and must not be promoted to
 the live path as a fix. CPU/burst tuning has not validated the 80-MS/s path.
+
+## Intermediate-rate test
+
+Restore default DMA32, retain CPU240 and sticky fault recording. Pad rates
+are now 40/60 MHz for linear80, direct bytes and Phase5 (slots 0..5), with
+an additional direct-byte 48 MHz trial in slot 6 at flash 0x130000 (4160 bytes).
+Order is 2,6,3,4,5,0,1; slot layout otherwise unchanged. Header word 4 records
+the driver's selected output clock. PLL_F240M integer divisors 6,5,4 give
+40,48,60 MHz; an available divider does not establish reliable throughput.
+The six-bit direct input is already precomputed; no per-sample processing
+occurs during replay. This is not a precomputed live CVBS implementation.
+
+Host comparison models rational clock ratios 6/5 and 3/2 at RX40, searching
+only possible fractional sampling phases plus cyclic source phase. All 4096
+samples are compared after alignment. Tests cover both fractional phases and
+corruption. Faster-than-RX output remains incompletely observed. No analog
+or RF causation claim follows from this test. The finite EOF sweep remains
+at its prior 40/80 MHz settings and should not be confused with pad rates.

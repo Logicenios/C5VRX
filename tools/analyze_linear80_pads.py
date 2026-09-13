@@ -2,6 +2,7 @@
 import argparse
 import json
 import struct
+from math import gcd
 from pathlib import Path
 from analyze_issue11_output import fnv
 from bs_model import simulate
@@ -20,12 +21,31 @@ def compare(capture, template, step):
                 signature_candidates=len(candidates))
 
 
+def compare_rates(capture, template, tx_hz, rx_hz):
+    divisor=gcd(tx_hz,rx_hz)
+    numerator,denominator=tx_hz//divisor,rx_hz//divisor
+    if denominator==1: return compare(capture,template,numerator)
+    n=len(template)
+    candidates=[]
+    # Only clock-ratio-consistent sampling phases; no arbitrary drops/warps.
+    for fraction in range(denominator):
+        offsets=[(j*numerator+fraction)//denominator for j in range(len(capture))]
+        for phase in range(n):
+            if all(capture[j]==template[(phase+offsets[j])%n] for j in range(min(16,len(capture)))):
+                mismatch=sum(v!=template[(phase+offsets[j])%n] for j,v in enumerate(capture))
+                candidates.append((mismatch,phase,fraction))
+    if not candidates: return dict(aligned=False,exact=False,reason='no exact clock-ratio signature')
+    mismatch,phase,fraction=min(candidates)
+    return dict(aligned=True,exact=mismatch==0,mismatch=mismatch,phase=phase,
+                fractional_phase=fraction,ratio=[numerator,denominator])
+
+
 def analyze(path):
     data=path.read_bytes()
     if len(data)<4160: raise ValueError('truncated capture')
     h=struct.unpack('<16I',data[:64])
     if h[:4]!=(0x5044384c,1,64,4096): raise ValueError('not L8DP v1')
-    if h[4] not in (40000000,80000000) or h[5]!=40000000:
+    if h[4] not in (40000000,48000000,60000000,80000000) or h[5]!=40000000:
         raise ValueError('unsupported requested rates')
     capture=data[64:4160]
     if fnv(capture)!=h[12]: raise ValueError('capture hash mismatch')
@@ -48,8 +68,8 @@ def analyze(path):
                 tx_error=h[6],rx_error=h[7],result=h[8],rx_elapsed_us=h[10],
                 irq_before=h[9],irq_after=h[11],unique_codes=len(set(v&63 for v in capture)),
                 tx_status=h[15],
-                comparison=compare([v&63 for v in capture],template,h[4]//h[5]) if valid else None,
-                limitation='TX80 observes nominally every second sample; rates/phase must be verified independently')
+                comparison=compare_rates([v&63 for v in capture],template,h[4],h[5]) if valid else None,
+                limitation='RX40 undersamples faster TX; rates/phase must be verified independently')
 
 
 if __name__=='__main__':

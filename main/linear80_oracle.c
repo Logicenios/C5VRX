@@ -106,13 +106,13 @@ static esp_err_t timed_tx(uint8_t *raw, uint32_t rate, uint32_t *rows, const voi
  * No external clock pins, resistor changes, or CPU sample processing. */
 static void pad_capture(uint8_t *raw, uint8_t *capture, unsigned trial)
 {
-    unsigned fast=trial&1u, mode=trial/2u;
+    unsigned fast=trial&1u, mode=trial==6?1:trial/2u;
     c5vrx2_trace_stage_detail(0x870+trial,ESP_OK,mode,fast,0);
     parlio_tx_unit_handle_t tx=NULL;
     parlio_rx_unit_handle_t rx=NULL;
     parlio_rx_delimiter_handle_t delimiter=NULL;
     bool decorated=false, te=false, re=false;
-    uint32_t h[16]={0x5044384c,1,64,4096,fast?80000000:40000000,40000000};
+    uint32_t h[16]={0x5044384c,1,64,4096,trial==6?48000000:fast?60000000:40000000,40000000};
     h[14]=mode; /* 0 linear80, 1 direct bytes, 2 existing Phase5 */
     h[6]=h[7]=h[8]=UINT32_MAX;
     memset(capture,0xa5,4096);
@@ -127,14 +127,9 @@ static void pad_capture(uint8_t *raw, uint8_t *capture, unsigned trial)
     };
     esp_err_t err=parlio_new_tx_unit(&tc,&tx);
     if (err!=ESP_OK) goto cleanup;
-    /* Internal SRAM only: C5 supports 64-byte INCR16 bursts, whereas the
-     * generic PARLIO driver limits its PSRAM-capable setup to 32 bytes.
-     * This changes DMA delivery, not output clock or CPU sample work. */
-    const gdma_transfer_config_t dma_cfg={.max_data_burst_size=64,.access_ext_mem=false};
-    err=gdma_config_transfer(tx->dma_chan,&dma_cfg);
-    if (err!=ESP_OK) goto cleanup;
-    err=gdma_get_alignment_constraints(tx->dma_chan,&tx->int_mem_align,&tx->ext_mem_align);
-    if (err!=ESP_OK) goto cleanup;
+    /* Record the driver's selected divider result, not just the request.
+     * Restore stock DMA32: tested internal DMA64 did not resolve the fault. */
+    h[4]=tx->out_clk_freq_hz;
     if (mode!=1) {
         err=parlio_tx_unit_decorate_bitscrambler(tx);
         if (err!=ESP_OK) goto cleanup;
@@ -279,8 +274,8 @@ esp_err_t c5vrx2_linear80_oracle_run(void)
     /* Direct controls must precede any BitScrambler allocation this boot.
      * Previous sequential test stopped before direct completion after BS
      * teardown. Order is deliberate to test that state-leak hypothesis. */
-    const unsigned pad_order[]={2,3,4,5,0,1};
-    for (unsigned i=0;i<6;++i) pad_capture(raw,actual,pad_order[i]);
+    const unsigned pad_order[]={2,6,3,4,5,0,1};
+    for (unsigned i=0;i<7;++i) pad_capture(raw,actual,pad_order[i]);
     c5vrx2_wbfm_q4_phase5_reference(raw,INPUT_BYTES,base,INPUT_BYTES/2);
     unsigned a=0;
     for (size_t i=0;i<INPUT_BYTES/2;++i) {
