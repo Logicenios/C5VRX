@@ -140,6 +140,15 @@ config C5VRX2_WBFM_PHASE5_QUALITY
         followed by a two-bundle steady-state pipeline. Disable this to use
         the physically proven Q3/I2 Cartesian fallback.
 
+config C5VRX2_WBFM_PHASE5_100NS
+    bool "Use 100 ns discriminator on uniform five-bit polar WBFM core"
+    depends on C5VRX2_MODE_LIVE || C5VRX2_MODE_TX_WBFM_TEST
+    default n
+    help
+        Doubles the discriminator span from 50 ns to 100 ns across odd/even
+        alternating history registers. Halves high-frequency FM noise and static
+        while maintaining 20 MS/s output and 40 MS/s DAC cadence.
+
 config C5VRX2_PARLIO_RX_NEG_EDGE
     bool "Sample MODEM_DIAG on the opposite PARLIO RX clock edge"
     depends on C5VRX2_MODE_LIVE

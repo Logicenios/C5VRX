@@ -65,3 +65,4 @@ set_property(TARGET ${COMPONENT_LIB} APPEND PROPERTY LINK_DEPENDS
 
 target_bitscrambler_add_src("c5vrx2_wbfm_q4_trajectory_2to1.bsasm")
 target_bitscrambler_add_src("c5vrx2_wbfm_q4_true40_2to1.bsasm")
+target_bitscrambler_add_src("c5vrx2_wbfm_q4_phase5_100ns_2to1.bsasm")

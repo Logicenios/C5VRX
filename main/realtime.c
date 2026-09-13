@@ -28,7 +28,7 @@
 #define MODEM_IQ_RATE_HZ 40000000u
 #if CONFIG_C5VRX2_LINEAR80
 #define CVBS_RATE_HZ     80000000u
-#elif CONFIG_C5VRX2_WBFM_PHASE5_QUALITY || CONFIG_C5VRX2_WBFM_TRUE40
+#elif CONFIG_C5VRX2_WBFM_PHASE5_QUALITY || CONFIG_C5VRX2_WBFM_TRUE40 || CONFIG_C5VRX2_WBFM_PHASE5_100NS
 #define CVBS_RATE_HZ     40000000u
 #else
 #define CVBS_RATE_HZ     20000000u
@@ -223,7 +223,9 @@ static esp_err_t start_tx_ring(void)
     const parlio_transmit_config_t cfg = {
         .idle_value = cal->pedestal_code,
         .bitscrambler_program =
-#if CONFIG_C5VRX2_WBFM_TRUE40
+#if CONFIG_C5VRX2_WBFM_PHASE5_100NS
+            c5vrx2_wbfm_q4_phase5_100ns_program(),
+#elif CONFIG_C5VRX2_WBFM_TRUE40
             c5vrx2_wbfm_q4_true40_program(),
 #elif CONFIG_C5VRX2_LINEAR80
             c5vrx2_wbfm_linear80_program(),
