@@ -14,6 +14,7 @@ idf_component_register(
         esp_driver_bitscrambler
         esp_rom
         esp_mm
+        esp_timer
         freertos
         heap
 )

@@ -127,27 +127,14 @@ static void rf_enable_continuous_modem(void)
     /* Keep CPU ownership of HP SRAM */
     REG32(HP_SRAM_USAGE) = (REG32(HP_SRAM_USAGE) & 0xfffef0ffu) | 0x00010000u;
 
-    /* Un-gate modem clocks and force front-end active */
+    /* Un-gate modem clocks and force front-end active.
+     * This keeps the ADC and MODEM_DIAG bus running continuously at 40 MS/s
+     * without running the internal RF dump SRAM engine (which causes memory bus contention). */
     REG32(SOURCE_CTRL) &= 0xff87ffffu;
     REG32(SOURCE_MUX) = (REG32(SOURCE_MUX) & 0xfffffff8u) | 1u;
     REG32(MODEM_CLOCK) = UINT32_MAX;
     REG32(FE_ENABLE) |= 4u;
     REG32(FE_PATH) &= ~1u;
-
-    /* Configure DUMP_FORMAT mode 0 */
-    uint32_t v = REG32(DUMP_FORMAT);
-    v = (v & 0xff03ffffu) | 0x006c0000u;
-    REG32(DUMP_FORMAT) = v;
-    v = (REG32(DUMP_FORMAT) & 0xfffc0fffu) | 0x0001a000u;
-    REG32(DUMP_FORMAT) = v;
-    v = (REG32(DUMP_FORMAT) & 0xfffff03fu) | 0x00000640u;
-    REG32(DUMP_FORMAT) = v;
-    v = (REG32(DUMP_FORMAT) & 0xffffffc0u) | 0x18u;
-    REG32(DUMP_FORMAT) = v | 0x01000000u;
-
-    /* Set TX_START selector + dump-first */
-    REG32(DUMP_PTR_MODE) = (REG32(DUMP_PTR_MODE) & ~SELECTOR_MASK) | TX_START_SELECT | 0x01e00000u;
-    REG32(DUMP_CTRL) = CTRL_ENABLE | CTRL_DUMP_FIRST | 16384u;
 
     __asm__ __volatile__("fence iorw, iorw" ::: "memory");
 }
@@ -255,7 +242,13 @@ esp_err_t rf_start(void)
     phy_track_pll_deinit();
 #endif
 
-    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / sta_disconnected_pm=0 / pll_track=disabled",
+    /* Select BW20 analog filter bandwidth (phy_wifi_fbw_sel(0))
+     * while keeping the 40 MS/s clocking and GDMA pipeline of BW40.
+     * Proven to significantly stabilize the 50 ns ZOH kartels. */
+    extern void phy_wifi_fbw_sel(uint32_t val);
+    phy_wifi_fbw_sel(0);
+
+    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / fbw_sel(0) / sta_disconnected_pm=0 / pll_track=disabled",
                    RF_CHANNEL_NUMBER);
     return ESP_OK;
 }

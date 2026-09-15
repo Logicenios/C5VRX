@@ -41,6 +41,7 @@
 #include "esp_cache.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -235,6 +236,12 @@ esp_err_t video_start(void)
         " CPU:     done (no periodic tasks)\n"
         "=======================================================\n",
         DAC_IDLE_CODE, 2u);
+
+    /* Allow background tasks/timers to run for 2 seconds, then dump all active timers! */
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_EARLY_LOGW(TAG, "\n--- ACTIVE ESP_TIMERS (after 2s) ---");
+    esp_timer_dump(stdout);
+    ESP_EARLY_LOGW(TAG, "------------------------------------\n");
 
     /* Mute all logging. After this point the CPU has nothing to do.
      * USB, logging, and any periodic IDF tasks must not touch the DMA ring. */
