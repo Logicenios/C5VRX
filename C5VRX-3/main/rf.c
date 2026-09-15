@@ -24,6 +24,18 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "soc/gpio_sig_map.h"
+#include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
+#include "heap_memory_layout.h"
+
+/* Reserve the RF dump memory bank (0x4082ffc0..0x40850040) from the heap.
+ * The modem dump engine continuously streams 40 MS/s IQ words into 0x40830000.
+ * Reserving this region ensures FreeRTOS stacks, Wi-Fi buffers, and GDMA descriptors
+ * are never allocated in this address space. */
+#define PRE_GUARD_ADDR  0x4082ffc0u
+#define POST_GUARD_ADDR 0x40850000u
+#define POST_GUARD_END  0x40850040u
+SOC_RESERVE_MEMORY_REGION(PRE_GUARD_ADDR, POST_GUARD_END, c5vrx3_rf_dump_ram);
 
 /* Fixed receiver configuration -- not configurable at runtime. */
 #define RF_CHANNEL_NUMBER   173u
@@ -127,14 +139,41 @@ static void rf_enable_continuous_modem(void)
     /* Keep CPU ownership of HP SRAM */
     REG32(HP_SRAM_USAGE) = (REG32(HP_SRAM_USAGE) & 0xfffef0ffu) | 0x00010000u;
 
-    /* Un-gate modem clocks and force front-end active.
-     * This keeps the ADC and MODEM_DIAG bus running continuously at 40 MS/s
-     * without running the internal RF dump SRAM engine (which causes memory bus contention). */
+    /* Un-gate modem clocks and force front-end active. */
     REG32(SOURCE_CTRL) &= 0xff87ffffu;
     REG32(SOURCE_MUX) = (REG32(SOURCE_MUX) & 0xfffffff8u) | 1u;
     REG32(MODEM_CLOCK) = UINT32_MAX;
     REG32(FE_ENABLE) |= 4u;
     REG32(FE_PATH) &= ~1u;
+
+    /* Configure DUMP_FORMAT mode 0 (proven golden RF dump configuration) */
+    uint32_t v = REG32(DUMP_FORMAT);
+    v = (v & 0xff03ffffu) | 0x006c0000u;
+    REG32(DUMP_FORMAT) = v;
+    v = (REG32(DUMP_FORMAT) & 0xfffc0fffu) | 0x0001a000u;
+    REG32(DUMP_FORMAT) = v;
+    v = (REG32(DUMP_FORMAT) & 0xfffff03fu) | 0x00000640u;
+    REG32(DUMP_FORMAT) = v;
+    v = (REG32(DUMP_FORMAT) & 0xffffffc0u) | 0x18u;
+    REG32(DUMP_FORMAT) = v | 0x01000000u;
+
+    /* Set TX_START selector in pre-trigger circular mode (TX_START_SELECT = 0x00060000).
+     * Because MAC TX queues are quiescent, TX_START never fires. With CTRL_DUMP_FIRST,
+     * the hardware continuously streams pre-trigger samples onto the MODEM_DIAG bus.
+     * Crucial: 0x01e00000 software trigger bits are masked out. */
+    REG32(DUMP_PTR_MODE) = (REG32(DUMP_PTR_MODE) & ~SELECTOR_MASK) | TX_START_SELECT;
+
+    /* Control: CTRL_DUMP_FIRST, length 16384, ENABLE */
+    uint32_t ctrl = REG32(DUMP_CTRL);
+    ctrl &= ~(CTRL_ENABLE | 0x00080000u | 0x00040000u); /* Clear ENABLE, START, DONE */
+    ctrl |= CTRL_DUMP_FIRST;
+    ctrl = (ctrl & ~0x0001ffffu) | 16384u;
+    REG32(DUMP_CTRL) = ctrl;
+
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+
+    /* Arm dump engine with ENABLE only */
+    REG32(DUMP_CTRL) = ctrl | CTRL_ENABLE;
 
     __asm__ __volatile__("fence iorw, iorw" ::: "memory");
 }
@@ -242,13 +281,7 @@ esp_err_t rf_start(void)
     phy_track_pll_deinit();
 #endif
 
-    /* Select BW20 analog filter bandwidth (phy_wifi_fbw_sel(0))
-     * while keeping the 40 MS/s clocking and GDMA pipeline of BW40.
-     * Proven to significantly stabilize the 50 ns ZOH kartels. */
-    extern void phy_wifi_fbw_sel(uint32_t val);
-    phy_wifi_fbw_sel(0);
-
-    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / fbw_sel(0) / sta_disconnected_pm=0 / pll_track=disabled",
+    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / sta_disconnected_pm=0 / pll_track=disabled",
                    RF_CHANNEL_NUMBER);
     return ESP_OK;
 }
