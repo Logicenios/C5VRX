@@ -248,7 +248,12 @@ esp_err_t rf_start(void)
     uint32_t r_after = REG32(RX_FILTER_REG);
     uint32_t mode_after = (r_after >> RX_FILTER_SHIFT) & 0xFu;
 
-    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / filter_mode: native=%u -> injected=%u",
+    /* Deinitialize periodic 1-second PLL tracking timer -- primary suspect
+     * for the periodic 1-1.5s black bar / vertical sync glitch. */
+    extern void phy_track_pll_deinit(void);
+    phy_track_pll_deinit();
+
+    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / filter_mode: native=%u -> injected=%u / pll_track killed",
                    RF_CHANNEL_NUMBER, (unsigned)mode_native, (unsigned)mode_after);
     return ESP_OK;
 }
