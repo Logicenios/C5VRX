@@ -225,10 +225,6 @@ esp_err_t video_start(void)
 
     if ((err = start_tx()) != ESP_OK) return err;
 
-    /* Mute all logging. After this point the CPU has nothing to do.
-     * USB, logging, and any periodic IDF tasks must not touch the DMA ring. */
-    esp_log_level_set("*", ESP_LOG_NONE);
-
     /* Print startup stamp before muting (visible on serial monitor at boot). */
     ESP_EARLY_LOGW(TAG,
         "\n=======================================================\n"
@@ -239,6 +235,10 @@ esp_err_t video_start(void)
         " CPU:     done (no periodic tasks)\n"
         "=======================================================\n",
         DAC_IDLE_CODE, 2u);
+
+    /* Mute all logging. After this point the CPU has nothing to do.
+     * USB, logging, and any periodic IDF tasks must not touch the DMA ring. */
+    esp_log_level_set("*", ESP_LOG_NONE);
 
     return ESP_OK;
 }

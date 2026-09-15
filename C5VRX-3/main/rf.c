@@ -176,8 +176,12 @@ esp_err_t rf_start(void)
     err = esp_event_loop_create_default();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
 
-    /* Initialize Wi-Fi driver with RAM-only storage -- no NVS needed. */
+    /* Initialize Wi-Fi driver with RAM-only storage -- no NVS needed.
+     * Crucial: sta_disconnected_pm MUST be false. By default, ESP-IDF enables
+     * power management for disconnected stations, periodically shutting down
+     * RF, PHY, and BB when idle, which causes periodic loss of MODEM_DIAG clocking. */
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    cfg.sta_disconnected_pm = false;
     if ((err = esp_wifi_init(&cfg)) != ESP_OK) return err;
     if ((err = esp_wifi_set_storage(WIFI_STORAGE_RAM)) != ESP_OK) return err;
     if ((err = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK) return err;
@@ -219,8 +223,11 @@ esp_err_t rf_start(void)
     if ((err = esp_wifi_set_channel(RF_CHANNEL_NUMBER, WIFI_SECOND_CHAN_NONE)) != ESP_OK)
         return err;
 
-    /* Promiscuous mode keeps the RX path and MODEM_DIAG bus active. */
+    /* Promiscuous mode keeps the RX path and MODEM_DIAG bus active.
+     * Zero filter mask prevents LMAC from buffering packets or firing software interrupts. */
     if ((err = esp_wifi_set_promiscuous(true)) != ESP_OK) return err;
+    wifi_promiscuous_filter_t filter = { .filter_mask = 0 };
+    (void)esp_wifi_set_promiscuous_filter(&filter);
 
     /* Hardware-disable all 5 LMAC TX queues. Receive-only from here on. */
     if ((err = lock_rx_only()) != ESP_OK) return err;
@@ -240,16 +247,15 @@ esp_err_t rf_start(void)
     /* Un-gate modem ADC clock and force continuous sampling. */
     rf_enable_continuous_modem();
 
-    /* Select BW20 analog filter bandwidth (phy_wifi_fbw_sel(0))
-     * while keeping the 40 MS/s clocking and GDMA pipeline of BW40! */
-    extern void phy_wifi_fbw_sel(uint32_t val);
-    phy_wifi_fbw_sel(0);
+    /* Disable PHY PLL / RXCAL tracking timer if compiled in, so it never
+     * recalibrates RF / RX hardware during continuous analog video reception.
+     * With CONFIG_ESP_PHY_DISABLE_PLL_TRACK=y, the tracking timer is omitted entirely. */
+#if !CONFIG_ESP_PHY_DISABLE_PLL_TRACK
+    extern void phy_track_pll_deinit(void);
+    phy_track_pll_deinit();
+#endif
 
-    /* Enable hardware channel filter (filt_en=true, merge_en=false) */
-    extern void phy_chan_filt_set(bool filt_en, bool merge_en);
-    phy_chan_filt_set(true, false);
-
-    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / fbw_sel(0) + chan_filt(1,0)",
+    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / sta_disconnected_pm=0 / pll_track=disabled",
                    RF_CHANNEL_NUMBER);
     return ESP_OK;
 }
