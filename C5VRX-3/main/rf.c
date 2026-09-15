@@ -22,6 +22,7 @@
 #include "esp_netif.h"
 #include "esp_rom_gpio.h"
 #include "esp_wifi.h"
+#include "nvs_flash.h"
 #include "soc/gpio_sig_map.h"
 
 /* Fixed receiver configuration -- not configurable at runtime. */
@@ -99,11 +100,26 @@ static esp_err_t route_modem_iq(void)
     return ESP_OK;
 }
 
+static esp_err_t init_nvs(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        err = nvs_flash_erase();
+        if (err == ESP_OK) err = nvs_flash_init();
+    }
+    return err;
+}
+
 esp_err_t rf_start(void)
 {
+    /* NVS is required by ESP-IDF Wi-Fi/PHY initialization. */
+    esp_err_t err = init_nvs();
+    if (err != ESP_OK) return err;
+
     /* esp_netif_init + default event loop are required by esp_wifi_init().
      * Tolerant of ESP_ERR_INVALID_STATE (already initialized by IDF). */
-    esp_err_t err = esp_netif_init();
+    err = esp_netif_init();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
     err = esp_event_loop_create_default();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
