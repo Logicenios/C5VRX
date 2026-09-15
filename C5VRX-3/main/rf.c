@@ -37,6 +37,23 @@
 #define MAC_TXQ_ENABLE   0x80000000u
 #define MAC_TXQ_COUNT    5u
 
+/* Continuous modem front-end un-gating registers.
+ * Required to keep the C5 ADC / modem continuously clocking 80 MS/s IQ
+ * into MODEM_DIAG when no 802.11 Wi-Fi packets are present. */
+#define DUMP_CTRL       0x600a9004u
+#define DUMP_PTR_MODE   0x600a9008u
+#define DUMP_FORMAT     0x600a9018u
+#define FE_PATH         0x600a20b4u
+#define FE_ENABLE       0x600a0800u
+#define SOURCE_CTRL     0x600a08ccu
+#define SOURCE_MUX      0x600a70b8u
+#define MODEM_CLOCK     0x600a9c04u
+#define CTRL_ENABLE     0x80000000u
+#define CTRL_DUMP_FIRST 0x00020000u
+#define TX_START_SELECT 0x00060000u
+#define SELECTOR_MASK   0x01fe0000u
+#define HP_SRAM_USAGE   0x60095004u
+
 /* MODEM_DIAG lane mapping: Q[9:6] on DIAG[6:9], I[9:6] on DIAG[16:19].
  * GPIO mapping correlated against physical ESP32-C5 hardware captures.
  * These GPIOs connect to the PARLIO RX data_gpio_nums[] array (same order). */
@@ -98,6 +115,36 @@ static esp_err_t route_modem_iq(void)
     }
     __asm__ __volatile__("fence iorw, iorw" ::: "memory");
     return ESP_OK;
+}
+
+static void rf_enable_continuous_modem(void)
+{
+    /* Keep CPU ownership of HP SRAM */
+    REG32(HP_SRAM_USAGE) = (REG32(HP_SRAM_USAGE) & 0xfffef0ffu) | 0x00010000u;
+
+    /* Un-gate modem clocks and force front-end active */
+    REG32(SOURCE_CTRL) &= 0xff87ffffu;
+    REG32(SOURCE_MUX) = (REG32(SOURCE_MUX) & 0xfffffff8u) | 1u;
+    REG32(MODEM_CLOCK) = UINT32_MAX;
+    REG32(FE_ENABLE) |= 4u;
+    REG32(FE_PATH) &= ~1u;
+
+    /* Configure DUMP_FORMAT mode 0 */
+    uint32_t v = REG32(DUMP_FORMAT);
+    v = (v & 0xff03ffffu) | 0x006c0000u;
+    REG32(DUMP_FORMAT) = v;
+    v = (REG32(DUMP_FORMAT) & 0xfffc0fffu) | 0x0001a000u;
+    REG32(DUMP_FORMAT) = v;
+    v = (REG32(DUMP_FORMAT) & 0xfffff03fu) | 0x00000640u;
+    REG32(DUMP_FORMAT) = v;
+    v = (REG32(DUMP_FORMAT) & 0xffffffc0u) | 0x18u;
+    REG32(DUMP_FORMAT) = v | 0x01000000u;
+
+    /* Set TX_START selector + dump-first */
+    REG32(DUMP_PTR_MODE) = (REG32(DUMP_PTR_MODE) & ~SELECTOR_MASK) | TX_START_SELECT | 0x01e00000u;
+    REG32(DUMP_CTRL) = CTRL_ENABLE | CTRL_DUMP_FIRST | 16384u;
+
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
 }
 
 static esp_err_t init_nvs(void)
@@ -184,6 +231,9 @@ esp_err_t rf_start(void)
 
     /* Route MODEM_DIAG to PARLIO RX GPIO pins. */
     if ((err = route_modem_iq()) != ESP_OK) return err;
+
+    /* Un-gate modem ADC clock and force continuous sampling. */
+    rf_enable_continuous_modem();
 
     ESP_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / RX-only / MODEM_DIAG active",
              RF_CHANNEL_NUMBER);
