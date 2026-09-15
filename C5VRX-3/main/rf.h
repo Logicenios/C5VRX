@@ -17,3 +17,8 @@
  * Returns an error if channel verification fails.
  */
 esp_err_t rf_start(void);
+
+/**
+ * Dump all vendor timers intercepted during Wi-Fi operation.
+ */
+void rf_dump_tracked_timers(void);

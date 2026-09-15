@@ -27,6 +27,8 @@
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
 #include "heap_memory_layout.h"
+#include "esp_rom_sys.h"
+#include "esp_private/wifi_os_adapter.h"
 
 /* Reserve the RF dump memory bank (0x4082ffc0..0x40850040) from the heap.
  * The modem dump engine continuously streams 40 MS/s IQ words into 0x40830000.
@@ -178,6 +180,103 @@ static void rf_enable_continuous_modem(void)
     __asm__ __volatile__("fence iorw, iorw" ::: "memory");
 }
 
+/* Track all timers created/armed by the closed-source Wi-Fi stack */
+typedef struct {
+    void *timer;
+    void *fn;
+    void *arg;
+    uint32_t period_ms;
+    bool repeat;
+    bool armed;
+    uint32_t arm_count;
+} tracked_timer_t;
+
+#define MAX_TRACKED_TIMERS 32
+static tracked_timer_t s_tracked_timers[MAX_TRACKED_TIMERS];
+static size_t s_num_tracked_timers = 0;
+static wifi_osi_funcs_t s_custom_osi_funcs;
+
+static tracked_timer_t *find_or_create_timer_slot(void *timer)
+{
+    for (size_t i = 0; i < s_num_tracked_timers; ++i) {
+        if (s_tracked_timers[i].timer == timer) return &s_tracked_timers[i];
+    }
+    if (s_num_tracked_timers < MAX_TRACKED_TIMERS) {
+        tracked_timer_t *slot = &s_tracked_timers[s_num_tracked_timers++];
+        memset(slot, 0, sizeof(*slot));
+        slot->timer = timer;
+        return slot;
+    }
+    return NULL;
+}
+
+static void tracked_timer_setfn(void *ptimer, void *pfunction, void *parg)
+{
+    tracked_timer_t *slot = find_or_create_timer_slot(ptimer);
+    if (slot) {
+        slot->fn = pfunction;
+        slot->arg = parg;
+    }
+    g_wifi_osi_funcs._timer_setfn(ptimer, pfunction, parg);
+}
+
+static void tracked_timer_arm(void *timer, uint32_t tmout, bool repeat)
+{
+    tracked_timer_t *slot = find_or_create_timer_slot(timer);
+    if (slot) {
+        slot->period_ms = tmout;
+        slot->repeat = repeat;
+        slot->armed = true;
+        slot->arm_count++;
+    }
+    g_wifi_osi_funcs._timer_arm(timer, tmout, repeat);
+}
+
+static void tracked_timer_arm_us(void *ptimer, uint32_t us, bool repeat)
+{
+    tracked_timer_t *slot = find_or_create_timer_slot(ptimer);
+    if (slot) {
+        slot->period_ms = (us + 500u) / 1000u;
+        slot->repeat = repeat;
+        slot->armed = true;
+        slot->arm_count++;
+    }
+    g_wifi_osi_funcs._timer_arm_us(ptimer, us, repeat);
+}
+
+static void tracked_timer_disarm(void *timer)
+{
+    tracked_timer_t *slot = find_or_create_timer_slot(timer);
+    if (slot) {
+        slot->armed = false;
+    }
+    g_wifi_osi_funcs._timer_disarm(timer);
+}
+
+static void tracked_timer_done(void *ptimer)
+{
+    tracked_timer_t *slot = find_or_create_timer_slot(ptimer);
+    if (slot) {
+        slot->armed = false;
+    }
+    g_wifi_osi_funcs._timer_done(ptimer);
+}
+
+void rf_dump_tracked_timers(void)
+{
+    esp_rom_printf("\n=== WI-FI VENDOR TIMERS INVENTORY (%u tracked) ===\n", (unsigned)s_num_tracked_timers);
+    for (size_t i = 0; i < s_num_tracked_timers; ++i) {
+        esp_rom_printf(" [%u] fn=0x%08lx period=%4lu ms repeat=%d armed=%d arms=%lu\n",
+                       (unsigned)i,
+                       (unsigned long)(uintptr_t)s_tracked_timers[i].fn,
+                       (unsigned long)s_tracked_timers[i].period_ms,
+                       s_tracked_timers[i].repeat ? 1 : 0,
+                       s_tracked_timers[i].armed ? 1 : 0,
+                       (unsigned long)s_tracked_timers[i].arm_count);
+    }
+    esp_rom_printf("==================================================\n\n");
+}
+
 static esp_err_t init_nvs(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -202,16 +301,28 @@ esp_err_t rf_start(void)
     err = esp_event_loop_create_default();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
 
+    /* Install tracked OSI functions to inventory all Wi-Fi vendor timers */
+    s_custom_osi_funcs = g_wifi_osi_funcs;
+    s_custom_osi_funcs._timer_setfn = tracked_timer_setfn;
+    s_custom_osi_funcs._timer_arm = tracked_timer_arm;
+    s_custom_osi_funcs._timer_arm_us = tracked_timer_arm_us;
+    s_custom_osi_funcs._timer_disarm = tracked_timer_disarm;
+    s_custom_osi_funcs._timer_done = tracked_timer_done;
+
     /* Initialize Wi-Fi driver with RAM-only storage -- no NVS needed.
      * Crucial: sta_disconnected_pm MUST be false. By default, ESP-IDF enables
      * power management for disconnected stations, periodically shutting down
      * RF, PHY, and BB when idle, which causes periodic loss of MODEM_DIAG clocking. */
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    cfg.osi_funcs = &s_custom_osi_funcs;
     cfg.sta_disconnected_pm = false;
     if ((err = esp_wifi_init(&cfg)) != ESP_OK) return err;
     if ((err = esp_wifi_set_storage(WIFI_STORAGE_RAM)) != ESP_OK) return err;
     if ((err = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK) return err;
     if ((err = esp_wifi_start()) != ESP_OK) return err;
+
+    /* Dump initial Wi-Fi timers armed during startup */
+    rf_dump_tracked_timers();
 
     /* Force 5 GHz band only. */
 #if CONFIG_SOC_WIFI_SUPPORT_5G

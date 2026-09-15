@@ -28,6 +28,7 @@
  */
 
 #include "video.h"
+#include "rf.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -211,6 +212,7 @@ static esp_err_t start_tx(void)
 static void hw_diag_task(void *arg)
 {
     (void)arg;
+    int diag_tick = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(100));
         s_hw_counters.checks++;
@@ -232,6 +234,18 @@ static void hw_diag_task(void *arg)
         if (BITSCRAMBLER.state[1].eof_overload) {
             s_hw_counters.bs_eof_overload_count++;
             BITSCRAMBLER.state[1].eof_trace_clr = 1;
+        }
+
+        if (++diag_tick >= 30) { /* Every 3.0s */
+            diag_tick = 0;
+            esp_rom_printf("[DIAG 3s] RX_ovf=%lu TX_rempty=%lu TX_eof=%lu BS_empty=%lu BS_ovl=%lu (polls=%lu)\n",
+                           (unsigned long)s_hw_counters.parl_rx_wovf_count,
+                           (unsigned long)s_hw_counters.parl_tx_rempty_count,
+                           (unsigned long)s_hw_counters.parl_tx_eof_count,
+                           (unsigned long)s_hw_counters.bs_fifo_empty_count,
+                           (unsigned long)s_hw_counters.bs_eof_overload_count,
+                           (unsigned long)s_hw_counters.checks);
+            rf_dump_tracked_timers();
         }
     }
 }
