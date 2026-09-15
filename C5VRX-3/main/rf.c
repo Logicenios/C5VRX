@@ -240,20 +240,16 @@ esp_err_t rf_start(void)
     /* Un-gate modem ADC clock and force continuous sampling. */
     rf_enable_continuous_modem();
 
-    /* Read native BW40 filter mode, then inject mode 4 (narrow filter) */
-    uint32_t r = REG32(RX_FILTER_REG);
-    uint32_t mode_native = (r >> RX_FILTER_SHIFT) & 0xFu;
-    REG32(RX_FILTER_REG) = (r & ~RX_FILTER_MASK) | (4u << RX_FILTER_SHIFT);
-    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
-    uint32_t r_after = REG32(RX_FILTER_REG);
-    uint32_t mode_after = (r_after >> RX_FILTER_SHIFT) & 0xFu;
+    /* Select BW20 analog filter bandwidth (phy_wifi_fbw_sel(0))
+     * while keeping the 40 MS/s clocking and GDMA pipeline of BW40! */
+    extern void phy_wifi_fbw_sel(uint32_t val);
+    phy_wifi_fbw_sel(0);
 
-    /* Deinitialize periodic 1-second PLL tracking timer -- primary suspect
-     * for the periodic 1-1.5s black bar / vertical sync glitch. */
-    extern void phy_track_pll_deinit(void);
-    phy_track_pll_deinit();
+    /* Enable hardware channel filter (filt_en=true, merge_en=false) */
+    extern void phy_chan_filt_set(bool filt_en, bool merge_en);
+    phy_chan_filt_set(true, false);
 
-    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / filter_mode: native=%u -> injected=%u / pll_track killed",
-                   RF_CHANNEL_NUMBER, (unsigned)mode_native, (unsigned)mode_after);
+    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / fbw_sel(0) + chan_filt(1,0)",
+                   RF_CHANNEL_NUMBER);
     return ESP_OK;
 }
