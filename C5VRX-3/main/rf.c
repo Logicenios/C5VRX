@@ -37,6 +37,11 @@
 #define MAC_TXQ_ENABLE   0x80000000u
 #define MAC_TXQ_COUNT    5u
 
+/* RX digital filter register (0x600A0430[21:18]) */
+#define RX_FILTER_REG   0x600A0430u
+#define RX_FILTER_SHIFT 18u
+#define RX_FILTER_MASK  (0xFu << RX_FILTER_SHIFT)
+
 /* Continuous modem front-end un-gating registers.
  * Required to keep the C5 ADC / modem continuously clocking 80 MS/s IQ
  * into MODEM_DIAG when no 802.11 Wi-Fi packets are present. */
@@ -235,7 +240,15 @@ esp_err_t rf_start(void)
     /* Un-gate modem ADC clock and force continuous sampling. */
     rf_enable_continuous_modem();
 
-    ESP_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / RX-only / MODEM_DIAG active",
-             RF_CHANNEL_NUMBER);
+    /* Read native BW40 filter mode, then inject mode 4 (narrow filter) */
+    uint32_t r = REG32(RX_FILTER_REG);
+    uint32_t mode_native = (r >> RX_FILTER_SHIFT) & 0xFu;
+    REG32(RX_FILTER_REG) = (r & ~RX_FILTER_MASK) | (4u << RX_FILTER_SHIFT);
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+    uint32_t r_after = REG32(RX_FILTER_REG);
+    uint32_t mode_after = (r_after >> RX_FILTER_SHIFT) & 0xFu;
+
+    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / filter_mode: native=%u -> injected=%u",
+                   RF_CHANNEL_NUMBER, (unsigned)mode_native, (unsigned)mode_after);
     return ESP_OK;
 }
