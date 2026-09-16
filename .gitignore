@@ -8,3 +8,5 @@ sdkconfig.old
 *.map
 __pycache__/
 *.pyc
+*.bsbin
+scratch/
