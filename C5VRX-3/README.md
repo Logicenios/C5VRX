@@ -79,9 +79,12 @@ C5VRX-3 introduces `patch_descriptors_clear_eof()` in `main/video.c`. After star
 ## RF Front-End Characterization & Empirical Tuning
 
 To ensure a pristine, stable analog video feed across the full dynamic range:
-- **Forced Sweet-Spot Gain (Mode F, Index 32)**:
-  - Live testing proved that stock Wi-Fi AGC struggles with continuous analog FM: because there are no 802.11 packet preambles, the AGC watchdog stays at maximum gain or hunts erratically. With 200 mW at close range (10–20 cm), the 4-bit ADC was severely overdriven/clipped ($I, Q = \pm 7$).
-  - Manually sweeping gain from 0 to 64 on live hardware confirmed that **Forced Gain Index 32 (`reg=0x20c053e2`)** is the optimal operating sweet spot: zero near-field clipping, no AGC hunting, and high sensitivity across room distances.
+- **Dual-Loop Self-Calibrating Adaptive Gain Controller (FM Phase Optimizer)**:
+  - Eliminates the erratic hunting and near-field ADC saturation of stock Wi-Fi AGC, as well as the "Noise Trap" of blind clipping AGC.
+  - Computes real-time integer FM phase coherence $Q_{\text{phase}} = \text{count}(P \ge 8 \land \text{Dot} > 0 \land |\text{Cross}| \le \text{Dot}) \times 100 / 255$ at 20 Hz without floating-point math.
+  - Implements a 3-state controller (`SEARCH` $\to$ `LEARN` $\to$ `TRACK`) with a Fast Overload Rem ($\Delta G = -4 / -6$ only when $N_{\text{clip}} \ge 4$ and $P_{\text{median}} > 18$) and zero-register-write deadband locking in `TRACK` ($P_{\text{median}} \in [18, 32]$).
+  - Proven live dynamic range: automatically tracks from $G = 24$ (near-field 200 mW desk) to $G = 62$ (deep fade behind walls) with $99\%-100\%$ carrier phase coherence and zero blackouts.
+  - Full technical details in [`docs/dual-loop-adaptive-gain-optimizer.md`](../docs/dual-loop-adaptive-gain-optimizer.md).
 - **Full BW40 Analog Bandwidth (`phy_wifi_fbw_sel(1)`)**:
   - Narrow BW20 filtering (`fbw_sel(0)`) rolled off the second-order FM sidebands of the 3.58 MHz NTSC subcarrier ($\approx 11.16\text{ MHz}$), causing phase distortion and chroma rainbow overlay.
   - Setting `phy_wifi_fbw_sel(1)` opens the full 20 MHz analog filter, delivering razor-sharp video and significantly reducing the chroma rainbow overlay.
@@ -146,9 +149,10 @@ python tools/flash.py COM10
 ```bash
 python tools/monitor.py COM10
 ```
-- `+` / `k`: Increase forced RF gain (steps of 2)
-- `-` / `j`: Decrease forced RF gain (steps of 2)
-- `a`: Restore automatic AGC
-- `f`: Toggle forced gain
+- `a`: Activate Adaptive Gain Controller (`ACTIVE` mode)
+- `s`: Switch to `SHADOW` mode (dry-run recommendations, physical gain frozen)
+- `m`: Switch to `MANUAL` mode
+- `+` / `k`: Manual gain +2
+- `-` / `j`: Manual gain -2
 - `e`: Toggle RX sample edge (POS / NEG)
-- `Space`: Print live GDMA ring offsets, descriptor addresses, and hardware FIFO counters.
+- `Space`: Print live GDMA ring offsets, descriptor addresses, AGC metrics, and hardware FIFO counters.

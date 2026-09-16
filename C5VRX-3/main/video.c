@@ -266,8 +266,228 @@ static int patch_descriptors_clear_eof(int dma_ch, bool is_rx)
     return count;
 }
 
-static uint8_t s_forced_gain = 32u;
-static bool s_gain_forced = true;
+/* =========================================================================
+ * Analog Video Self-Calibrating Adaptive Gain Controller (Dual-Loop)
+ *
+ * Direct Q4/I4 vector power: P[n] = I[n]^2 + Q[n]^2
+ * Target: P_median in [20, 30] (effective radius ~4.5 - 5.5, phase sigma ~3.3 deg)
+ *
+ * Fast Overload Rem: Instant drop (-4 or -6) when n_clip >= 4 AND P_median > 18.
+ * FM Phase Coherence: Q_phase = count(P >= 8 && dot > 0 && |cross| <= dot) * 100 / 255.
+ *
+ * 3-State Machine:
+ *   - SEARCH: No carrier / lost carrier (q_phase < 40%, P_med < 14). Default G=32.
+ *   - LEARN:  Probing & centering toward P_median in [20, 30].
+ *   - TRACK:  Carrier locked! Hysteresis deadband [18, 32]. ZERO register writes.
+ *
+ * Modes:
+ *   - ANALOG_AGC_SHADOW: Default! Realtime state machine & Q_phase active, logs
+ *                        recommendations, but PHYSICAL GAIN IS FROZEN (no blackouts).
+ *   - ANALOG_AGC_ACTIVE: Actively updates physical RF gain registers.
+ *   - ANALOG_AGC_MANUAL: Fixed gain controlled by user (+ / - keys).
+ * ========================================================================= */
+
+typedef enum {
+    ANALOG_AGC_SHADOW = 0,
+    ANALOG_AGC_ACTIVE = 1,
+    ANALOG_AGC_MANUAL = 2,
+} analog_agc_mode_t;
+
+typedef enum {
+    AGC_STATE_SEARCH = 0,
+    AGC_STATE_LEARN  = 1,
+    AGC_STATE_TRACK  = 2,
+} agc_state_t;
+
+static volatile analog_agc_mode_t s_agc_mode = ANALOG_AGC_ACTIVE;
+static volatile agc_state_t s_agc_state = AGC_STATE_SEARCH;
+static volatile uint8_t s_current_gain = 32u;   /* Physical RF gain applied */
+static volatile uint8_t s_shadow_gain = 32u;    /* Controller recommended gain */
+static volatile int s_last_p_median = 25;
+static volatile int s_last_q_phase = 0;
+static volatile int s_last_n_clip = 0;
+static volatile int s_last_n_origin = 0;
+
+static void analog_agc_task(void *arg)
+{
+    (void)arg;
+    int settle_ticks = 0;
+    int drift_counter = 0;
+    int lost_counter = 0;
+    int telemetry_ticks = 0;
+    uint8_t target_gain = 32u;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(50)); /* 20 Hz evaluation (every 50 ms) */
+
+        if (s_agc_mode == ANALOG_AGC_MANUAL) {
+            target_gain = s_current_gain;
+            s_shadow_gain = s_current_gain;
+            continue;
+        }
+
+        /* 1. Invalidate 256 bytes in CPU L1 cache so we read fresh GDMA samples from SRAM */
+        (void)esp_cache_msync((void *)s_raw_ring, 256, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+
+        uint8_t sample_buf[256];
+        for (int i = 0; i < 256; i++) {
+            sample_buf[i] = s_raw_ring[i];
+        }
+
+        int n_clip = 0;
+        int n_origin = 0;
+        int n_coherent = 0;
+        uint16_t hist[129] = {0};
+        int8_t prev_i = 0, prev_q = 0;
+
+        for (int i = 0; i < 256; i++) {
+            uint8_t byte = sample_buf[i];
+            int8_t q = (int8_t)((byte & 0x0fu) << 4) >> 4;
+            int8_t in_val = (int8_t)(byte & 0xf0u) >> 4;
+
+            if (in_val == -8 || in_val == 7 || q == -8 || q == 7) {
+                n_clip++;
+            }
+            int p = (int)in_val * in_val + (int)q * q;
+            if (p <= 4) {
+                n_origin++;
+            }
+            if (p > 128) p = 128;
+            hist[p]++;
+
+            if (i > 0) {
+                int dot = (int)in_val * (int)prev_i + (int)q * (int)prev_q;
+                int cross = (int)q * (int)prev_i - (int)in_val * (int)prev_q;
+                if (cross < 0) cross = -cross;
+
+                /* Coherent FM sample: carrier power >= 8, phase delta within +-45 deg */
+                if (p >= 8 && dot > 0 && cross <= dot) {
+                    n_coherent++;
+                }
+            }
+            prev_i = in_val;
+            prev_q = q;
+        }
+
+        int cum = 0;
+        int p_median = 0;
+        for (int b = 0; b <= 128; b++) {
+            cum += hist[b];
+            if (cum >= 128) {
+                p_median = b;
+                break;
+            }
+        }
+        int q_phase = (n_coherent * 100) / 255;
+
+        s_last_p_median = p_median;
+        s_last_q_phase = q_phase;
+        s_last_n_clip = n_clip;
+        s_last_n_origin = n_origin;
+
+        /* Settle delay after gain change */
+        if (settle_ticks > 0) {
+            settle_ticks--;
+            goto update_telemetry;
+        }
+
+        /* 2. Fast Overload Safety Rem:
+         * Only triggers if BOTH clipping occurs AND median power is high!
+         * Prevents the "noise trap" where thermal noise peaks look like overload. */
+        if (n_clip >= 4 && p_median > 18) {
+            int drop = (n_clip >= 16) ? 6 : 4;
+            target_gain = (target_gain > drop + 2) ? (target_gain - drop) : 2;
+            s_agc_state = AGC_STATE_LEARN;
+            settle_ticks = 2; /* 100 ms settle */
+            drift_counter = 0;
+            lost_counter = 0;
+            goto apply_target;
+        }
+
+        /* 3. State Machine */
+        switch (s_agc_state) {
+        case AGC_STATE_SEARCH:
+            /* Carrier detection threshold: phase coherence >= 55% or solid power */
+            if (q_phase >= 55 || (p_median >= 18 && n_origin < 40)) {
+                s_agc_state = AGC_STATE_LEARN;
+                drift_counter = 0;
+                lost_counter = 0;
+            } else {
+                /* No carrier / noise: park at baseline sweet spot, do NOT hunt */
+                target_gain = 32u;
+            }
+            break;
+
+        case AGC_STATE_LEARN:
+            /* Center P_median into [20, 30] target zone */
+            if (p_median > 30) {
+                target_gain = (target_gain > 3) ? (target_gain - 2) : 2;
+                settle_ticks = 1;
+            } else if (p_median < 20) {
+                int step = (p_median < 12 || n_origin > 60) ? 4 : 2;
+                target_gain = (target_gain + step <= 62) ? (target_gain + step) : 62;
+                settle_ticks = 1;
+            } else {
+                /* Converged into target zone with low clipping */
+                if (n_clip <= 2) {
+                    s_agc_state = AGC_STATE_TRACK;
+                    drift_counter = 0;
+                    lost_counter = 0;
+                }
+            }
+            break;
+
+        case AGC_STATE_TRACK:
+            /* Check for carrier loss */
+            if (q_phase < 35 && p_median < 12) {
+                lost_counter++;
+                if (lost_counter >= 8) { /* ~400 ms persistent loss */
+                    s_agc_state = AGC_STATE_SEARCH;
+                    lost_counter = 0;
+                    break;
+                }
+            } else {
+                lost_counter = 0;
+            }
+
+            /* Check for drift outside deadband [18, 32] */
+            if (p_median < 18 || p_median > 32) {
+                drift_counter++;
+                if (drift_counter >= 3) { /* Drift persisted for 150 ms */
+                    s_agc_state = AGC_STATE_LEARN;
+                    drift_counter = 0;
+                }
+            } else {
+                drift_counter = 0;
+                /* Inside deadband: 100% frozen, ZERO register writes */
+            }
+            break;
+        }
+
+apply_target:
+        s_shadow_gain = target_gain;
+        if (s_agc_mode == ANALOG_AGC_ACTIVE) {
+            if (target_gain != s_current_gain) {
+                s_current_gain = target_gain;
+                rf_set_rx_gain(true, s_current_gain);
+            }
+        }
+
+update_telemetry:
+        telemetry_ticks++;
+        if (telemetry_ticks >= 20) { /* 1 Hz periodic telemetry log */
+            telemetry_ticks = 0;
+            printf("[AGC:%s] State=%-6s | G_act=%u G_shd=%u | P_med=%-2d Q_ph=%2d%% | clip=%-2d orig=%-2d\n",
+                   (s_agc_mode == ANALOG_AGC_ACTIVE) ? "ACTIVE" :
+                   (s_agc_mode == ANALOG_AGC_SHADOW) ? "SHADOW" : "MANUAL",
+                   (s_agc_state == AGC_STATE_TRACK) ? "TRACK" :
+                   (s_agc_state == AGC_STATE_LEARN) ? "LEARN" : "SEARCH",
+                   s_current_gain, s_shadow_gain,
+                   s_last_p_median, s_last_q_phase, s_last_n_clip, s_last_n_origin);
+            fflush(stdout);
+        }
+    }
+}
 
 static void console_diag_task(void *arg)
 {
@@ -276,23 +496,24 @@ static void console_diag_task(void *arg)
         int c = getchar();
         if (c != EOF && c > 0) {
             if (c == '+' || c == 'k') {
-                if (s_forced_gain < 63u) s_forced_gain += 2u;
-                s_gain_forced = true;
-                rf_set_rx_gain(true, s_forced_gain);
-                printf("[GAIN] FORCED GAIN = %u (reg=0x%08lx)\n", s_forced_gain, (unsigned long)rf_get_rx_gain_reg());
+                s_agc_mode = ANALOG_AGC_MANUAL;
+                if (s_current_gain < 62u) s_current_gain += 2u;
+                rf_set_rx_gain(true, s_current_gain);
+                printf("[MANUAL GAIN] = %u (reg=0x%08lx)\n", s_current_gain, (unsigned long)rf_get_rx_gain_reg());
             } else if (c == '-' || c == 'j') {
-                if (s_forced_gain >= 2u) s_forced_gain -= 2u;
-                s_gain_forced = true;
-                rf_set_rx_gain(true, s_forced_gain);
-                printf("[GAIN] FORCED GAIN = %u (reg=0x%08lx)\n", s_forced_gain, (unsigned long)rf_get_rx_gain_reg());
+                s_agc_mode = ANALOG_AGC_MANUAL;
+                if (s_current_gain >= 2u) s_current_gain -= 2u;
+                rf_set_rx_gain(true, s_current_gain);
+                printf("[MANUAL GAIN] = %u (reg=0x%08lx)\n", s_current_gain, (unsigned long)rf_get_rx_gain_reg());
             } else if (c == 'a') {
-                s_gain_forced = false;
-                rf_set_rx_gain(false, 0);
-                printf("[GAIN] AUTO GAIN RESTORED (reg=0x%08lx)\n", (unsigned long)rf_get_rx_gain_reg());
-            } else if (c == 'f') {
-                s_gain_forced = !s_gain_forced;
-                rf_set_rx_gain(s_gain_forced, s_forced_gain);
-                printf("[GAIN] TOGGLE FORCED=%d (idx=%u, reg=0x%08lx)\n", s_gain_forced, s_forced_gain, (unsigned long)rf_get_rx_gain_reg());
+                s_agc_mode = ANALOG_AGC_ACTIVE;
+                printf("[AGC MODE] -> ACTIVE (Self-Calibrating Adaptive Gain Controller ACTIVE)\n");
+            } else if (c == 's') {
+                s_agc_mode = ANALOG_AGC_SHADOW;
+                printf("[AGC MODE] -> SHADOW (Dry-run: RF gain frozen at %u, computing recommendations)\n", s_current_gain);
+            } else if (c == 'm') {
+                s_agc_mode = ANALOG_AGC_MANUAL;
+                printf("[AGC MODE] -> MANUAL (Fixed gain=%u)\n", s_current_gain);
             } else if (c == 'e') {
                 PARL_IO.rx_clk_cfg.rx_clk_i_inv = !PARL_IO.rx_clk_cfg.rx_clk_i_inv;
                 printf("[EDGE] RX SAMPLE EDGE TOGGLED -> %s (rx_clk_i_inv=%d)\n",
@@ -313,6 +534,15 @@ static void console_diag_task(void *arg)
                        (unsigned long)rx_dscr, (unsigned long)tx_dscr);
                 printf(" Zero-EOF Status:            RX patched=%d nodes, TX patched=%d nodes\n",
                        rx_nodes, tx_nodes);
+                printf(" Adaptive AGC Mode:          %s (State=%s)\n",
+                       (s_agc_mode == ANALOG_AGC_ACTIVE) ? "ACTIVE" :
+                       (s_agc_mode == ANALOG_AGC_SHADOW) ? "SHADOW (Safe Dry-Run)" : "MANUAL",
+                       (s_agc_state == AGC_STATE_TRACK) ? "TRACK" :
+                       (s_agc_state == AGC_STATE_LEARN) ? "LEARN" : "SEARCH");
+                printf(" Gain Settings:              G_actual=%u, G_shadow_rec=%u (reg=0x%08lx)\n",
+                       s_current_gain, s_shadow_gain, (unsigned long)rf_get_rx_gain_reg());
+                printf(" FM Vector Metrics:          P_median=%d, Q_phase=%d%%, Clip=%d, Origin=%d\n",
+                       s_last_p_median, s_last_q_phase, s_last_n_clip, s_last_n_origin);
                 printf(" PARLIO RX FIFO overflow:    %lu (raw=%d)\n",
                        (unsigned long)s_hw_counters.parl_rx_wovf_count,
                        PARL_IO.int_raw.rx_fifo_wovf_int_raw);
@@ -327,9 +557,7 @@ static void console_diag_task(void *arg)
                 printf(" RX Sample Edge:             %s (rx_clk_i_inv=%d)\n",
                        PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
                        (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
-                printf(" RF Gain forced:             %s (idx=%u, reg=0x%08lx)\n",
-                       s_gain_forced ? "YES" : "NO", s_forced_gain, (unsigned long)rf_get_rx_gain_reg());
-                printf(" Keys: '+' / '-' adjust gain, 'a' auto, 'f' toggle, 'e' toggle edge\n");
+                printf(" Keys: 's' shadow, 'a' active, 'm' manual, '+' / '-' gain, 'e' edge\n");
                 printf("=======================================================\n\n");
             }
             fflush(stdout);
@@ -390,6 +618,9 @@ esp_err_t video_start(void)
 
     /* Start interactive console for on-demand diagnostics (zero periodic CPU/bus traffic) */
     xTaskCreate(console_diag_task, "console_diag", 3072, NULL, 1, NULL);
+
+    /* Start dedicated Analog Video AGC engine (P_median in [20, 30], fast attack) */
+    xTaskCreate(analog_agc_task, "analog_agc", 3072, NULL, 3, NULL);
 
     /* Print startup stamp (visible on serial monitor at boot). */
     ESP_EARLY_LOGW(TAG,
