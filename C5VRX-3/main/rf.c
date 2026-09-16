@@ -31,15 +31,6 @@
 #include "esp_rom_sys.h"
 #include "esp_private/wifi_os_adapter.h"
 
-/* Reserve the RF dump memory bank (0x4082ffc0..0x40850040) from the heap.
- * The modem dump engine continuously streams 40 MS/s IQ words into 0x40830000.
- * Reserving this region ensures FreeRTOS stacks, Wi-Fi buffers, and GDMA descriptors
- * are never allocated in this address space. */
-#define PRE_GUARD_ADDR  0x4082ffc0u
-#define POST_GUARD_ADDR 0x40850000u
-#define POST_GUARD_END  0x40850040u
-SOC_RESERVE_MEMORY_REGION(PRE_GUARD_ADDR, POST_GUARD_END, c5vrx3_rf_dump_ram);
-
 /* Fixed receiver configuration -- not configurable at runtime. */
 #define RF_CHANNEL_NUMBER   173u
 #define RF_BANDWIDTH        WIFI_BW40
