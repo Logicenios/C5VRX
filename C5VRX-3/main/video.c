@@ -83,11 +83,18 @@ static volatile int s_menu_cursor = 0;
 static int s_menu_timeout_ticks = 0;
 static int s_osd_banner_ticks = 0;
 
-/* White pixel IQ pattern in Phase5 WBFM domain:
- * A 180-degree phase flip (Delta_phi = 16 on 32-phase circle) evaluates to DAC code 63 (PEAK WHITE)
- * in the embedded Phase5 BitScrambler discriminator LUT. */
-#define IQ_WHITE_BYTE_A   0x70u  /* I = +7, Q = 0 (Phase 0) */
-#define IQ_WHITE_BYTE_B   0x90u  /* I = -7, Q = 0 (Phase 16) */
+/* Phase5 WBFM Peak White pattern:
+ * In Phase5 BitScrambler (fm.bsasm), each 16-bit word consumes 2 bytes, and
+ * bits 8..15 (the odd byte) are passed to the phase lookup.
+ * Byte 0x70 has Phase 1. Byte 0x90 has Phase 15.
+ * A transition from Phase 1 to Phase 15 (delta = 14) produces DAC code 62.
+ * A transition from Phase 15 to Phase 1 (delta = 18 = -14) produces DAC code 63.
+ * Setting both bytes of the 16-bit word to 0x70 (WORD_WHITE_A = 0x7070) and
+ * both bytes of the next word to 0x90 (WORD_WHITE_B = 0x9090) guarantees that
+ * Phase5 alternates between Phase 1 and Phase 15 on every single output sample,
+ * producing solid, continuous DAC 62/63 (PEAK WHITE). */
+#define WORD_WHITE_A   0x7070u
+#define WORD_WHITE_B   0x9090u
 
 /* TX GPIO mapping: 6-bit resistor DAC.
  * Order: DAC bit 0 (LSB) .. DAC bit 5 (MSB) on data_gpio_nums[0..5].
@@ -353,41 +360,18 @@ static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in k
  * Unmodified bytes remain 100% untouched live camera video.
  * ========================================================================= */
 
-static int find_hsync_offset(const uint8_t *ring, int search_start, int search_len)
+static inline void write_white_pixel(uint8_t *ring, int pos)
 {
-    int sync_run = 0;
-    int sync_start = -1;
-    int8_t prev_i = 0, prev_q = 0;
-
-    for (int k = 0; k < search_len; k++) {
-        int idx = (search_start + k) % (int)RAW_RING_BYTES;
-        uint8_t b = ring[idx];
-        int8_t q = (int8_t)((b & 0x0fu) << 4) >> 4;
-        int8_t in_val = (int8_t)(b & 0xf0u) >> 4;
-
-        if (k > 0) {
-            int p = (int)in_val * in_val + (int)q * q;
-            int cross = (int)q * prev_i - (int)in_val * prev_q;
-            /* Sync tip: carrier present (p >= 8) and frequency deviation strongly negative (cross <= -6) */
-            if (p >= 8 && cross <= -6) {
-                if (sync_run == 0) sync_start = idx;
-                sync_run++;
-                if (sync_run >= 70) { /* Confirmed H-sync tip (>1.75 µs negative run) */
-                    return sync_start;
-                }
-            } else {
-                sync_run = 0;
-            }
-        }
-        prev_i = in_val;
-        prev_q = q;
-    }
-    return -1;
+    int p0 = pos % (int)RAW_RING_BYTES;
+    int p1 = (pos + 2) % (int)RAW_RING_BYTES;
+    *(uint16_t *)&ring[p0] = WORD_WHITE_A;
+    *(uint16_t *)&ring[p1] = WORD_WHITE_B;
 }
 
 static void draw_text_on_line(uint8_t *ring, int line_hsync, int x_offset_samples, int font_row, const char *str)
 {
     int base = (line_hsync + x_offset_samples) % (int)RAW_RING_BYTES;
+    if (base & 1) base = (base + 1) % (int)RAW_RING_BYTES;
 
     while (*str) {
         char ch = *str++;
@@ -396,62 +380,163 @@ static void draw_text_on_line(uint8_t *ring, int line_hsync, int x_offset_sample
 
         for (int b = 7; b >= 0; b--) {
             if (bits & (1 << b)) {
-                /* White pixel: 4 samples (100 ns) of 180-deg phase flips */
-                ring[base % (int)RAW_RING_BYTES] = IQ_WHITE_BYTE_A;
-                ring[(base + 1) % (int)RAW_RING_BYTES] = IQ_WHITE_BYTE_B;
-                ring[(base + 2) % (int)RAW_RING_BYTES] = IQ_WHITE_BYTE_A;
-                ring[(base + 3) % (int)RAW_RING_BYTES] = IQ_WHITE_BYTE_B;
+                write_white_pixel(ring, base);
             }
             base = (base + 4) % (int)RAW_RING_BYTES;
         }
     }
 }
 
-static void osd_overlay_render(void)
+static const char *get_osd_line_text(int line_in_field, int *out_font_row)
 {
-    if (!s_menu_active && s_osd_banner_ticks <= 0) return;
-
-    /* Invalidate ring cache to read fresh DMA samples */
-    (void)esp_cache_msync((void *)s_raw_ring, 4096, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
-
-    int hs = find_hsync_offset(s_raw_ring, 0, 3000);
-    if (hs < 0) return; /* No coherent H-sync found (e.g. pure noise) */
-
-    char line_text[32];
+    static char buf[32];
     const fpv_channel_t *ch = rf_get_current_channel();
 
     if (s_menu_active) {
-        /* In menu mode: display current selected menu item */
-        if (s_menu_cursor == 0) {
-            snprintf(line_text, sizeof(line_text), "BAND: %s", rf_get_band_name(rf_get_current_band()));
-        } else if (s_menu_cursor == 1) {
-            snprintf(line_text, sizeof(line_text), "CH: %s (%u MHz)", ch->name, ch->freq_mhz);
-        } else if (s_menu_cursor == 2) {
-            snprintf(line_text, sizeof(line_text), "BW: %s", s_current_bw40 ? "BW40" : "BW20");
-        } else if (s_menu_cursor == 3) {
-            snprintf(line_text, sizeof(line_text), "AFC: %s",
+        if (line_in_field >= 40 && line_in_field < 56) {
+            *out_font_row = (line_in_field - 40) / 2;
+            return "=== C5VRX-3 SETTINGS ===";
+        }
+        if (line_in_field >= 65 && line_in_field < 81) {
+            *out_font_row = (line_in_field - 65) / 2;
+            snprintf(buf, sizeof(buf), "%c [1] BAND: %s",
+                     (s_menu_cursor == 0) ? '>' : ' ', rf_get_band_name(rf_get_current_band()));
+            return buf;
+        }
+        if (line_in_field >= 90 && line_in_field < 106) {
+            *out_font_row = (line_in_field - 90) / 2;
+            snprintf(buf, sizeof(buf), "%c [2] CH: %s (%uM)",
+                     (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz);
+            return buf;
+        }
+        if (line_in_field >= 115 && line_in_field < 131) {
+            *out_font_row = (line_in_field - 115) / 2;
+            snprintf(buf, sizeof(buf), "%c [3] BW: %s",
+                     (s_menu_cursor == 2) ? '>' : ' ', s_current_bw40 ? "BW40" : "BW20");
+            return buf;
+        }
+        if (line_in_field >= 140 && line_in_field < 156) {
+            *out_font_row = (line_in_field - 140) / 2;
+            snprintf(buf, sizeof(buf), "%c [4] AFC: %s",
+                     (s_menu_cursor == 3) ? '>' : ' ',
                      (s_afc_mode == AFC_MODE_AUTO) ? "AUTO" :
                      (s_afc_mode == AFC_MODE_HOLD) ? "HOLD" : "OFF");
-        } else if (s_menu_cursor == 4) {
-            snprintf(line_text, sizeof(line_text), "TUNE: %+d kHz", rf_get_frequency_offset_khz());
-        } else {
-            snprintf(line_text, sizeof(line_text), "SAVE & EXIT");
+            return buf;
         }
-    } else {
-        /* Transient lock/switch banner */
-        snprintf(line_text, sizeof(line_text), "%s %uMHz %s G%u",
-                 ch->name, ch->freq_mhz, s_current_bw40 ? "BW40" : "BW20", s_current_gain);
+        if (line_in_field >= 165 && line_in_field < 181) {
+            *out_font_row = (line_in_field - 165) / 2;
+            snprintf(buf, sizeof(buf), "%c [5] TUNE: %+dkHz",
+                     (s_menu_cursor == 4) ? '>' : ' ', rf_get_frequency_offset_khz());
+            return buf;
+        }
+        if (line_in_field >= 190 && line_in_field < 206) {
+            *out_font_row = (line_in_field - 190) / 2;
+            snprintf(buf, sizeof(buf), "%c [6] SAVE & EXIT",
+                     (s_menu_cursor == 5) ? '>' : ' ');
+            return buf;
+        }
+    } else if (s_osd_banner_ticks > 0) {
+        if (line_in_field >= 208 && line_in_field < 224) {
+            *out_font_row = (line_in_field - 208) / 2;
+            snprintf(buf, sizeof(buf), "%s %uMHz %s G%u",
+                     ch->name, ch->freq_mhz, s_current_bw40 ? "BW40" : "BW20", s_current_gain);
+            return buf;
+        }
     }
+    return NULL;
+}
 
-    /* Draw across lines that are currently in the ring (each line = 2542 samples at 40 MS/s) */
-    for (int r = 0; r < 8; r++) {
-        int line_hs = (hs + r * 2542) % (int)RAW_RING_BYTES;
-        /* Active video begins ~12 µs (480 samples) after H-sync */
-        draw_text_on_line(s_raw_ring, line_hs, 500, r, line_text);
+static void osd_realtime_task(void *arg)
+{
+    (void)arg;
+    uint32_t last_rx_chunk = 0xFFFFFFFF;
+    int line_in_field = 0;
+    int hsync_ring_pos = 0;
+    int frac_accum = 0;
+    int yield_counter = 0;
+
+    for (;;) {
+        /* If no OSD active, sleep and yield CPU completely (0% overhead) */
+        if (!s_menu_active && s_osd_banner_ticks <= 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            last_rx_chunk = 0xFFFFFFFF;
+            continue;
+        }
+
+        /* Poll current RX DMA chunk pointer */
+        uint32_t cur_rx = get_rx_dma_offset(NULL);
+        if (cur_rx == last_rx_chunk) {
+            /* Still in the same 4096-byte chunk. Delay 20 µs and poll again. */
+            esp_rom_delay_us(20);
+            continue;
+        }
+
+        /* RX has advanced to cur_rx!
+         * That means the 4096-byte chunk RX JUST FINISHED writing is safe to patch.
+         * TX is reading behind it, so we have a full 102.4 µs safety margin. */
+        uint32_t safe_chunk = (cur_rx + RAW_RING_BYTES - 4096u) % RAW_RING_BYTES;
+        last_rx_chunk = cur_rx;
+
+        /* Invalidate cache so CPU reads fresh GDMA bytes from SRAM */
+        (void)esp_cache_msync((void *)(s_raw_ring + safe_chunk), 4096, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+
+        /* 1. Fast check for V-sync broad pulse (>300 samples with negative deviation) */
+        int v_run = 0;
+        for (int s = 0; s < 4096; s += 8) {
+            uint8_t b = s_raw_ring[(safe_chunk + s) % RAW_RING_BYTES];
+            int8_t q = (int8_t)((b & 0x0fu) << 4) >> 4;
+            int8_t in_val = (int8_t)(b & 0xf0u) >> 4;
+            int p = (int)in_val * in_val + (int)q * q;
+            if (p >= 6 && q <= -2) {
+                v_run += 8;
+                if (v_run >= 300) {
+                    line_in_field = 0;
+                    break;
+                }
+            } else {
+                v_run = 0;
+            }
+        }
+
+        /* 2. Process all video lines that start or pass through this 4096-byte chunk. */
+        int dist = (hsync_ring_pos - (int)safe_chunk + (int)RAW_RING_BYTES) % (int)RAW_RING_BYTES;
+        while (dist < 4096) {
+            int line_pos = (safe_chunk + dist) % (int)RAW_RING_BYTES;
+
+            /* Check if this scanline is an active OSD scanline */
+            int font_row = 0;
+            const char *str = get_osd_line_text(line_in_field, &font_row);
+            if (str != NULL) {
+                draw_text_on_line(s_raw_ring, line_pos, 480, font_row, str);
+            }
+
+            /* Advance to next scanline using fractional NTSC timing (2542.222 samples) */
+            frac_accum += 222;
+            int line_len = 2542;
+            if (frac_accum >= 1000) {
+                frac_accum -= 1000;
+                line_len = 2543;
+            }
+
+            hsync_ring_pos = (hsync_ring_pos + line_len) % (int)RAW_RING_BYTES;
+            line_in_field++;
+            if (line_in_field >= 263) {
+                line_in_field = 0;
+            }
+
+            dist = (hsync_ring_pos - (int)safe_chunk + (int)RAW_RING_BYTES) % (int)RAW_RING_BYTES;
+        }
+
+        /* Flush modified chunk back to SRAM so TX GDMA sees the white pixels */
+        (void)esp_cache_msync((void *)(s_raw_ring + safe_chunk), 4096, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
+        /* Periodically yield to FreeRTOS IDLE task so watchdog is happy */
+        yield_counter++;
+        if (yield_counter >= 50) {
+            yield_counter = 0;
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
-
-    /* Flush modified bytes so TX GDMA sees them */
-    (void)esp_cache_msync((void *)s_raw_ring, RAW_RING_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 }
 
 static void init_boot_button(void)
@@ -844,8 +929,6 @@ apply_target:
         }
         was_locked = is_locked;
 
-        /* Source-synchronous live CVBS OSD overlay */
-        osd_overlay_render();
 
 update_telemetry:
         telemetry_ticks++;
@@ -1079,6 +1162,9 @@ esp_err_t video_start(void)
 
     /* Start dedicated Analog Video AGC engine (P_median in [20, 30], fast attack) */
     xTaskCreate(analog_agc_task, "analog_agc", 3072, NULL, 3, NULL);
+
+    /* Start dedicated Realtime Source-Synchronous OSD Overlay Engine */
+    xTaskCreate(osd_realtime_task, "osd_realtime", 4096, NULL, 2, NULL);
 
     /* Print startup stamp (visible on serial monitor at boot). */
     ESP_EARLY_LOGW(TAG,
