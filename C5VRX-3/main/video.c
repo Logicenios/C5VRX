@@ -299,14 +299,30 @@ typedef enum {
     AGC_STATE_TRACK  = 2,
 } agc_state_t;
 
+typedef enum {
+    BW_GEAR_AUTO = 0, /* Dynamic Bandwidth Adaptation: BW40 normally, BW20 in deep fade */
+    BW_GEAR_BW40 = 1, /* Forced BW40 (20 MHz baseband, full color) */
+    BW_GEAR_BW20 = 2, /* Forced BW20 (10 MHz baseband, +3 dB sensitivity) */
+} bw_gear_mode_t;
+
+typedef enum {
+    AFC_MODE_AUTO = 0, /* Auto Carrier Centering: centers within safe +/-1.5 MHz bound when locked */
+    AFC_MODE_HOLD = 1, /* AFC Hold: freeze current offset */
+    AFC_MODE_OFF  = 2, /* AFC Off: reset to 0 kHz offset */
+} afc_mode_t;
+
 static volatile analog_agc_mode_t s_agc_mode = ANALOG_AGC_ACTIVE;
 static volatile agc_state_t s_agc_state = AGC_STATE_SEARCH;
+static volatile bw_gear_mode_t s_bw_gear_mode = BW_GEAR_AUTO;
+static volatile afc_mode_t s_afc_mode = AFC_MODE_AUTO;
+static volatile bool s_current_bw40 = true;
 static volatile uint8_t s_current_gain = 32u;   /* Physical RF gain applied */
 static volatile uint8_t s_shadow_gain = 32u;    /* Controller recommended gain */
 static volatile int s_last_p_median = 25;
 static volatile int s_last_q_phase = 0;
 static volatile int s_last_n_clip = 0;
 static volatile int s_last_n_origin = 0;
+static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in kHz */
 
 static void analog_agc_task(void *arg)
 {
@@ -314,6 +330,9 @@ static void analog_agc_task(void *arg)
     int settle_ticks = 0;
     int drift_counter = 0;
     int lost_counter = 0;
+    int deep_fade_ticks = 0;
+    int strong_signal_ticks = 0;
+    int afc_ticks = 0;
     int telemetry_ticks = 0;
     uint8_t target_gain = 32u;
 
@@ -337,6 +356,8 @@ static void analog_agc_task(void *arg)
         int n_clip = 0;
         int n_origin = 0;
         int n_coherent = 0;
+        int sum_cross = 0;
+        int sum_dot = 0;
         uint16_t hist[129] = {0};
         int8_t prev_i = 0, prev_q = 0;
 
@@ -357,12 +378,14 @@ static void analog_agc_task(void *arg)
 
             if (i > 0) {
                 int dot = (int)in_val * (int)prev_i + (int)q * (int)prev_q;
-                int cross = (int)q * (int)prev_i - (int)in_val * (int)prev_q;
-                if (cross < 0) cross = -cross;
+                int signed_cross = (int)q * (int)prev_i - (int)in_val * (int)prev_q;
+                int abs_cross = (signed_cross < 0) ? -signed_cross : signed_cross;
 
                 /* Coherent FM sample: carrier power >= 8, phase delta within +-45 deg */
-                if (p >= 8 && dot > 0 && cross <= dot) {
+                if (p >= 8 && dot > 0 && abs_cross <= dot) {
                     n_coherent++;
+                    sum_cross += signed_cross;
+                    sum_dot += dot;
                 }
             }
             prev_i = in_val;
@@ -384,6 +407,15 @@ static void analog_agc_task(void *arg)
         s_last_q_phase = q_phase;
         s_last_n_clip = n_clip;
         s_last_n_origin = n_origin;
+
+        /* Carrier Frequency Offset (CFO) Calculation:
+         * Delta_f = (Cross / Dot) * (fs / 2pi) = (Cross / Dot) * 6366 kHz. */
+        if (n_coherent >= 30 && sum_dot > 0) {
+            int instant_cfo = (int)(((int64_t)sum_cross * 6366LL) / sum_dot);
+            if (instant_cfo > 2000)  instant_cfo = 2000;
+            if (instant_cfo < -2000) instant_cfo = -2000;
+            s_cfo_khz = (s_cfo_khz * 7 + instant_cfo) / 8;
+        }
 
         /* Settle delay after gain change */
         if (settle_ticks > 0) {
@@ -414,7 +446,7 @@ static void analog_agc_task(void *arg)
                 lost_counter = 0;
             } else {
                 /* No carrier / noise: park at baseline sweet spot, do NOT hunt */
-                target_gain = 32u;
+                target_gain = 34u;
             }
             break;
 
@@ -424,8 +456,15 @@ static void analog_agc_task(void *arg)
                 target_gain = (target_gain > 3) ? (target_gain - 2) : 2;
                 settle_ticks = 1;
             } else if (p_median < 20) {
+                /* If carrier is coherent, climb up to 62.
+                 * If in pure noise (q_phase < 25%), cap gain at 40 to avoid noise confetti! */
+                int max_gain = (q_phase >= 30) ? 62 : 40;
                 int step = (p_median < 12 || n_origin > 60) ? 4 : 2;
-                target_gain = (target_gain + step <= 62) ? (target_gain + step) : 62;
+                if ((int)target_gain + step <= max_gain) {
+                    target_gain += step;
+                } else {
+                    target_gain = (uint8_t)max_gain;
+                }
                 settle_ticks = 1;
             } else {
                 /* Converged into target zone with low clipping */
@@ -473,17 +512,95 @@ apply_target:
             }
         }
 
+        /* 4. Dynamic Bandwidth Gearbox (BW40 High Gear <-> BW20 Long-Range Survival) */
+        if (s_bw_gear_mode == BW_GEAR_AUTO) {
+            if (s_current_bw40) {
+                /* In BW40: downshift to BW20 if entering deep fade / severe starvation */
+                if (s_current_gain >= 58u && (p_median < 12 || q_phase < 45)) {
+                    deep_fade_ticks++;
+                    if (deep_fade_ticks >= 4) { /* Persisted for 200 ms */
+                        s_current_bw40 = false;
+                        rf_set_analog_bandwidth(false); /* DOWNSHIFT to BW20 (+3 dB boost!) */
+                        deep_fade_ticks = 0;
+                        strong_signal_ticks = 0;
+                        settle_ticks = 2;
+                    }
+                } else {
+                    deep_fade_ticks = 0;
+                }
+            } else {
+                /* In BW20: upshift to BW40 if signal strongly recovered */
+                if (p_median >= 22 && q_phase >= 80) {
+                    strong_signal_ticks++;
+                    if (strong_signal_ticks >= 20) { /* Persisted continuously for 1.0s */
+                        s_current_bw40 = true;
+                        rf_set_analog_bandwidth(true); /* UPSHIFT to BW40 (restore full color!) */
+                        strong_signal_ticks = 0;
+                        deep_fade_ticks = 0;
+                        settle_ticks = 2;
+                    }
+                } else {
+                    strong_signal_ticks = 0;
+                }
+            }
+        } else if (s_bw_gear_mode == BW_GEAR_BW40) {
+            if (!s_current_bw40) {
+                s_current_bw40 = true;
+                rf_set_analog_bandwidth(true);
+            }
+        } else if (s_bw_gear_mode == BW_GEAR_BW20) {
+            if (s_current_bw40) {
+                s_current_bw40 = false;
+                rf_set_analog_bandwidth(false);
+            }
+        }
+
+        /* 5. Automatic Frequency Control (AFC) Carrier Centering */
+        if (s_afc_mode == AFC_MODE_AUTO) {
+            /* Only adjust if carrier is strongly locked (Q_phase >= 75%) and gain settled */
+            if (q_phase >= 75 && p_median >= 18 && settle_ticks == 0) {
+                /* Centering deadband: +/- 35 kHz. Inside deadband = 0 register writes */
+                if (s_cfo_khz > 35 || s_cfo_khz < -35) {
+                    afc_ticks++;
+                    if (afc_ticks >= 20) { /* Persisted for 1.0 second */
+                        int cur_offset = rf_get_frequency_offset_khz();
+                        int target_offset = cur_offset + s_cfo_khz;
+                        rf_set_frequency_offset_khz(target_offset);
+                        afc_ticks = 0;
+                        settle_ticks = 2;
+                    }
+                } else {
+                    afc_ticks = 0;
+                }
+            } else {
+                afc_ticks = 0; /* Frozen during noise or deep fades: NO drifting away! */
+            }
+        } else if (s_afc_mode == AFC_MODE_OFF) {
+            if (rf_get_frequency_offset_khz() != 0) {
+                rf_set_frequency_offset_khz(0);
+            }
+        }
+
 update_telemetry:
         telemetry_ticks++;
         if (telemetry_ticks >= 20) { /* 1 Hz periodic telemetry log */
             telemetry_ticks = 0;
-            printf("[AGC:%s] State=%-6s | G_act=%u G_shd=%u | P_med=%-2d Q_ph=%2d%% | clip=%-2d orig=%-2d\n",
-                   (s_agc_mode == ANALOG_AGC_ACTIVE) ? "ACTIVE" :
-                   (s_agc_mode == ANALOG_AGC_SHADOW) ? "SHADOW" : "MANUAL",
+            const fpv_channel_t *ch = rf_get_current_channel();
+            int cur_off = rf_get_frequency_offset_khz();
+            int total_khz = (int)ch->freq_mhz * 1000 + cur_off;
+            printf("[AGC:%s] %-5s BW=%-4s | %s:%d.%03dMHz %+4dkHz (CFO=%+4d kHz) | G=%u | P=%-2d Q=%2d%% | c=%-2d\n",
+                   (s_agc_mode == ANALOG_AGC_ACTIVE) ? "ACT" :
+                   (s_agc_mode == ANALOG_AGC_SHADOW) ? "SHD" : "MAN",
                    (s_agc_state == AGC_STATE_TRACK) ? "TRACK" :
-                   (s_agc_state == AGC_STATE_LEARN) ? "LEARN" : "SEARCH",
-                   s_current_gain, s_shadow_gain,
-                   s_last_p_median, s_last_q_phase, s_last_n_clip, s_last_n_origin);
+                   (s_agc_state == AGC_STATE_LEARN) ? "LEARN" : "SRCH",
+                   s_current_bw40 ? "BW40" : "BW20",
+                   ch->name,
+                   total_khz / 1000,
+                   (total_khz % 1000 >= 0 ? total_khz % 1000 : -(total_khz % 1000)),
+                   cur_off,
+                   s_cfo_khz,
+                   s_current_gain,
+                   s_last_p_median, s_last_q_phase, s_last_n_clip);
             fflush(stdout);
         }
     }
@@ -514,6 +631,54 @@ static void console_diag_task(void *arg)
             } else if (c == 'm') {
                 s_agc_mode = ANALOG_AGC_MANUAL;
                 printf("[AGC MODE] -> MANUAL (Fixed gain=%u)\n", s_current_gain);
+            } else if (c == 'b') {
+                if (s_bw_gear_mode == BW_GEAR_AUTO) {
+                    s_bw_gear_mode = BW_GEAR_BW40;
+                    s_current_bw40 = true;
+                    rf_set_analog_bandwidth(true);
+                    printf("[BW GEAR] -> FORCED BW40 (Full color / 20 MHz baseband)\n");
+                } else if (s_bw_gear_mode == BW_GEAR_BW40) {
+                    s_bw_gear_mode = BW_GEAR_BW20;
+                    s_current_bw40 = false;
+                    rf_set_analog_bandwidth(false);
+                    printf("[BW GEAR] -> FORCED BW20 (+3 dB SNR Long-Range Survival mode)\n");
+                } else {
+                    s_bw_gear_mode = BW_GEAR_AUTO;
+                    printf("[BW GEAR] -> AUTO GEARBOX (Dynamic Bandwidth Adaptation)\n");
+                }
+            } else if (c == 'c') {
+                rf_cycle_channel();
+                const fpv_channel_t *ch = rf_get_current_channel();
+                s_cfo_khz = 0;
+                s_agc_state = AGC_STATE_SEARCH;
+                printf("[CHANNEL] Switched to %s (%u MHz)\n", ch->name, ch->freq_mhz);
+            } else if (c == 'f') {
+                if (s_afc_mode == AFC_MODE_AUTO) {
+                    s_afc_mode = AFC_MODE_HOLD;
+                    printf("[AFC] -> HOLD (Current offset %+d kHz frozen)\n", rf_get_frequency_offset_khz());
+                } else if (s_afc_mode == AFC_MODE_HOLD) {
+                    s_afc_mode = AFC_MODE_OFF;
+                    rf_set_frequency_offset_khz(0);
+                    printf("[AFC] -> OFF (Offset reset to 0 kHz)\n");
+                } else {
+                    s_afc_mode = AFC_MODE_AUTO;
+                    printf("[AFC] -> AUTO CENTERING (Active tracking within +/- 1.5 MHz)\n");
+                }
+            } else if (c == ',' || c == '<') {
+                rf_step_frequency_offset_khz(-50);
+                int off = rf_get_frequency_offset_khz();
+                int tot = (int)rf_get_current_channel()->freq_mhz * 1000 + off;
+                printf("[FINE TUNE] Offset = %+d kHz (Tuned: %d.%03d MHz)\n",
+                       off, tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)));
+            } else if (c == '.' || c == '>') {
+                rf_step_frequency_offset_khz(+50);
+                int off = rf_get_frequency_offset_khz();
+                int tot = (int)rf_get_current_channel()->freq_mhz * 1000 + off;
+                printf("[FINE TUNE] Offset = %+d kHz (Tuned: %d.%03d MHz)\n",
+                       off, tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)));
+            } else if (c == '0') {
+                rf_set_frequency_offset_khz(0);
+                printf("[FINE TUNE] Offset reset to +0 kHz\n");
             } else if (c == 'e') {
                 PARL_IO.rx_clk_cfg.rx_clk_i_inv = !PARL_IO.rx_clk_cfg.rx_clk_i_inv;
                 printf("[EDGE] RX SAMPLE EDGE TOGGLED -> %s (rx_clk_i_inv=%d)\n",
@@ -526,14 +691,24 @@ static void console_diag_task(void *arg)
                 uint32_t dist = (rx_off >= tx_off) ? (rx_off - tx_off) : (sizeof(s_raw_ring) - tx_off + rx_off);
                 int rx_nodes = patch_descriptors_clear_eof(s_rx_dma_ch, true);
                 int tx_nodes = patch_descriptors_clear_eof(s_tx_dma_ch, false);
+                const fpv_channel_t *ch = rf_get_current_channel();
+                int off = rf_get_frequency_offset_khz();
+                int tot = (int)ch->freq_mhz * 1000 + off;
+
                 printf("\n=======================================================\n");
-                printf(" C5VRX-3 SEAMLESS 16K (Zero-EOF Descriptor Ring)\n");
-                printf(" GDMA Ring:                  dist=%lu (rx_off=%lu, tx_off=%lu)\n",
-                       (unsigned long)dist, (unsigned long)rx_off, (unsigned long)tx_off);
-                printf(" Descriptors:                rx_dscr=0x%08lx, tx_dscr=0x%08lx\n",
-                       (unsigned long)rx_dscr, (unsigned long)tx_dscr);
-                printf(" Zero-EOF Status:            RX patched=%d nodes, TX patched=%d nodes\n",
-                       rx_nodes, tx_nodes);
+                printf(" C5VRX-3 REALTIME RECEPTION & FREQUENCY DIAGNOSTICS\n");
+                printf(" Receiver Channel:           %s (%u MHz)\n", ch->name, ch->freq_mhz);
+                printf(" Tuned Frequency:            %d.%03d MHz (Offset: %+d kHz)\n",
+                       tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)), off);
+                printf(" Carrier Frequency Offset:   %+d kHz (VTX %s)\n",
+                       s_cfo_khz, (s_cfo_khz > 20) ? "high" : (s_cfo_khz < -20) ? "low" : "centered");
+                printf(" AFC Mode:                   %s\n",
+                       (s_afc_mode == AFC_MODE_AUTO) ? "AUTO (Carrier Centering, +/-1.5 MHz safe bound)" :
+                       (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (Offset Frozen)" : "OFF (0 kHz)");
+                printf(" Bandwidth Gear:             %s (Current: %s)\n",
+                       (s_bw_gear_mode == BW_GEAR_AUTO) ? "AUTO (Dynamic Adaptation)" :
+                       (s_bw_gear_mode == BW_GEAR_BW40) ? "FORCED BW40" : "FORCED BW20",
+                       s_current_bw40 ? "BW40 (Wide / Color)" : "BW20 (Narrow / +3 dB Survival)");
                 printf(" Adaptive AGC Mode:          %s (State=%s)\n",
                        (s_agc_mode == ANALOG_AGC_ACTIVE) ? "ACTIVE" :
                        (s_agc_mode == ANALOG_AGC_SHADOW) ? "SHADOW (Safe Dry-Run)" : "MANUAL",
@@ -543,21 +718,25 @@ static void console_diag_task(void *arg)
                        s_current_gain, s_shadow_gain, (unsigned long)rf_get_rx_gain_reg());
                 printf(" FM Vector Metrics:          P_median=%d, Q_phase=%d%%, Clip=%d, Origin=%d\n",
                        s_last_p_median, s_last_q_phase, s_last_n_clip, s_last_n_origin);
-                printf(" PARLIO RX FIFO overflow:    %lu (raw=%d)\n",
-                       (unsigned long)s_hw_counters.parl_rx_wovf_count,
-                       PARL_IO.int_raw.rx_fifo_wovf_int_raw);
-                printf(" PARLIO TX FIFO empty (udf): %lu (raw=%d)\n",
-                       (unsigned long)s_hw_counters.parl_tx_rempty_count,
-                       PARL_IO.int_raw.tx_fifo_rempty_int_raw);
-                printf(" PARLIO TX EOF:              %lu (raw=%d)\n",
-                       (unsigned long)s_hw_counters.parl_tx_eof_count,
-                       PARL_IO.int_raw.tx_eof_int_raw);
-                printf(" BitScrambler TX empty:      %d\n",
-                       BITSCRAMBLER.state[1].fifo_empty);
+                printf(" GDMA Ring:                  dist=%lu (rx_off=%lu, tx_off=%lu)\n",
+                       (unsigned long)dist, (unsigned long)rx_off, (unsigned long)tx_off);
+                printf(" Zero-EOF Status:            RX patched=%d nodes, TX patched=%d nodes\n",
+                       rx_nodes, tx_nodes);
+                printf(" PARLIO TX Underflows:       %lu (Zero underflows)\n",
+                       (unsigned long)s_hw_counters.parl_tx_rempty_count);
                 printf(" RX Sample Edge:             %s (rx_clk_i_inv=%d)\n",
                        PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
                        (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
-                printf(" Keys: 's' shadow, 'a' active, 'm' manual, '+' / '-' gain, 'e' edge\n");
+                printf(" Keys:\n");
+                printf("  'a'/'s'/'m': AGC mode (active / shadow / manual)\n");
+                printf("  '+' / '-':   Manual gain step (+/-2)\n");
+                printf("  'b':         Bandwidth gear (auto / forced bw40 / forced bw20)\n");
+                printf("  'c':         Cycle FPV channel (A1..A8, R1..R8, B1..B8, F1..F8)\n");
+                printf("  'f':         AFC mode (auto-centering / hold / off)\n");
+                printf("  ',' / '.':   Fine-tune offset (-50 / +50 kHz)\n");
+                printf("  '0':         Reset offset to 0 kHz\n");
+                printf("  'e':         Toggle RX sample edge (POS/NEG)\n");
+                printf("  'd':         Print this diagnostic summary\n");
                 printf("=======================================================\n\n");
             }
             fflush(stdout);
@@ -565,6 +744,7 @@ static void console_diag_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
+
 
 /* ----- Main entry point ----- */
 

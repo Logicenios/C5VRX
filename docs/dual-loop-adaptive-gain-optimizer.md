@@ -119,3 +119,51 @@ Tested on live Seeed Studio XIAO ESP32-C5 (`COM10`) receiving a 200 mW 5.8 GHz V
 3. **Instant Re-lock (17:32:38)**: Stepping out of the shadow instantly restored $Q_{\text{phase}} = 100\%$ and converged back to $P_{\text{median}} = 25$ with zero frame drops.
 4. **Near-Field Overload Protection (17:32:57)**: Approaching within 20 cm of the receiver dropped gain down to **$G = 24$**, completely eliminating ADC saturation tearing.
 5. **Zero Frame Loss / Zero Black Screen**: Across the full 3-minute test, `PARLIO TX FIFO empty (udf)` remained strictly **0**.
+
+---
+
+## 5. Dynamic Bandwidth Gearbox & Gain Ceiling
+
+### 5.1 Noise Physics & The Gain Ceiling
+Pumping RF gain to the maximum ($G = 62$) during total signal absence amplifies Johnson-Nyquist thermal noise power ($P_N = kTB$) into hard 4-bit ADC clipping ($\pm 7$). Hard clipping transforms smooth Gaussian noise into random square waves, manifesting on an analog video display as harsh black-and-white "confetti" bars and tearing raster lines. Furthermore, maximum gain desensitizes the LNA when high-power out-of-band 5 GHz Wi-Fi routers are nearby.
+
+**Adaptive Gain Ceiling Rule:**
+* **Signal Absent / Pure Noise** ($Q_{\text{phase}} < 30\%$): Gain is strictly capped at $G \le 40$, keeping thermal noise within the linear dynamic range ($\pm 2 \dots \pm 3$) and producing gentle, soft static ("snow") rather than destructive clipping.
+* **Carrier Present** ($Q_{\text{phase}} \ge 30\%$): Gain is permitted to climb all the way to $G = 62$ for maximum link-budget penetration behind walls.
+
+### 5.2 Dynamic Bandwidth Adaptation (DBA Gearbox)
+Espressif specifies receiver sensitivity for the ESP32-C5:
+* **20 MHz Bandwidth (BW20)**: $\approx -94\text{ dBm}$ (10 MHz baseband channel filter)
+* **40 MHz Bandwidth (BW40)**: $\approx -91.5\text{ dBm}$ (20 MHz baseband channel filter)
+
+Halving the filter bandwidth cuts integrated thermal noise power by $3\text{ dB}$ ($10 \log_{10}(20/10) = 3.01\text{ dB}$).
+However, BW20 attenuates the higher-order sidebands of the 3.58 MHz NTSC color subcarrier ($\approx 11.16\text{ MHz}$), causing chroma phase distortion.
+
+**Two-Speed Dynamic Gearbox:**
+* **High Gear (BW40)**: Active during normal and strong reception. Provides full 20 MHz baseband bandwidth for pristine color saturation and sharp detail.
+* **Survival Low Gear (BW20)**: When the receiver enters a severe deep fade ($G \ge 58$ and $P_{\text{median}} < 12$ or $Q_{\text{phase}} < 45\%$ for 200 ms), the controller automatically shifts to BW20 (`phy_wifi_fbw_sel(0)`). The $+3\text{ dB}$ SNR boost rescues the synchronization pulses (HSYNC/VSYNC) and keeps the pilot's horizon visible.
+* **Hysteresis Recovery**: When the carrier returns strongly ($P_{\text{median}} \ge 22$ and $Q_{\text{phase}} \ge 80\%$ sustained for 1.0 s), the gearbox shifts back up to BW40.
+
+---
+
+## 6. Exact Channel Matching & Carrier Frequency Offset (CFO / AFC)
+
+### 6.1 Baseband CFO Mathematics
+In Cartesian baseband $(I[n], Q[n])$ at sampling rate $f_s = 40\text{ MHz}$, a carrier frequency error $\Delta f = f_{\text{carrier}} - f_{\text{LO}}$ induces continuous phase rotation:
+$$\Delta\theta[n] = 2\pi \frac{\Delta f}{f_s}$$
+From vector products:
+$$\Delta f_{\text{kHz}} \approx \frac{\text{Cross}}{\text{Dot}} \times \frac{f_s}{2\pi} = \frac{\sum \text{Cross}}{\sum \text{Dot}} \times 6366.2\text{ kHz}$$
+
+When the VTX is centered on the receiver's local oscillator, $\sum \text{Cross} = 0$. When the VTX drifts high (e.g. $+150\text{ kHz}$), $\sum \text{Cross} > 0$.
+
+### 6.2 Hardware Frequency Fine-Tuning via RFPLL SDM
+The ESP32-C5 PHY library exports:
+* `phy_chip_set_chan_offset(int offset_khz)`: Directly updates the Sigma-Delta Modulator (SDM) of the RF synthesizer in fractional steps of $4\text{ kHz}$ in $\approx 300\ \mu\text{s}$ (less than 5 video scanlines).
+* `phy_set_freq(uint16_t freq_mhz, int offset_khz)`: Full RF synthesizer retuning across all FPV bands (Boscam A/B/E/F, RaceBand R).
+
+### 6.3 Automatic Frequency Control (AFC) & Safety Boundary
+To prevent the receiver from roaming or hopping away during flight:
+1. **Strict Safety Boundary**: All offset adjustments are hard-clamped to $[-1500, +1500]\text{ kHz}$ ($\pm 1.5\text{ MHz}$). Because adjacent FPV channels are separated by $\ge 19\text{ MHz}$, it is physically impossible for the receiver to jump channels.
+2. **Lock-Gated Centering**: AFC only adjusts when the carrier is verified solid ($Q_{\text{phase}} \ge 75\%$, $P_{\text{median}} \ge 18$, offset persisting for 1.0 s).
+3. **Frozen in Noise/Fade**: If the signal is lost or fades below threshold ($Q_{\text{phase}} < 30\%$), AFC is completely frozen to prevent drift.
+4. **Deadband Lock**: When within $\pm 35\text{ kHz}$ of center, the controller executes zero register writes.

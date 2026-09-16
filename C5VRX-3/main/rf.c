@@ -410,14 +410,144 @@ esp_err_t rf_start(void)
     return ESP_OK;
 }
 
+extern void phy_wifi_fbw_sel(uint32_t val);
 extern void phy_force_rx_gain(bool enable, uint8_t gain_idx);
+extern void phy_set_freq(uint16_t freq_mhz, int offset);
+extern void phy_chip_set_chan_offset(int offset_khz);
+
+static bool s_analog_bw40 = true;
+static uint8_t s_current_gain_val = 32u;
+
+/* Standard FPV Channel Table (Boscam A, RaceBand R, Boscam B, FatShark F) */
+static const fpv_channel_t s_fpv_channels[] = {
+    /* Band A (Boscam A) - Default A1 is 5865 MHz */
+    { "A1", 5865 },
+    { "A2", 5845 },
+    { "A3", 5825 },
+    { "A4", 5805 },
+    { "A5", 5785 },
+    { "A6", 5765 },
+    { "A7", 5745 },
+    { "A8", 5725 },
+    /* RaceBand (R1..R8) */
+    { "R1", 5658 },
+    { "R2", 5695 },
+    { "R3", 5732 },
+    { "R4", 5769 },
+    { "R5", 5806 },
+    { "R6", 5843 },
+    { "R7", 5880 },
+    /* Band B (Boscam B) */
+    { "B1", 5733 },
+    { "B2", 5752 },
+    { "B3", 5771 },
+    { "B4", 5790 },
+    { "B5", 5809 },
+    { "B6", 5828 },
+    { "B7", 5847 },
+    { "B8", 5866 },
+    /* Band F (FatShark / Airwave) */
+    { "F1", 5740 },
+    { "F2", 5760 },
+    { "F3", 5780 },
+    { "F4", 5800 },
+    { "F5", 5820 },
+    { "F6", 5840 },
+    { "F7", 5860 },
+    { "F8", 5880 },
+};
+
+static size_t s_channel_idx = 0; /* Default: A1 (5865 MHz) */
+static uint16_t s_current_freq_mhz = 5865u;
+static int s_current_offset_khz = 0;
+
+void rf_set_analog_bandwidth(bool bw40)
+{
+    s_analog_bw40 = bw40;
+    phy_wifi_fbw_sel(bw40 ? 1u : 0u);
+}
+
+bool rf_get_analog_bandwidth(void)
+{
+    return s_analog_bw40;
+}
 
 void rf_set_rx_gain(bool force, uint8_t gain_idx)
 {
+    if (force) {
+        s_current_gain_val = gain_idx;
+    }
     phy_force_rx_gain(force, gain_idx);
 }
 
 uint32_t rf_get_rx_gain_reg(void)
 {
     return REG32(0x600a702cu);
+}
+
+const fpv_channel_t *rf_get_current_channel(void)
+{
+    return &s_fpv_channels[s_channel_idx];
+}
+
+size_t rf_get_channel_index(void)
+{
+    return s_channel_idx;
+}
+
+size_t rf_get_channel_count(void)
+{
+    return sizeof(s_fpv_channels) / sizeof(s_fpv_channels[0]);
+}
+
+uint16_t rf_get_frequency_mhz(void)
+{
+    return s_current_freq_mhz;
+}
+
+int rf_get_frequency_offset_khz(void)
+{
+    return s_current_offset_khz;
+}
+
+void rf_set_frequency_offset_khz(int offset_khz)
+{
+    /* Strict clamping: +/- 1500 kHz (+/- 1.5 MHz) maximum.
+     * Adjacent FPV channels are at least 19-20 MHz apart. Clamping strictly
+     * to +/- 1.5 MHz guarantees 100% that tuning is locked to the selected
+     * channel and can NEVER hop or switch to another channel. */
+    if (offset_khz < -1500) offset_khz = -1500;
+    if (offset_khz > 1500)  offset_khz = 1500;
+
+    s_current_offset_khz = offset_khz;
+    phy_chip_set_chan_offset(offset_khz);
+    phy_force_rx_gain(true, s_current_gain_val);
+}
+
+void rf_step_frequency_offset_khz(int delta_khz)
+{
+    rf_set_frequency_offset_khz(s_current_offset_khz + delta_khz);
+}
+
+esp_err_t rf_set_channel(size_t index)
+{
+    if (index >= sizeof(s_fpv_channels) / sizeof(s_fpv_channels[0])) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_channel_idx = index;
+    s_current_freq_mhz = s_fpv_channels[index].freq_mhz;
+    s_current_offset_khz = 0;
+
+    phy_set_freq(s_current_freq_mhz, 0);
+    rf_enable_continuous_modem();
+    phy_wifi_fbw_sel(s_analog_bw40 ? 1u : 0u);
+    phy_force_rx_gain(true, s_current_gain_val);
+
+    return ESP_OK;
+}
+
+esp_err_t rf_cycle_channel(void)
+{
+    size_t next = (s_channel_idx + 1) % (sizeof(s_fpv_channels) / sizeof(s_fpv_channels[0]));
+    return rf_set_channel(next);
 }

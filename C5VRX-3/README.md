@@ -85,9 +85,17 @@ To ensure a pristine, stable analog video feed across the full dynamic range:
   - Implements a 3-state controller (`SEARCH` $\to$ `LEARN` $\to$ `TRACK`) with a Fast Overload Rem ($\Delta G = -4 / -6$ only when $N_{\text{clip}} \ge 4$ and $P_{\text{median}} > 18$) and zero-register-write deadband locking in `TRACK` ($P_{\text{median}} \in [18, 32]$).
   - Proven live dynamic range: automatically tracks from $G = 24$ (near-field 200 mW desk) to $G = 62$ (deep fade behind walls) with $99\%-100\%$ carrier phase coherence and zero blackouts.
   - Full technical details in [`docs/dual-loop-adaptive-gain-optimizer.md`](../docs/dual-loop-adaptive-gain-optimizer.md).
-- **Full BW40 Analog Bandwidth (`phy_wifi_fbw_sel(1)`)**:
-  - Narrow BW20 filtering (`fbw_sel(0)`) rolled off the second-order FM sidebands of the 3.58 MHz NTSC subcarrier ($\approx 11.16\text{ MHz}$), causing phase distortion and chroma rainbow overlay.
-  - Setting `phy_wifi_fbw_sel(1)` opens the full 20 MHz analog filter, delivering razor-sharp video and significantly reducing the chroma rainbow overlay.
+- **Dynamic Bandwidth Gearbox (BW40 High Gear <-> BW20 Long-Range Survival)**:
+  - Default: **BW40** (`phy_wifi_fbw_sel(1)`), keeping the full 20 MHz baseband channel filter open for rich color saturation and razor-sharp horizontal resolution.
+  - Deep Fade Survival: In severe fades ($G \ge 58$ and $P_{\text{median}} < 12$ or $Q_{\text{phase}} < 45\%$ for 200 ms), automatically downshifts to **BW20** (`phy_wifi_fbw_sel(0)`), halving thermal noise power to grab a vital $+3\text{ dB}$ SNR sensitivity boost to preserve HSYNC/VSYNC and pilot horizon.
+  - Hysteresis Recovery: Upshifts back to BW40 when carrier strongly recovers ($P_{\text{median}} \ge 22$, $Q_{\text{phase}} \ge 80\%$ for 1.0 s).
+- **Adaptive Gain Ceiling (Noise Confetti Prevention)**:
+  - In pure noise ($Q_{\text{phase}} < 30\%$), gain is strictly capped at $G \le 40$ to prevent thermal noise from clipping into harsh black-and-white square-wave confetti bars. When a carrier is coherent ($Q_{\text{phase}} \ge 30\%$), gain can climb up to $G = 62$.
+- **Exact Channel Matching & Carrier Frequency Offset (CFO / AFC)**:
+  - Real-time baseband CFO estimation via integer cross/dot product rotation ($\Delta f_{\text{kHz}} \approx (\sum \text{Cross} / \sum \text{Dot}) \times 6366\text{ kHz}$).
+  - Full FPV band support (Boscam A/B, RaceBand R, FatShark F) locked to user's selected channel.
+  - Automatic Frequency Control (AFC) with safe $\pm 1.5\text{ MHz}$ boundary clamp: centers onto VTX crystal drift while physically preventing auto-hopping away to adjacent channels.
+  - Manual fine-tuning in $\pm 50\text{ kHz}$ steps via console keys.
 - **MODEM_DIAG Sample Edge Margin**:
   - Interactive testing of sample clock inversion (POS vs NEG via key `'e'`) confirmed clean video on both edges, proving wide setup/hold margin on the 40 MHz MODEM_DIAG bus.
 - **Disabled PLL Tracking**: Compiled with `CONFIG_ESP_PHY_DISABLE_PLL_TRACK=y` to eliminate periodic 1.0s radio recalibration stalls.
@@ -154,5 +162,11 @@ python tools/monitor.py COM10
 - `m`: Switch to `MANUAL` mode
 - `+` / `k`: Manual gain +2
 - `-` / `j`: Manual gain -2
+- `b`: Cycle Bandwidth Gearbox (`AUTO GEARBOX` -> `FORCED BW40` -> `FORCED BW20`)
+- `c`: Cycle FPV channel (`A1`..`A8`, `R1`..`R8`, `B1`..`B8`, `F1`..`F8`)
+- `f`: Cycle AFC mode (`AUTO` -> `HOLD` -> `OFF`)
+- `,` / `<`: Fine-tune carrier offset -50 kHz
+- `.` / `>`: Fine-tune carrier offset +50 kHz
+- `0`: Reset carrier offset to 0 kHz
 - `e`: Toggle RX sample edge (POS / NEG)
-- `Space`: Print live GDMA ring offsets, descriptor addresses, AGC metrics, and hardware FIFO counters.
+- `d` / `Space`: Print live diagnostic summary (channel, frequency, CFO, ring offsets, AGC/AFC metrics, FIFO status).
