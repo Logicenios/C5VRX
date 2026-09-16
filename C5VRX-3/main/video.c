@@ -29,6 +29,7 @@
 
 #include "video.h"
 #include "rf.h"
+#include "osd_font.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -73,6 +74,25 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 #define DAC_RATE_HZ      40000000u   /* PARLIO TX clock ([D,D] = 20 MS/s unique) */
 #define RAW_RING_BYTES   16384u      /* 16384 byte cyclic ring (16 KiB Seamless Golden) */
 #define DAC_IDLE_CODE    20u         /* Pedestal 20 (sync tip level) */
+#define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
+
+/* NTSC 240p Composite Video Generation (at 40 MHz DAC clock, 2544 bytes per line, 60.012 Hz) */
+#define NTSC_LINE_BYTES   2544u
+#define NTSC_LINE_STRIDE  2560u
+#define OSD_ACTIVE_LINES  48u
+#define NTSC_TOTAL_LINES  262u
+
+typedef enum {
+    VIDEO_MODE_LIVE = 0,
+    VIDEO_MODE_OSD_BANNER = 1,
+    VIDEO_MODE_OSD_MENU = 2,
+} video_display_mode_t;
+
+static volatile video_display_mode_t s_video_mode = VIDEO_MODE_LIVE;
+static volatile bool s_menu_active = false;
+static volatile int s_menu_cursor = 0;
+static int s_menu_timeout_ticks = 0;
+static int s_osd_banner_ticks = 0;
 
 /* TX GPIO mapping: 6-bit resistor DAC.
  * Order: DAC bit 0 (LSB) .. DAC bit 5 (MSB) on data_gpio_nums[0..5].
@@ -91,6 +111,12 @@ static const char *TAG = "c5vrx3_video";
  * TX starts one block (4096 bytes = 102.4 µs) behind RX; they share
  * PLL_F240M/6, so separation cannot drift during normal operation. */
 static DMA_ATTR __attribute__((aligned(64))) uint8_t s_raw_ring[RAW_RING_BYTES];
+
+/* Static NTSC CVBS scanline buffers & 262-node DMA descriptor chain in HP SRAM */
+static DMA_ATTR __attribute__((aligned(64))) uint8_t s_blank_line[NTSC_LINE_STRIDE];
+static DMA_ATTR __attribute__((aligned(64))) uint8_t s_vsync_line[NTSC_LINE_STRIDE];
+static DMA_ATTR __attribute__((aligned(64))) uint8_t s_osd_line_buf[OSD_ACTIVE_LINES][NTSC_LINE_STRIDE];
+static DMA_ATTR __attribute__((aligned(64))) dma_descriptor_t s_osd_dma_nodes[NTSC_TOTAL_LINES];
 
 static parlio_rx_unit_handle_t      s_rx;
 static parlio_rx_delimiter_handle_t s_rx_delimiter;
@@ -267,7 +293,7 @@ static int patch_descriptors_clear_eof(int dma_ch, bool is_rx)
 }
 
 /* =========================================================================
- * Analog Video Self-Calibrating Adaptive Gain Controller (Dual-Loop)
+ * Receiver Modes, Dual-Loop AGC, Bandwidth Gearbox, and AFC State
  *
  * Direct Q4/I4 vector power: P[n] = I[n]^2 + Q[n]^2
  * Target: P_median in [20, 30] (effective radius ~4.5 - 5.5, phase sigma ~3.3 deg)
@@ -281,9 +307,8 @@ static int patch_descriptors_clear_eof(int dma_ch, bool is_rx)
  *   - TRACK:  Carrier locked! Hysteresis deadband [18, 32]. ZERO register writes.
  *
  * Modes:
- *   - ANALOG_AGC_SHADOW: Default! Realtime state machine & Q_phase active, logs
- *                        recommendations, but PHYSICAL GAIN IS FROZEN (no blackouts).
- *   - ANALOG_AGC_ACTIVE: Actively updates physical RF gain registers.
+ *   - ANALOG_AGC_SHADOW: Realtime state machine & Q_phase active, physical gain frozen.
+ *   - ANALOG_AGC_ACTIVE: Default! Actively updates physical RF gain registers.
  *   - ANALOG_AGC_MANUAL: Fixed gain controlled by user (+ / - keys).
  * ========================================================================= */
 
@@ -324,6 +349,263 @@ static volatile int s_last_n_clip = 0;
 static volatile int s_last_n_origin = 0;
 static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in kHz */
 
+/* =========================================================================
+ * On-Screen Display (OSD) Engine & Single-Button Menu Controller
+ * ========================================================================= */
+
+static void osd_init_buffers(void)
+{
+    /* H-Sync tip: 188 bytes of code 0, remaining 2356 bytes of code 20 (blanking) */
+    memset(s_blank_line, 20, sizeof(s_blank_line));
+    memset(s_blank_line, 0, 188);
+
+    /* V-Sync serration line: 2 wide pulses */
+    memset(s_vsync_line, 20, sizeof(s_vsync_line));
+    memset(s_vsync_line, 0, 1084);
+    memset(&s_vsync_line[1272], 0, 1084);
+
+    /* Initialize all 48 text lines to blank line */
+    for (int l = 0; l < (int)OSD_ACTIVE_LINES; l++) {
+        memcpy(s_osd_line_buf[l], s_blank_line, sizeof(s_blank_line));
+    }
+
+    /* Chain 262 DMA descriptors for rock-solid 60.012 Hz NTSC 240p */
+    for (int i = 0; i < (int)NTSC_TOTAL_LINES; i++) {
+        dma_descriptor_t *node = &s_osd_dma_nodes[i];
+        node->dw0.size = NTSC_LINE_BYTES;
+        node->dw0.length = NTSC_LINE_BYTES;
+        node->dw0.owner = 1;
+        node->dw0.suc_eof = 0;
+
+        if (i < 6) {
+            /* Lines 0..5: Vertical sync serrations */
+            node->buffer = s_vsync_line;
+        } else if (i >= 106 && i < (int)(106 + OSD_ACTIVE_LINES)) {
+            /* Lines 106..153: Active text lines (48 scanlines in screen center) */
+            node->buffer = s_osd_line_buf[i - 106];
+        } else {
+            /* Lines 6..105 (top) and 154..261 (bottom): Blank black lines */
+            node->buffer = s_blank_line;
+        }
+        node->next = (i < (int)NTSC_TOTAL_LINES - 1) ? &s_osd_dma_nodes[i + 1] : &s_osd_dma_nodes[0];
+        (void)esp_cache_msync(node, sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    }
+}
+
+static void osd_draw_string(int row_idx, int col_x, const char *str)
+{
+    if (row_idx < 0 || row_idx >= 6) return;
+    int base_line = row_idx * 8;
+
+    while (*str && col_x < 2400) {
+        char ch = *str++;
+        int font_idx = (ch >= 32 && ch <= 126) ? (ch - 32) : 0;
+
+        for (int r = 0; r < 8; r++) {
+            uint8_t bits = s_font8x8[font_idx][r];
+            uint8_t *line_ptr = &s_osd_line_buf[base_line + r][col_x];
+
+            for (int b = 7; b >= 0; b--) {
+                uint8_t val = (bits & (1 << b)) ? 56 : 20;
+                *line_ptr++ = val;
+                *line_ptr++ = val;
+                *line_ptr++ = val;
+                *line_ptr++ = val;
+            }
+        }
+        col_x += 32; /* 8 font bits * 4 bytes per bit = 32 bytes per char */
+    }
+}
+
+static void osd_render_menu(void)
+{
+    for (int l = 0; l < (int)OSD_ACTIVE_LINES; l++) {
+        memcpy(s_osd_line_buf[l], s_blank_line, sizeof(s_blank_line));
+    }
+
+    char buf[64];
+    const fpv_channel_t *ch = rf_get_current_channel();
+    int cur_off = rf_get_frequency_offset_khz();
+
+    osd_draw_string(0, 420, "=== C5VRX-3 SETTINGS MENU ===");
+
+    snprintf(buf, sizeof(buf), "%c [1] CHANNEL:   %s (%u MHz)",
+             (s_menu_cursor == 0) ? '>' : ' ', ch->name, ch->freq_mhz);
+    osd_draw_string(1, 420, buf);
+
+    snprintf(buf, sizeof(buf), "%c [2] BANDWIDTH: %s",
+             (s_menu_cursor == 1) ? '>' : ' ',
+             (s_bw_gear_mode == BW_GEAR_AUTO) ? "AUTO GEAR (BW40/20)" :
+             (s_bw_gear_mode == BW_GEAR_BW40) ? "FORCED BW40 (WIDE)" : "FORCED BW20 (+3dB)");
+    osd_draw_string(2, 420, buf);
+
+    snprintf(buf, sizeof(buf), "%c [3] AFC TUNE:  %s",
+             (s_menu_cursor == 2) ? '>' : ' ',
+             (s_afc_mode == AFC_MODE_AUTO) ? "AUTO CENTER (+/-1.5M)" :
+             (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
+    osd_draw_string(3, 420, buf);
+
+    snprintf(buf, sizeof(buf), "%c [4] FINETUNE:  %+d kHz",
+             (s_menu_cursor == 3) ? '>' : ' ', cur_off);
+    osd_draw_string(4, 420, buf);
+
+    snprintf(buf, sizeof(buf), "%c [5] SAVE & EXIT (Short=Next, Long=Set)",
+             (s_menu_cursor == 4) ? '>' : ' ');
+    osd_draw_string(5, 420, buf);
+
+    (void)esp_cache_msync((void *)s_osd_line_buf, sizeof(s_osd_line_buf), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+}
+
+static void osd_render_lock_banner(void)
+{
+    for (int l = 0; l < (int)OSD_ACTIVE_LINES; l++) {
+        memcpy(s_osd_line_buf[l], s_blank_line, sizeof(s_blank_line));
+    }
+
+    char buf[64];
+    const fpv_channel_t *ch = rf_get_current_channel();
+
+    osd_draw_string(0, 440, "=============================");
+    osd_draw_string(1, 440, "   >>> VTX GELOCKED! <<<     ");
+    snprintf(buf, sizeof(buf), " KANAAL: %s (%u MHz)", ch->name, ch->freq_mhz);
+    osd_draw_string(2, 440, buf);
+    snprintf(buf, sizeof(buf), " OFFSET: %+d kHz (CFO)", s_cfo_khz);
+    osd_draw_string(3, 440, buf);
+    snprintf(buf, sizeof(buf), " GEAR:   %s | GAIN: %u dB",
+             s_current_bw40 ? "BW40" : "BW20", s_current_gain);
+    osd_draw_string(4, 440, buf);
+    osd_draw_string(5, 440, "=============================");
+
+    (void)esp_cache_msync((void *)s_osd_line_buf, sizeof(s_osd_line_buf), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+}
+
+static void video_set_display_mode(video_display_mode_t mode)
+{
+    if (s_video_mode == mode) return;
+    s_video_mode = mode;
+
+    parlio_tx_unit_disable(s_tx);
+    parlio_tx_unit_enable(s_tx);
+
+    if (mode == VIDEO_MODE_LIVE) {
+        const parlio_transmit_config_t cfg = {
+            .idle_value = DAC_IDLE_CODE,
+            .bitscrambler_program = s_fm_program,
+            .flags.loop_transmission = true,
+        };
+        parlio_tx_unit_transmit(s_tx, s_raw_ring, sizeof(s_raw_ring) * 8u, &cfg);
+        patch_descriptors_clear_eof(s_tx_dma_ch, false);
+    } else {
+        const parlio_transmit_config_t cfg = {
+            .idle_value = 20,
+            .bitscrambler_program = NULL,
+            .flags.loop_transmission = true,
+        };
+        (void)esp_cache_msync((void *)s_osd_dma_nodes, sizeof(s_osd_dma_nodes), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        (void)esp_cache_msync((void *)s_blank_line, sizeof(s_blank_line), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        (void)esp_cache_msync((void *)s_vsync_line, sizeof(s_vsync_line), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        (void)esp_cache_msync((void *)s_osd_line_buf, sizeof(s_osd_line_buf), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
+        parlio_tx_unit_transmit(s_tx, s_blank_line, NTSC_LINE_BYTES * 8u, &cfg);
+
+        if (s_tx_dma_ch >= 0 && s_tx_dma_ch < 3) {
+            AHB_DMA.channel[s_tx_dma_ch].out.out_link.outlink_stop_chn = 1;
+            AHB_DMA.out_link_addr[s_tx_dma_ch].outlink_addr_chn = (uint32_t)(uintptr_t)&s_osd_dma_nodes[0];
+            AHB_DMA.channel[s_tx_dma_ch].out.out_link.outlink_start_chn = 1;
+        }
+    }
+}
+
+static void init_boot_button(void)
+{
+    const gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << BOOT_BTN_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&cfg);
+}
+
+static void handle_button_short_click(void)
+{
+    if (s_menu_active) {
+        s_menu_cursor = (s_menu_cursor + 1) % 5;
+        osd_render_menu();
+        s_menu_timeout_ticks = 0;
+        printf("[BTN: SHORT] Menu cursor -> %d\n", s_menu_cursor);
+    } else {
+        rf_cycle_channel();
+        s_cfo_khz = 0;
+        s_agc_state = AGC_STATE_SEARCH;
+        const fpv_channel_t *ch = rf_get_current_channel();
+        printf("[BTN: SHORT] Channel switched to %s (%u MHz)\n", ch->name, ch->freq_mhz);
+        osd_render_lock_banner();
+        video_set_display_mode(VIDEO_MODE_OSD_BANNER);
+        s_osd_banner_ticks = 30;
+    }
+}
+
+static void handle_button_long_click(void)
+{
+    if (!s_menu_active) {
+        s_menu_active = true;
+        s_menu_cursor = 0;
+        s_menu_timeout_ticks = 0;
+        osd_render_menu();
+        video_set_display_mode(VIDEO_MODE_OSD_MENU);
+        printf("[BTN: LONG] OSD Menu Opened!\n");
+    } else {
+        switch (s_menu_cursor) {
+        case 0:
+            rf_cycle_channel();
+            s_cfo_khz = 0;
+            s_agc_state = AGC_STATE_SEARCH;
+            break;
+        case 1:
+            if (s_bw_gear_mode == BW_GEAR_AUTO) {
+                s_bw_gear_mode = BW_GEAR_BW40;
+                s_current_bw40 = true;
+                rf_set_analog_bandwidth(true);
+            } else if (s_bw_gear_mode == BW_GEAR_BW40) {
+                s_bw_gear_mode = BW_GEAR_BW20;
+                s_current_bw40 = false;
+                rf_set_analog_bandwidth(false);
+            } else {
+                s_bw_gear_mode = BW_GEAR_AUTO;
+            }
+            break;
+        case 2:
+            if (s_afc_mode == AFC_MODE_AUTO) {
+                s_afc_mode = AFC_MODE_HOLD;
+            } else if (s_afc_mode == AFC_MODE_HOLD) {
+                s_afc_mode = AFC_MODE_OFF;
+                rf_set_frequency_offset_khz(0);
+            } else {
+                s_afc_mode = AFC_MODE_AUTO;
+            }
+            break;
+        case 3:
+            {
+                int cur = rf_get_frequency_offset_khz() + 100;
+                if (cur > 500) cur = -500;
+                rf_set_frequency_offset_khz(cur);
+            }
+            break;
+        case 4:
+            s_menu_active = false;
+            video_set_display_mode(VIDEO_MODE_LIVE);
+            printf("[BTN: LONG] OSD Menu Closed -> Live Video!\n");
+            return;
+        default:
+            break;
+        }
+        osd_render_menu();
+        s_menu_timeout_ticks = 0;
+    }
+}
+
 static void analog_agc_task(void *arg)
 {
     (void)arg;
@@ -335,9 +617,47 @@ static void analog_agc_task(void *arg)
     int afc_ticks = 0;
     int telemetry_ticks = 0;
     uint8_t target_gain = 32u;
+    int btn_ticks = 0;
+    bool btn_long_fired = false;
+    bool was_locked = false;
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(50)); /* 20 Hz evaluation (every 50 ms) */
+
+        /* 1. BOOT Button Sampling & Debounce (GPIO 28, active LOW) */
+        int btn_level = gpio_get_level(BOOT_BTN_GPIO);
+        if (btn_level == 0) {
+            btn_ticks++;
+            if (btn_ticks >= 12 && !btn_long_fired) { /* 600 ms long press */
+                btn_long_fired = true;
+                handle_button_long_click();
+            }
+        } else {
+            if (btn_ticks > 0) {
+                if (!btn_long_fired && btn_ticks >= 1) { /* 50 - 550 ms short click */
+                    handle_button_short_click();
+                }
+                btn_ticks = 0;
+                btn_long_fired = false;
+            }
+        }
+
+        /* 2. OSD Display Timers & Inactivity Timeout */
+        if (s_menu_active) {
+            s_menu_timeout_ticks++;
+            if (s_menu_timeout_ticks >= 120) { /* 6.0s inactivity auto-exit */
+                s_menu_active = false;
+                video_set_display_mode(VIDEO_MODE_LIVE);
+                printf("[MENU] Inactivity timeout (6s) -> Live Video\n");
+            }
+        } else if (s_video_mode == VIDEO_MODE_OSD_BANNER) {
+            if (s_osd_banner_ticks > 0) {
+                s_osd_banner_ticks--;
+                if (s_osd_banner_ticks == 0) {
+                    video_set_display_mode(VIDEO_MODE_LIVE);
+                }
+            }
+        }
 
         if (s_agc_mode == ANALOG_AGC_MANUAL) {
             target_gain = s_current_gain;
@@ -581,6 +901,17 @@ apply_target:
             }
         }
 
+        /* 6. Transient Carrier Lock Banner Detection */
+        bool is_locked = (s_agc_state == AGC_STATE_TRACK) && (q_phase >= 55);
+        if (is_locked && !was_locked) {
+            if (!s_menu_active) {
+                osd_render_lock_banner();
+                video_set_display_mode(VIDEO_MODE_OSD_BANNER);
+                s_osd_banner_ticks = 30; /* 1.5 seconds */
+            }
+        }
+        was_locked = is_locked;
+
 update_telemetry:
         telemetry_ticks++;
         if (telemetry_ticks >= 20) { /* 1 Hz periodic telemetry log */
@@ -750,6 +1081,12 @@ static void console_diag_task(void *arg)
 
 esp_err_t video_start(void)
 {
+    /* Initialize BOOT button on GPIO 28 */
+    init_boot_button();
+
+    /* Initialize OSD CVBS scanline buffers & 262-node DMA descriptor chain */
+    osd_init_buffers();
+
     /* Zero the ring before starting. Flush to DMA-visible SRAM. */
     memset(s_raw_ring, 0, sizeof(s_raw_ring));
     (void)esp_cache_msync(s_raw_ring, sizeof(s_raw_ring),
