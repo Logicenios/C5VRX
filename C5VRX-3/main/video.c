@@ -77,22 +77,17 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 #define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
 
 /* NTSC 240p Composite Video Generation (at 40 MHz DAC clock, 2544 bytes per line, 60.012 Hz) */
-#define NTSC_LINE_BYTES   2544u
-#define NTSC_LINE_STRIDE  2560u
-#define OSD_ACTIVE_LINES  56u
-#define NTSC_TOTAL_LINES  262u
-
-typedef enum {
-    VIDEO_MODE_LIVE = 0,
-    VIDEO_MODE_OSD_BANNER = 1,
-    VIDEO_MODE_OSD_MENU = 2,
-} video_display_mode_t;
-
-static volatile video_display_mode_t s_video_mode = VIDEO_MODE_LIVE;
+/* OSD State */
 static volatile bool s_menu_active = false;
 static volatile int s_menu_cursor = 0;
 static int s_menu_timeout_ticks = 0;
 static int s_osd_banner_ticks = 0;
+
+/* White pixel IQ pattern in Phase5 WBFM domain:
+ * A 180-degree phase flip (Delta_phi = 16 on 32-phase circle) evaluates to DAC code 63 (PEAK WHITE)
+ * in the embedded Phase5 BitScrambler discriminator LUT. */
+#define IQ_WHITE_BYTE_A   0x70u  /* I = +7, Q = 0 (Phase 0) */
+#define IQ_WHITE_BYTE_B   0x90u  /* I = -7, Q = 0 (Phase 16) */
 
 /* TX GPIO mapping: 6-bit resistor DAC.
  * Order: DAC bit 0 (LSB) .. DAC bit 5 (MSB) on data_gpio_nums[0..5].
@@ -111,12 +106,6 @@ static const char *TAG = "c5vrx3_video";
  * TX starts one block (4096 bytes = 102.4 µs) behind RX; they share
  * PLL_F240M/6, so separation cannot drift during normal operation. */
 static DMA_ATTR __attribute__((aligned(64))) uint8_t s_raw_ring[RAW_RING_BYTES];
-
-/* Static NTSC CVBS scanline buffers & 262-node DMA descriptor chain in HP SRAM */
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_blank_line[NTSC_LINE_STRIDE];
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_vsync_line[NTSC_LINE_STRIDE];
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_osd_line_buf[OSD_ACTIVE_LINES][NTSC_LINE_STRIDE];
-static DMA_ATTR __attribute__((aligned(64))) dma_descriptor_t s_osd_dma_nodes[NTSC_TOTAL_LINES];
 
 static parlio_rx_unit_handle_t      s_rx;
 static parlio_rx_delimiter_handle_t s_rx_delimiter;
@@ -353,175 +342,116 @@ static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in k
  * On-Screen Display (OSD) Engine & Single-Button Menu Controller
  * ========================================================================= */
 
-static void osd_init_buffers(void)
+/* =========================================================================
+ * Source-Synchronous Live Video OSD Overlay Engine
+ *
+ * Injects white text pixels directly into s_raw_ring synchronized to the
+ * camera's received horizontal sync (H-sync) pulses.
+ *
+ * In the Phase5 BitScrambler demodulator, alternating bytes of 0x70 and 0x90
+ * (180-deg phase flip at 40 MS/s) evaluate to DAC code 63 (PEAK WHITE).
+ * Unmodified bytes remain 100% untouched live camera video.
+ * ========================================================================= */
+
+static int find_hsync_offset(const uint8_t *ring, int search_start, int search_len)
 {
-    /* H-Sync tip: 188 bytes of code 0, remaining 2356 bytes of code 20 (blanking) */
-    memset(s_blank_line, 20, sizeof(s_blank_line));
-    memset(s_blank_line, 0, 188);
+    int sync_run = 0;
+    int sync_start = -1;
+    int8_t prev_i = 0, prev_q = 0;
 
-    /* V-Sync serration line: 2 wide pulses */
-    memset(s_vsync_line, 20, sizeof(s_vsync_line));
-    memset(s_vsync_line, 0, 1084);
-    memset(&s_vsync_line[1272], 0, 1084);
+    for (int k = 0; k < search_len; k++) {
+        int idx = (search_start + k) % (int)RAW_RING_BYTES;
+        uint8_t b = ring[idx];
+        int8_t q = (int8_t)((b & 0x0fu) << 4) >> 4;
+        int8_t in_val = (int8_t)(b & 0xf0u) >> 4;
 
-    /* Initialize all 56 text lines to blank line */
-    for (int l = 0; l < (int)OSD_ACTIVE_LINES; l++) {
-        memcpy(s_osd_line_buf[l], s_blank_line, sizeof(s_blank_line));
-    }
-
-    /* Chain 262 DMA descriptors for rock-solid 60.012 Hz NTSC 240p */
-    for (int i = 0; i < (int)NTSC_TOTAL_LINES; i++) {
-        dma_descriptor_t *node = &s_osd_dma_nodes[i];
-        node->dw0.size = NTSC_LINE_BYTES;
-        node->dw0.length = NTSC_LINE_BYTES;
-        node->dw0.owner = 1;
-        node->dw0.suc_eof = 0;
-
-        if (i < 6) {
-            /* Lines 0..5: Vertical sync serrations */
-            node->buffer = s_vsync_line;
-        } else if (i >= 102 && i < (int)(102 + OSD_ACTIVE_LINES)) {
-            /* Lines 102..157: Active text lines (56 scanlines in screen center) */
-            node->buffer = s_osd_line_buf[i - 102];
-        } else {
-            /* Lines 6..101 (top) and 158..261 (bottom): Blank black lines */
-            node->buffer = s_blank_line;
-        }
-        node->next = (i < (int)NTSC_TOTAL_LINES - 1) ? &s_osd_dma_nodes[i + 1] : &s_osd_dma_nodes[0];
-        (void)esp_cache_msync(node, sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-    }
-}
-
-static void osd_draw_string(int row_idx, int col_x, const char *str)
-{
-    if (row_idx < 0 || row_idx >= (int)(OSD_ACTIVE_LINES / 8u)) return;
-    int base_line = row_idx * 8;
-
-    while (*str && col_x < 2400) {
-        char ch = *str++;
-        int font_idx = (ch >= 32 && ch <= 126) ? (ch - 32) : 0;
-
-        for (int r = 0; r < 8; r++) {
-            uint8_t bits = s_font8x8[font_idx][r];
-            uint8_t *line_ptr = &s_osd_line_buf[base_line + r][col_x];
-
-            for (int b = 7; b >= 0; b--) {
-                uint8_t val = (bits & (1 << b)) ? 56 : 20;
-                *line_ptr++ = val;
-                *line_ptr++ = val;
-                *line_ptr++ = val;
-                *line_ptr++ = val;
+        if (k > 0) {
+            int p = (int)in_val * in_val + (int)q * q;
+            int cross = (int)q * prev_i - (int)in_val * prev_q;
+            /* Sync tip: carrier present (p >= 8) and frequency deviation strongly negative (cross <= -6) */
+            if (p >= 8 && cross <= -6) {
+                if (sync_run == 0) sync_start = idx;
+                sync_run++;
+                if (sync_run >= 70) { /* Confirmed H-sync tip (>1.75 µs negative run) */
+                    return sync_start;
+                }
+            } else {
+                sync_run = 0;
             }
         }
-        col_x += 32; /* 8 font bits * 4 bytes per bit = 32 bytes per char */
+        prev_i = in_val;
+        prev_q = q;
     }
+    return -1;
 }
 
-static void osd_render_menu(void)
+static void draw_text_on_line(uint8_t *ring, int line_hsync, int x_offset_samples, int font_row, const char *str)
 {
-    for (int l = 0; l < (int)OSD_ACTIVE_LINES; l++) {
-        memcpy(s_osd_line_buf[l], s_blank_line, sizeof(s_blank_line));
-    }
+    int base = (line_hsync + x_offset_samples) % (int)RAW_RING_BYTES;
 
-    char buf[64];
-    const fpv_channel_t *ch = rf_get_current_channel();
-    fpv_band_t band = rf_get_current_band();
-    int cur_off = rf_get_frequency_offset_khz();
+    while (*str) {
+        char ch = *str++;
+        int font_idx = (ch >= 32 && ch <= 126) ? (ch - 32) : 0;
+        uint8_t bits = s_font8x8[font_idx][font_row];
 
-    osd_draw_string(0, 420, "=== C5VRX-3 SETTINGS MENU ===");
-
-    snprintf(buf, sizeof(buf), "%c [1] BAND:      %s",
-             (s_menu_cursor == 0) ? '>' : ' ', rf_get_band_name(band));
-    osd_draw_string(1, 420, buf);
-
-    snprintf(buf, sizeof(buf), "%c [2] CHANNEL:   %s (%u MHz)",
-             (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz);
-    osd_draw_string(2, 420, buf);
-
-    snprintf(buf, sizeof(buf), "%c [3] BANDWIDTH: %s",
-             (s_menu_cursor == 2) ? '>' : ' ',
-             (s_bw_gear_mode == BW_GEAR_AUTO) ? "AUTO GEAR (BW40/20)" :
-             (s_bw_gear_mode == BW_GEAR_BW40) ? "FORCED BW40 (WIDE)" : "FORCED BW20 (+3dB)");
-    osd_draw_string(3, 420, buf);
-
-    snprintf(buf, sizeof(buf), "%c [4] AFC TUNE:  %s",
-             (s_menu_cursor == 3) ? '>' : ' ',
-             (s_afc_mode == AFC_MODE_AUTO) ? "AUTO CENTER (+/-1.5M)" :
-             (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
-    osd_draw_string(4, 420, buf);
-
-    snprintf(buf, sizeof(buf), "%c [5] FINETUNE:  %+d kHz",
-             (s_menu_cursor == 4) ? '>' : ' ', cur_off);
-    osd_draw_string(5, 420, buf);
-
-    snprintf(buf, sizeof(buf), "%c [6] SAVE & EXIT (Short=Next, Long=Set)",
-             (s_menu_cursor == 5) ? '>' : ' ');
-    osd_draw_string(6, 420, buf);
-
-    (void)esp_cache_msync((void *)s_osd_line_buf, sizeof(s_osd_line_buf), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-}
-
-static void osd_render_lock_banner(void)
-{
-    for (int l = 0; l < (int)OSD_ACTIVE_LINES; l++) {
-        memcpy(s_osd_line_buf[l], s_blank_line, sizeof(s_blank_line));
-    }
-
-    char buf[64];
-    const fpv_channel_t *ch = rf_get_current_channel();
-    fpv_band_t band = rf_get_current_band();
-
-    osd_draw_string(0, 440, "=============================");
-    osd_draw_string(1, 440, "   >>> VTX GELOCKED! <<<     ");
-    snprintf(buf, sizeof(buf), " BAND:   %s", rf_get_band_name(band));
-    osd_draw_string(2, 440, buf);
-    snprintf(buf, sizeof(buf), " KANAAL: %s (%u MHz)", ch->name, ch->freq_mhz);
-    osd_draw_string(3, 440, buf);
-    snprintf(buf, sizeof(buf), " OFFSET: %+d kHz (CFO)", s_cfo_khz);
-    osd_draw_string(4, 440, buf);
-    snprintf(buf, sizeof(buf), " GEAR:   %s | GAIN: %u dB",
-             s_current_bw40 ? "BW40" : "BW20", s_current_gain);
-    osd_draw_string(5, 440, buf);
-    osd_draw_string(6, 440, "=============================");
-
-    (void)esp_cache_msync((void *)s_osd_line_buf, sizeof(s_osd_line_buf), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-}
-
-static void video_set_display_mode(video_display_mode_t mode)
-{
-    if (s_video_mode == mode) return;
-    s_video_mode = mode;
-
-    parlio_tx_unit_disable(s_tx);
-    parlio_tx_unit_enable(s_tx);
-
-    if (mode == VIDEO_MODE_LIVE) {
-        const parlio_transmit_config_t cfg = {
-            .idle_value = DAC_IDLE_CODE,
-            .bitscrambler_program = s_fm_program,
-            .flags.loop_transmission = true,
-        };
-        parlio_tx_unit_transmit(s_tx, s_raw_ring, sizeof(s_raw_ring) * 8u, &cfg);
-        patch_descriptors_clear_eof(s_tx_dma_ch, false);
-    } else {
-        const parlio_transmit_config_t cfg = {
-            .idle_value = 20,
-            .bitscrambler_program = NULL,
-            .flags.loop_transmission = true,
-        };
-        (void)esp_cache_msync((void *)s_osd_dma_nodes, sizeof(s_osd_dma_nodes), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        (void)esp_cache_msync((void *)s_blank_line, sizeof(s_blank_line), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        (void)esp_cache_msync((void *)s_vsync_line, sizeof(s_vsync_line), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        (void)esp_cache_msync((void *)s_osd_line_buf, sizeof(s_osd_line_buf), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-
-        parlio_tx_unit_transmit(s_tx, s_blank_line, NTSC_LINE_BYTES * 8u, &cfg);
-
-        if (s_tx_dma_ch >= 0 && s_tx_dma_ch < 3) {
-            AHB_DMA.channel[s_tx_dma_ch].out.out_link.outlink_stop_chn = 1;
-            AHB_DMA.out_link_addr[s_tx_dma_ch].outlink_addr_chn = (uint32_t)(uintptr_t)&s_osd_dma_nodes[0];
-            AHB_DMA.channel[s_tx_dma_ch].out.out_link.outlink_start_chn = 1;
+        for (int b = 7; b >= 0; b--) {
+            if (bits & (1 << b)) {
+                /* White pixel: 4 samples (100 ns) of 180-deg phase flips */
+                ring[base % (int)RAW_RING_BYTES] = IQ_WHITE_BYTE_A;
+                ring[(base + 1) % (int)RAW_RING_BYTES] = IQ_WHITE_BYTE_B;
+                ring[(base + 2) % (int)RAW_RING_BYTES] = IQ_WHITE_BYTE_A;
+                ring[(base + 3) % (int)RAW_RING_BYTES] = IQ_WHITE_BYTE_B;
+            }
+            base = (base + 4) % (int)RAW_RING_BYTES;
         }
     }
+}
+
+static void osd_overlay_render(void)
+{
+    if (!s_menu_active && s_osd_banner_ticks <= 0) return;
+
+    /* Invalidate ring cache to read fresh DMA samples */
+    (void)esp_cache_msync((void *)s_raw_ring, 4096, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+
+    int hs = find_hsync_offset(s_raw_ring, 0, 3000);
+    if (hs < 0) return; /* No coherent H-sync found (e.g. pure noise) */
+
+    char line_text[32];
+    const fpv_channel_t *ch = rf_get_current_channel();
+
+    if (s_menu_active) {
+        /* In menu mode: display current selected menu item */
+        if (s_menu_cursor == 0) {
+            snprintf(line_text, sizeof(line_text), "BAND: %s", rf_get_band_name(rf_get_current_band()));
+        } else if (s_menu_cursor == 1) {
+            snprintf(line_text, sizeof(line_text), "CH: %s (%u MHz)", ch->name, ch->freq_mhz);
+        } else if (s_menu_cursor == 2) {
+            snprintf(line_text, sizeof(line_text), "BW: %s", s_current_bw40 ? "BW40" : "BW20");
+        } else if (s_menu_cursor == 3) {
+            snprintf(line_text, sizeof(line_text), "AFC: %s",
+                     (s_afc_mode == AFC_MODE_AUTO) ? "AUTO" :
+                     (s_afc_mode == AFC_MODE_HOLD) ? "HOLD" : "OFF");
+        } else if (s_menu_cursor == 4) {
+            snprintf(line_text, sizeof(line_text), "TUNE: %+d kHz", rf_get_frequency_offset_khz());
+        } else {
+            snprintf(line_text, sizeof(line_text), "SAVE & EXIT");
+        }
+    } else {
+        /* Transient lock/switch banner */
+        snprintf(line_text, sizeof(line_text), "%s %uMHz %s G%u",
+                 ch->name, ch->freq_mhz, s_current_bw40 ? "BW40" : "BW20", s_current_gain);
+    }
+
+    /* Draw across lines that are currently in the ring (each line = 2542 samples at 40 MS/s) */
+    for (int r = 0; r < 8; r++) {
+        int line_hs = (hs + r * 2542) % (int)RAW_RING_BYTES;
+        /* Active video begins ~12 µs (480 samples) after H-sync */
+        draw_text_on_line(s_raw_ring, line_hs, 500, r, line_text);
+    }
+
+    /* Flush modified bytes so TX GDMA sees them */
+    (void)esp_cache_msync((void *)s_raw_ring, RAW_RING_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 }
 
 static void init_boot_button(void)
@@ -540,7 +470,6 @@ static void handle_button_short_click(void)
 {
     if (s_menu_active) {
         s_menu_cursor = (s_menu_cursor + 1) % 6;
-        osd_render_menu();
         s_menu_timeout_ticks = 0;
         printf("[BTN: SHORT] Menu cursor -> %d\n", s_menu_cursor);
     } else {
@@ -550,8 +479,6 @@ static void handle_button_short_click(void)
         const fpv_channel_t *ch = rf_get_current_channel();
         printf("[BTN: SHORT] Channel switched to %s (%u MHz) in %s\n",
                ch->name, ch->freq_mhz, rf_get_band_name(rf_get_current_band()));
-        osd_render_lock_banner();
-        video_set_display_mode(VIDEO_MODE_OSD_BANNER);
         s_osd_banner_ticks = 30;
     }
 }
@@ -562,8 +489,6 @@ static void handle_button_long_click(void)
         s_menu_active = true;
         s_menu_cursor = 0;
         s_menu_timeout_ticks = 0;
-        osd_render_menu();
-        video_set_display_mode(VIDEO_MODE_OSD_MENU);
         printf("[BTN: LONG] OSD Menu Opened!\n");
     } else {
         switch (s_menu_cursor) {
@@ -612,13 +537,11 @@ static void handle_button_long_click(void)
             break;
         case 5: /* SAVE & EXIT */
             s_menu_active = false;
-            video_set_display_mode(VIDEO_MODE_LIVE);
             printf("[BTN: LONG] OSD Menu Closed -> Live Video!\n");
             return;
         default:
             break;
         }
-        osd_render_menu();
         s_menu_timeout_ticks = 0;
     }
 }
@@ -664,22 +587,10 @@ static void analog_agc_task(void *arg)
             s_menu_timeout_ticks++;
             if (s_menu_timeout_ticks >= 120) { /* 6.0s inactivity auto-exit */
                 s_menu_active = false;
-                video_set_display_mode(VIDEO_MODE_LIVE);
                 printf("[MENU] Inactivity timeout (6s) -> Live Video\n");
             }
-        } else if (s_video_mode == VIDEO_MODE_OSD_BANNER) {
-            if (s_osd_banner_ticks > 0) {
-                s_osd_banner_ticks--;
-                if (s_osd_banner_ticks == 0) {
-                    video_set_display_mode(VIDEO_MODE_LIVE);
-                }
-            }
-        }
-
-        if (s_agc_mode == ANALOG_AGC_MANUAL) {
-            target_gain = s_current_gain;
-            s_shadow_gain = s_current_gain;
-            continue;
+        } else if (s_osd_banner_ticks > 0) {
+            s_osd_banner_ticks--;
         }
 
         /* 1. Invalidate 256 bytes in CPU L1 cache so we read fresh GDMA samples from SRAM */
@@ -752,6 +663,12 @@ static void analog_agc_task(void *arg)
             if (instant_cfo > 2000)  instant_cfo = 2000;
             if (instant_cfo < -2000) instant_cfo = -2000;
             s_cfo_khz = (s_cfo_khz * 7 + instant_cfo) / 8;
+        }
+
+        if (s_agc_mode == ANALOG_AGC_MANUAL) {
+            target_gain = s_current_gain;
+            s_shadow_gain = s_current_gain;
+            goto apply_target;
         }
 
         /* Settle delay after gain change */
@@ -922,12 +839,13 @@ apply_target:
         bool is_locked = (s_agc_state == AGC_STATE_TRACK) && (q_phase >= 55);
         if (is_locked && !was_locked) {
             if (!s_menu_active) {
-                osd_render_lock_banner();
-                video_set_display_mode(VIDEO_MODE_OSD_BANNER);
                 s_osd_banner_ticks = 30; /* 1.5 seconds */
             }
         }
         was_locked = is_locked;
+
+        /* Source-synchronous live CVBS OSD overlay */
+        osd_overlay_render();
 
 update_telemetry:
         telemetry_ticks++;
@@ -1109,8 +1027,6 @@ esp_err_t video_start(void)
     /* Initialize BOOT button on GPIO 28 */
     init_boot_button();
 
-    /* Initialize OSD CVBS scanline buffers & 262-node DMA descriptor chain */
-    osd_init_buffers();
 
     /* Zero the ring before starting. Flush to DMA-visible SRAM. */
     memset(s_raw_ring, 0, sizeof(s_raw_ring));
