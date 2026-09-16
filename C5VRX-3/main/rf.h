@@ -47,11 +47,27 @@ typedef struct {
     uint16_t freq_mhz;   /* Base channel center frequency in MHz */
 } fpv_channel_t;
 
+typedef enum {
+    FPV_BAND_R = 0,  /* RaceBand (R1..R8) */
+    FPV_BAND_A = 1,  /* Boscam A (A1..A8) */
+    FPV_BAND_B = 2,  /* Boscam B (B1..B8) */
+    FPV_BAND_E = 3,  /* Boscam E (E1..E8) */
+    FPV_BAND_F = 4,  /* FatShark / Airwave (F1..F8) */
+    FPV_BAND_L = 5,  /* LowBand (L1..L8) */
+    FPV_BAND_COUNT = 6
+} fpv_band_t;
+
 const fpv_channel_t *rf_get_current_channel(void);
 size_t rf_get_channel_index(void);
 size_t rf_get_channel_count(void);
 esp_err_t rf_set_channel(size_t index);
 esp_err_t rf_cycle_channel(void);
+
+fpv_band_t rf_get_current_band(void);
+const char *rf_get_band_name(fpv_band_t band);
+void rf_cycle_band(void);
+uint8_t rf_get_current_channel_number(void);
+void rf_cycle_channel_in_band(void);
 
 uint16_t rf_get_frequency_mhz(void);
 int rf_get_frequency_offset_khz(void);

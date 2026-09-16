@@ -409,46 +409,46 @@ extern void phy_chip_set_chan_offset(int offset_khz);
 static bool s_analog_bw40 = true;
 static uint8_t s_current_gain_val = 32u;
 
-/* Standard FPV Channel Table (Boscam A, RaceBand R, Boscam B, FatShark F) */
-static const fpv_channel_t s_fpv_channels[] = {
-    /* Band A (Boscam A) - Default A1 is 5865 MHz */
-    { "A1", 5865 },
-    { "A2", 5845 },
-    { "A3", 5825 },
-    { "A4", 5805 },
-    { "A5", 5785 },
-    { "A6", 5765 },
-    { "A7", 5745 },
-    { "A8", 5725 },
-    /* RaceBand (R1..R8) */
-    { "R1", 5658 },
-    { "R2", 5695 },
-    { "R3", 5732 },
-    { "R4", 5769 },
-    { "R5", 5806 },
-    { "R6", 5843 },
-    { "R7", 5880 },
-    /* Band B (Boscam B) */
-    { "B1", 5733 },
-    { "B2", 5752 },
-    { "B3", 5771 },
-    { "B4", 5790 },
-    { "B5", 5809 },
-    { "B6", 5828 },
-    { "B7", 5847 },
-    { "B8", 5866 },
-    /* Band F (FatShark / Airwave) */
-    { "F1", 5740 },
-    { "F2", 5760 },
-    { "F3", 5780 },
-    { "F4", 5800 },
-    { "F5", 5820 },
-    { "F6", 5840 },
-    { "F7", 5860 },
-    { "F8", 5880 },
+/* Standard FPV Channel Table: 6 Bands x 8 Channels = 48 Channels
+ * RaceBand (R), Boscam A (A), Boscam B (B), Boscam E (E), FatShark (F), LowBand (L) */
+static const fpv_channel_t s_fpv_channels[FPV_BAND_COUNT][8] = {
+    [FPV_BAND_R] = { /* RaceBand (R1..R8) */
+        { "R1", 5658 }, { "R2", 5695 }, { "R3", 5732 }, { "R4", 5769 },
+        { "R5", 5806 }, { "R6", 5843 }, { "R7", 5880 }, { "R8", 5917 },
+    },
+    [FPV_BAND_A] = { /* Boscam A (A1..A8) - Default A1 is 5865 MHz */
+        { "A1", 5865 }, { "A2", 5845 }, { "A3", 5825 }, { "A4", 5805 },
+        { "A5", 5785 }, { "A6", 5765 }, { "A7", 5745 }, { "A8", 5725 },
+    },
+    [FPV_BAND_B] = { /* Boscam B (B1..B8) */
+        { "B1", 5733 }, { "B2", 5752 }, { "B3", 5771 }, { "B4", 5790 },
+        { "B5", 5809 }, { "B6", 5828 }, { "B7", 5847 }, { "B8", 5866 },
+    },
+    [FPV_BAND_E] = { /* Boscam E (E1..E8) */
+        { "E1", 5705 }, { "E2", 5685 }, { "E3", 5665 }, { "E4", 5645 },
+        { "E5", 5885 }, { "E6", 5905 }, { "E7", 5925 }, { "E8", 5945 },
+    },
+    [FPV_BAND_F] = { /* FatShark / Airwave (F1..F8) */
+        { "F1", 5740 }, { "F2", 5760 }, { "F3", 5780 }, { "F4", 5800 },
+        { "F5", 5820 }, { "F6", 5840 }, { "F7", 5860 }, { "F8", 5880 },
+    },
+    [FPV_BAND_L] = { /* LowBand / Band D (L1..L8) */
+        { "L1", 5362 }, { "L2", 5399 }, { "L3", 5436 }, { "L4", 5473 },
+        { "L5", 5510 }, { "L6", 5547 }, { "L7", 5584 }, { "L8", 5621 },
+    },
 };
 
-static size_t s_channel_idx = 0; /* Default: A1 (5865 MHz) */
+static const char *s_band_names[FPV_BAND_COUNT] = {
+    [FPV_BAND_R] = "RaceBand (R)",
+    [FPV_BAND_A] = "Boscam A (A)",
+    [FPV_BAND_B] = "Boscam B (B)",
+    [FPV_BAND_E] = "Boscam E (E)",
+    [FPV_BAND_F] = "FatShark (F)",
+    [FPV_BAND_L] = "LowBand (L)",
+};
+
+static fpv_band_t s_current_band = FPV_BAND_A;
+static uint8_t s_current_channel_idx = 0; /* 0..7 (Default A1: 5865 MHz) */
 static uint16_t s_current_freq_mhz = 5865u;
 static int s_current_offset_khz = 0;
 
@@ -478,17 +478,33 @@ uint32_t rf_get_rx_gain_reg(void)
 
 const fpv_channel_t *rf_get_current_channel(void)
 {
-    return &s_fpv_channels[s_channel_idx];
+    return &s_fpv_channels[s_current_band][s_current_channel_idx];
 }
 
 size_t rf_get_channel_index(void)
 {
-    return s_channel_idx;
+    return (size_t)s_current_band * 8u + s_current_channel_idx;
 }
 
 size_t rf_get_channel_count(void)
 {
-    return sizeof(s_fpv_channels) / sizeof(s_fpv_channels[0]);
+    return FPV_BAND_COUNT * 8u;
+}
+
+fpv_band_t rf_get_current_band(void)
+{
+    return s_current_band;
+}
+
+const char *rf_get_band_name(fpv_band_t band)
+{
+    if (band >= FPV_BAND_COUNT) return "Unknown";
+    return s_band_names[band];
+}
+
+uint8_t rf_get_current_channel_number(void)
+{
+    return s_current_channel_idx + 1u;
 }
 
 uint16_t rf_get_frequency_mhz(void)
@@ -522,11 +538,12 @@ void rf_step_frequency_offset_khz(int delta_khz)
 
 esp_err_t rf_set_channel(size_t index)
 {
-    if (index >= sizeof(s_fpv_channels) / sizeof(s_fpv_channels[0])) {
+    if (index >= FPV_BAND_COUNT * 8u) {
         return ESP_ERR_INVALID_ARG;
     }
-    s_channel_idx = index;
-    s_current_freq_mhz = s_fpv_channels[index].freq_mhz;
+    s_current_band = (fpv_band_t)(index / 8u);
+    s_current_channel_idx = (uint8_t)(index % 8u);
+    s_current_freq_mhz = s_fpv_channels[s_current_band][s_current_channel_idx].freq_mhz;
     s_current_offset_khz = 0;
 
     phy_set_freq(s_current_freq_mhz, 0);
@@ -539,6 +556,18 @@ esp_err_t rf_set_channel(size_t index)
 
 esp_err_t rf_cycle_channel(void)
 {
-    size_t next = (s_channel_idx + 1) % (sizeof(s_fpv_channels) / sizeof(s_fpv_channels[0]));
+    size_t next = (rf_get_channel_index() + 1u) % (FPV_BAND_COUNT * 8u);
     return rf_set_channel(next);
+}
+
+void rf_cycle_band(void)
+{
+    s_current_band = (fpv_band_t)((s_current_band + 1u) % FPV_BAND_COUNT);
+    (void)rf_set_channel((size_t)s_current_band * 8u + s_current_channel_idx);
+}
+
+void rf_cycle_channel_in_band(void)
+{
+    s_current_channel_idx = (s_current_channel_idx + 1u) % 8u;
+    (void)rf_set_channel((size_t)s_current_band * 8u + s_current_channel_idx);
 }

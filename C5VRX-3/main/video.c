@@ -79,7 +79,7 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 /* NTSC 240p Composite Video Generation (at 40 MHz DAC clock, 2544 bytes per line, 60.012 Hz) */
 #define NTSC_LINE_BYTES   2544u
 #define NTSC_LINE_STRIDE  2560u
-#define OSD_ACTIVE_LINES  48u
+#define OSD_ACTIVE_LINES  56u
 #define NTSC_TOTAL_LINES  262u
 
 typedef enum {
@@ -364,7 +364,7 @@ static void osd_init_buffers(void)
     memset(s_vsync_line, 0, 1084);
     memset(&s_vsync_line[1272], 0, 1084);
 
-    /* Initialize all 48 text lines to blank line */
+    /* Initialize all 56 text lines to blank line */
     for (int l = 0; l < (int)OSD_ACTIVE_LINES; l++) {
         memcpy(s_osd_line_buf[l], s_blank_line, sizeof(s_blank_line));
     }
@@ -380,11 +380,11 @@ static void osd_init_buffers(void)
         if (i < 6) {
             /* Lines 0..5: Vertical sync serrations */
             node->buffer = s_vsync_line;
-        } else if (i >= 106 && i < (int)(106 + OSD_ACTIVE_LINES)) {
-            /* Lines 106..153: Active text lines (48 scanlines in screen center) */
-            node->buffer = s_osd_line_buf[i - 106];
+        } else if (i >= 102 && i < (int)(102 + OSD_ACTIVE_LINES)) {
+            /* Lines 102..157: Active text lines (56 scanlines in screen center) */
+            node->buffer = s_osd_line_buf[i - 102];
         } else {
-            /* Lines 6..105 (top) and 154..261 (bottom): Blank black lines */
+            /* Lines 6..101 (top) and 158..261 (bottom): Blank black lines */
             node->buffer = s_blank_line;
         }
         node->next = (i < (int)NTSC_TOTAL_LINES - 1) ? &s_osd_dma_nodes[i + 1] : &s_osd_dma_nodes[0];
@@ -394,7 +394,7 @@ static void osd_init_buffers(void)
 
 static void osd_draw_string(int row_idx, int col_x, const char *str)
 {
-    if (row_idx < 0 || row_idx >= 6) return;
+    if (row_idx < 0 || row_idx >= (int)(OSD_ACTIVE_LINES / 8u)) return;
     int base_line = row_idx * 8;
 
     while (*str && col_x < 2400) {
@@ -425,33 +425,38 @@ static void osd_render_menu(void)
 
     char buf[64];
     const fpv_channel_t *ch = rf_get_current_channel();
+    fpv_band_t band = rf_get_current_band();
     int cur_off = rf_get_frequency_offset_khz();
 
     osd_draw_string(0, 420, "=== C5VRX-3 SETTINGS MENU ===");
 
-    snprintf(buf, sizeof(buf), "%c [1] CHANNEL:   %s (%u MHz)",
-             (s_menu_cursor == 0) ? '>' : ' ', ch->name, ch->freq_mhz);
+    snprintf(buf, sizeof(buf), "%c [1] BAND:      %s",
+             (s_menu_cursor == 0) ? '>' : ' ', rf_get_band_name(band));
     osd_draw_string(1, 420, buf);
 
-    snprintf(buf, sizeof(buf), "%c [2] BANDWIDTH: %s",
-             (s_menu_cursor == 1) ? '>' : ' ',
-             (s_bw_gear_mode == BW_GEAR_AUTO) ? "AUTO GEAR (BW40/20)" :
-             (s_bw_gear_mode == BW_GEAR_BW40) ? "FORCED BW40 (WIDE)" : "FORCED BW20 (+3dB)");
+    snprintf(buf, sizeof(buf), "%c [2] CHANNEL:   %s (%u MHz)",
+             (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz);
     osd_draw_string(2, 420, buf);
 
-    snprintf(buf, sizeof(buf), "%c [3] AFC TUNE:  %s",
+    snprintf(buf, sizeof(buf), "%c [3] BANDWIDTH: %s",
              (s_menu_cursor == 2) ? '>' : ' ',
-             (s_afc_mode == AFC_MODE_AUTO) ? "AUTO CENTER (+/-1.5M)" :
-             (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
+             (s_bw_gear_mode == BW_GEAR_AUTO) ? "AUTO GEAR (BW40/20)" :
+             (s_bw_gear_mode == BW_GEAR_BW40) ? "FORCED BW40 (WIDE)" : "FORCED BW20 (+3dB)");
     osd_draw_string(3, 420, buf);
 
-    snprintf(buf, sizeof(buf), "%c [4] FINETUNE:  %+d kHz",
-             (s_menu_cursor == 3) ? '>' : ' ', cur_off);
+    snprintf(buf, sizeof(buf), "%c [4] AFC TUNE:  %s",
+             (s_menu_cursor == 3) ? '>' : ' ',
+             (s_afc_mode == AFC_MODE_AUTO) ? "AUTO CENTER (+/-1.5M)" :
+             (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
     osd_draw_string(4, 420, buf);
 
-    snprintf(buf, sizeof(buf), "%c [5] SAVE & EXIT (Short=Next, Long=Set)",
-             (s_menu_cursor == 4) ? '>' : ' ');
+    snprintf(buf, sizeof(buf), "%c [5] FINETUNE:  %+d kHz",
+             (s_menu_cursor == 4) ? '>' : ' ', cur_off);
     osd_draw_string(5, 420, buf);
+
+    snprintf(buf, sizeof(buf), "%c [6] SAVE & EXIT (Short=Next, Long=Set)",
+             (s_menu_cursor == 5) ? '>' : ' ');
+    osd_draw_string(6, 420, buf);
 
     (void)esp_cache_msync((void *)s_osd_line_buf, sizeof(s_osd_line_buf), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 }
@@ -464,17 +469,20 @@ static void osd_render_lock_banner(void)
 
     char buf[64];
     const fpv_channel_t *ch = rf_get_current_channel();
+    fpv_band_t band = rf_get_current_band();
 
     osd_draw_string(0, 440, "=============================");
     osd_draw_string(1, 440, "   >>> VTX GELOCKED! <<<     ");
-    snprintf(buf, sizeof(buf), " KANAAL: %s (%u MHz)", ch->name, ch->freq_mhz);
+    snprintf(buf, sizeof(buf), " BAND:   %s", rf_get_band_name(band));
     osd_draw_string(2, 440, buf);
-    snprintf(buf, sizeof(buf), " OFFSET: %+d kHz (CFO)", s_cfo_khz);
+    snprintf(buf, sizeof(buf), " KANAAL: %s (%u MHz)", ch->name, ch->freq_mhz);
     osd_draw_string(3, 440, buf);
+    snprintf(buf, sizeof(buf), " OFFSET: %+d kHz (CFO)", s_cfo_khz);
+    osd_draw_string(4, 440, buf);
     snprintf(buf, sizeof(buf), " GEAR:   %s | GAIN: %u dB",
              s_current_bw40 ? "BW40" : "BW20", s_current_gain);
-    osd_draw_string(4, 440, buf);
-    osd_draw_string(5, 440, "=============================");
+    osd_draw_string(5, 440, buf);
+    osd_draw_string(6, 440, "=============================");
 
     (void)esp_cache_msync((void *)s_osd_line_buf, sizeof(s_osd_line_buf), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 }
@@ -531,16 +539,17 @@ static void init_boot_button(void)
 static void handle_button_short_click(void)
 {
     if (s_menu_active) {
-        s_menu_cursor = (s_menu_cursor + 1) % 5;
+        s_menu_cursor = (s_menu_cursor + 1) % 6;
         osd_render_menu();
         s_menu_timeout_ticks = 0;
         printf("[BTN: SHORT] Menu cursor -> %d\n", s_menu_cursor);
     } else {
-        rf_cycle_channel();
+        rf_cycle_channel_in_band();
         s_cfo_khz = 0;
         s_agc_state = AGC_STATE_SEARCH;
         const fpv_channel_t *ch = rf_get_current_channel();
-        printf("[BTN: SHORT] Channel switched to %s (%u MHz)\n", ch->name, ch->freq_mhz);
+        printf("[BTN: SHORT] Channel switched to %s (%u MHz) in %s\n",
+               ch->name, ch->freq_mhz, rf_get_band_name(rf_get_current_band()));
         osd_render_lock_banner();
         video_set_display_mode(VIDEO_MODE_OSD_BANNER);
         s_osd_banner_ticks = 30;
@@ -558,12 +567,20 @@ static void handle_button_long_click(void)
         printf("[BTN: LONG] OSD Menu Opened!\n");
     } else {
         switch (s_menu_cursor) {
-        case 0:
-            rf_cycle_channel();
+        case 0: /* BAND */
+            rf_cycle_band();
             s_cfo_khz = 0;
             s_agc_state = AGC_STATE_SEARCH;
+            printf("[MENU: BAND] Switched to %s\n", rf_get_band_name(rf_get_current_band()));
             break;
-        case 1:
+        case 1: /* CHANNEL */
+            rf_cycle_channel_in_band();
+            s_cfo_khz = 0;
+            s_agc_state = AGC_STATE_SEARCH;
+            printf("[MENU: CHANNEL] Switched to %s (%u MHz)\n",
+                   rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz);
+            break;
+        case 2: /* BANDWIDTH */
             if (s_bw_gear_mode == BW_GEAR_AUTO) {
                 s_bw_gear_mode = BW_GEAR_BW40;
                 s_current_bw40 = true;
@@ -576,7 +593,7 @@ static void handle_button_long_click(void)
                 s_bw_gear_mode = BW_GEAR_AUTO;
             }
             break;
-        case 2:
+        case 3: /* AFC TUNE */
             if (s_afc_mode == AFC_MODE_AUTO) {
                 s_afc_mode = AFC_MODE_HOLD;
             } else if (s_afc_mode == AFC_MODE_HOLD) {
@@ -586,14 +603,14 @@ static void handle_button_long_click(void)
                 s_afc_mode = AFC_MODE_AUTO;
             }
             break;
-        case 3:
+        case 4: /* FINETUNE */
             {
                 int cur = rf_get_frequency_offset_khz() + 100;
                 if (cur > 500) cur = -500;
                 rf_set_frequency_offset_khz(cur);
             }
             break;
-        case 4:
+        case 5: /* SAVE & EXIT */
             s_menu_active = false;
             video_set_display_mode(VIDEO_MODE_LIVE);
             printf("[BTN: LONG] OSD Menu Closed -> Live Video!\n");
@@ -978,11 +995,19 @@ static void console_diag_task(void *arg)
                     printf("[BW GEAR] -> AUTO GEARBOX (Dynamic Bandwidth Adaptation)\n");
                 }
             } else if (c == 'c') {
-                rf_cycle_channel();
+                rf_cycle_channel_in_band();
                 const fpv_channel_t *ch = rf_get_current_channel();
                 s_cfo_khz = 0;
                 s_agc_state = AGC_STATE_SEARCH;
-                printf("[CHANNEL] Switched to %s (%u MHz)\n", ch->name, ch->freq_mhz);
+                printf("[CHANNEL] Switched to %s (%u MHz) in %s\n",
+                       ch->name, ch->freq_mhz, rf_get_band_name(rf_get_current_band()));
+            } else if (c == 'C') {
+                rf_cycle_band();
+                const fpv_channel_t *ch = rf_get_current_channel();
+                s_cfo_khz = 0;
+                s_agc_state = AGC_STATE_SEARCH;
+                printf("[BAND] Switched to %s - Channel %s (%u MHz)\n",
+                       rf_get_band_name(rf_get_current_band()), ch->name, ch->freq_mhz);
             } else if (c == 'f') {
                 if (s_afc_mode == AFC_MODE_AUTO) {
                     s_afc_mode = AFC_MODE_HOLD;
