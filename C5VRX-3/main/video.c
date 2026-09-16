@@ -360,15 +360,60 @@ static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in k
  * Unmodified bytes remain 100% untouched live camera video.
  * ========================================================================= */
 
-static inline void write_white_pixel(uint8_t *ring, int pos)
+static inline bool is_sync_tip_sample(const uint8_t *ring, int idx)
+{
+    int idx_prev = (idx + (int)RAW_RING_BYTES - 2) % (int)RAW_RING_BYTES;
+    uint8_t b_curr = ring[idx % (int)RAW_RING_BYTES];
+    uint8_t b_prev = ring[idx_prev];
+    int8_t q_curr = (int8_t)((b_curr & 0x0fu) << 4) >> 4;
+    int8_t i_curr = (int8_t)(b_curr & 0xf0u) >> 4;
+    int8_t q_prev = (int8_t)((b_prev & 0x0fu) << 4) >> 4;
+    int8_t i_prev = (int8_t)(b_prev & 0xf0u) >> 4;
+
+    int p = (int)i_curr * i_curr + (int)q_curr * q_curr;
+    int cross = (int)q_curr * i_prev - (int)i_curr * q_prev;
+
+    /* Sync tip threshold: carrier power p >= 6, cross <= -6 */
+    return (p >= 6 && cross <= -6);
+}
+
+static int find_hsync_edge(const uint8_t *ring, int center, int search_radius)
+{
+    int start = (center + (int)RAW_RING_BYTES - search_radius) % (int)RAW_RING_BYTES;
+    int total_search = search_radius * 2;
+
+    for (int i = 0; i < total_search; i++) {
+        int idx = (start + i) % (int)RAW_RING_BYTES;
+        if (is_sync_tip_sample(ring, idx)) {
+            /* Check if this is the start of a solid sync tip run */
+            int count = 0;
+            for (int k = 0; k < 24; k += 2) {
+                if (is_sync_tip_sample(ring, (idx + k) % (int)RAW_RING_BYTES)) {
+                    count++;
+                }
+            }
+            if (count >= 9) { /* At least 75% of the next 24 samples are sync tip */
+                return idx;
+            }
+        }
+    }
+    return -1;
+}
+
+static inline void write_white_pixel(uint8_t *ring, int pos, uint32_t safe_chunk)
 {
     int p0 = pos % (int)RAW_RING_BYTES;
     int p1 = (pos + 2) % (int)RAW_RING_BYTES;
-    *(uint16_t *)&ring[p0] = WORD_WHITE_A;
-    *(uint16_t *)&ring[p1] = WORD_WHITE_B;
+
+    /* Bound writes strictly inside the verified safe_chunk */
+    int d0 = (p0 - (int)safe_chunk + (int)RAW_RING_BYTES) % (int)RAW_RING_BYTES;
+    if (d0 < 4094) {
+        *(uint16_t *)&ring[p0] = WORD_WHITE_A;
+        *(uint16_t *)&ring[p1] = WORD_WHITE_B;
+    }
 }
 
-static void draw_text_on_line(uint8_t *ring, int line_hsync, int x_offset_samples, int font_row, const char *str)
+static void draw_text_on_line(uint8_t *ring, int line_hsync, int x_offset_samples, int font_row, const char *str, uint32_t safe_chunk)
 {
     int base = (line_hsync + x_offset_samples) % (int)RAW_RING_BYTES;
     if (base & 1) base = (base + 1) % (int)RAW_RING_BYTES;
@@ -380,7 +425,7 @@ static void draw_text_on_line(uint8_t *ring, int line_hsync, int x_offset_sample
 
         for (int b = 7; b >= 0; b--) {
             if (bits & (1 << b)) {
-                write_white_pixel(ring, base);
+                write_white_pixel(ring, base, safe_chunk);
             }
             base = (base + 4) % (int)RAW_RING_BYTES;
         }
@@ -451,7 +496,8 @@ static void osd_realtime_task(void *arg)
     (void)arg;
     uint32_t last_rx_chunk = 0xFFFFFFFF;
     int line_in_field = 0;
-    int hsync_ring_pos = 0;
+    int predicted_hsync = 0;
+    bool hsync_locked = false;
     int frac_accum = 0;
     int yield_counter = 0;
 
@@ -460,57 +506,68 @@ static void osd_realtime_task(void *arg)
         if (!s_menu_active && s_osd_banner_ticks <= 0) {
             vTaskDelay(pdMS_TO_TICKS(50));
             last_rx_chunk = 0xFFFFFFFF;
+            hsync_locked = false;
             continue;
         }
 
-        /* Poll current RX DMA chunk pointer */
+        /* Read physical hardware DMA pointers */
         uint32_t cur_rx = get_rx_dma_offset(NULL);
+        uint32_t cur_tx = get_tx_dma_offset(NULL);
+
         if (cur_rx == last_rx_chunk) {
-            /* Still in the same 4096-byte chunk. Delay 20 µs and poll again. */
             esp_rom_delay_us(20);
             continue;
         }
 
-        /* RX has advanced to cur_rx!
-         * That means the 4096-byte chunk RX JUST FINISHED writing is safe to patch.
-         * TX is reading behind it, so we have a full 102.4 µs safety margin. */
+        /* The chunk that RX has completed writing is (cur_rx - 4096) % 16384 */
         uint32_t safe_chunk = (cur_rx + RAW_RING_BYTES - 4096u) % RAW_RING_BYTES;
+
+        /* Verify hardware proof: safe_chunk != cur_rx AND safe_chunk != cur_tx */
+        if (safe_chunk == cur_rx || safe_chunk == cur_tx) {
+            esp_rom_delay_us(20);
+            continue;
+        }
+
         last_rx_chunk = cur_rx;
 
         /* Invalidate cache so CPU reads fresh GDMA bytes from SRAM */
         (void)esp_cache_msync((void *)(s_raw_ring + safe_chunk), 4096, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
-        /* 1. Fast check for V-sync broad pulse (>300 samples with negative deviation) */
+        /* 1. True Discriminator V-sync broad pulse detector (>350 samples with cross <= -6) */
         int v_run = 0;
-        for (int s = 0; s < 4096; s += 8) {
-            uint8_t b = s_raw_ring[(safe_chunk + s) % RAW_RING_BYTES];
-            int8_t q = (int8_t)((b & 0x0fu) << 4) >> 4;
-            int8_t in_val = (int8_t)(b & 0xf0u) >> 4;
-            int p = (int)in_val * in_val + (int)q * q;
-            if (p >= 6 && q <= -2) {
-                v_run += 8;
-                if (v_run >= 300) {
-                    line_in_field = 0;
-                    break;
-                }
+        int max_v_run = 0;
+        for (int s = 0; s < 4096; s += 4) {
+            int idx = (safe_chunk + s) % (int)RAW_RING_BYTES;
+            if (is_sync_tip_sample(s_raw_ring, idx)) {
+                v_run += 4;
+                if (v_run > max_v_run) max_v_run = v_run;
             } else {
                 v_run = 0;
             }
         }
+        if (max_v_run >= 350) {
+            line_in_field = 0;
+        }
 
-        /* 2. Process all video lines that start or pass through this 4096-byte chunk. */
-        int dist = (hsync_ring_pos - (int)safe_chunk + (int)RAW_RING_BYTES) % (int)RAW_RING_BYTES;
-        while (dist < 4096) {
-            int line_pos = (safe_chunk + dist) % (int)RAW_RING_BYTES;
-
-            /* Check if this scanline is an active OSD scanline */
-            int font_row = 0;
-            const char *str = get_osd_line_text(line_in_field, &font_row);
-            if (str != NULL) {
-                draw_text_on_line(s_raw_ring, line_pos, 480, font_row, str);
+        /* 2. Initial H-sync acquisition if not locked */
+        if (!hsync_locked) {
+            int init_edge = find_hsync_edge(s_raw_ring, (safe_chunk + 2048) % (int)RAW_RING_BYTES, 2048);
+            if (init_edge >= 0) {
+                predicted_hsync = init_edge;
+                hsync_locked = true;
+            } else {
+                /* Still searching for initial sync -- do not draw */
+                continue;
             }
+        }
 
-            /* Advance to next scanline using fractional NTSC timing (2542.222 samples) */
+        /* 3. Process video lines starting in this safe chunk */
+        int dist = (predicted_hsync - (int)safe_chunk + (int)RAW_RING_BYTES) % (int)RAW_RING_BYTES;
+        while (dist < 4096) {
+            /* Measure actual camera H-sync within +/- 60 samples of prediction */
+            int actual_hsync = find_hsync_edge(s_raw_ring, predicted_hsync, 60);
+
+            /* Calculate fractional line length (2542.222 samples) */
             frac_accum += 222;
             int line_len = 2542;
             if (frac_accum >= 1000) {
@@ -518,19 +575,34 @@ static void osd_realtime_task(void *arg)
                 line_len = 2543;
             }
 
-            hsync_ring_pos = (hsync_ring_pos + line_len) % (int)RAW_RING_BYTES;
+            if (actual_hsync >= 0) {
+                /* Locked onto true camera H-sync! */
+                int font_row = 0;
+                const char *str = get_osd_line_text(line_in_field, &font_row);
+                if (str != NULL) {
+                    /* Write only during active video (480 samples after true H-sync).
+                     * Sync, front porch, back porch, and color burst are 100% untouched! */
+                    draw_text_on_line(s_raw_ring, actual_hsync, 480, font_row, str, safe_chunk);
+                }
+                /* Next line predicted from actual measured sync */
+                predicted_hsync = (actual_hsync + line_len) % (int)RAW_RING_BYTES;
+            } else {
+                /* Sync lost on this line: DO NOT DRAW. Preserve live video! */
+                predicted_hsync = (predicted_hsync + line_len) % (int)RAW_RING_BYTES;
+            }
+
             line_in_field++;
             if (line_in_field >= 263) {
                 line_in_field = 0;
             }
 
-            dist = (hsync_ring_pos - (int)safe_chunk + (int)RAW_RING_BYTES) % (int)RAW_RING_BYTES;
+            dist = (predicted_hsync - (int)safe_chunk + (int)RAW_RING_BYTES) % (int)RAW_RING_BYTES;
         }
 
-        /* Flush modified chunk back to SRAM so TX GDMA sees the white pixels */
+        /* Flush modified bytes to SRAM so TX GDMA sees the white pixels */
         (void)esp_cache_msync((void *)(s_raw_ring + safe_chunk), 4096, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
-        /* Periodically yield to FreeRTOS IDLE task so watchdog is happy */
+        /* Periodically yield to FreeRTOS IDLE task */
         yield_counter++;
         if (yield_counter >= 50) {
             yield_counter = 0;
