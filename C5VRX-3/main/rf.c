@@ -386,24 +386,16 @@ esp_err_t rf_start(void)
     /* Un-gate modem ADC clock and force continuous sampling. */
     rf_enable_continuous_modem();
 
-    /* Freeze hardware AGC (Automatic Gain Control). In Wi-Fi mode, the hardware
-     * AGC searches for 802.11 preambles; when only analog FM is present, the AGC
-     * watchdog periodically steps gain / recalibrates every ~500ms, causing I/Q
-     * phase jumps that corrupt H/V-sync and make the monitor lose vertical lock. */
-    extern void phy_disable_agc(void);
-    extern void phy_rfagc_disable(void);
-    phy_disable_agc();
-    phy_rfagc_disable();
-
-    /* Select BW20 analog filter bandwidth while keeping 40 MS/s pipeline of BW40.
-     * Significantly eliminates jagged edges ("kartels") and high-frequency noise. */
+    /* Select full BW40 analog filter bandwidth (val=1) to prevent phase distortion
+     * and roll-off of 3.58 MHz NTSC chroma sidebands and color burst. */
     extern void phy_wifi_fbw_sel(uint32_t val);
-    phy_wifi_fbw_sel(0);
+    phy_wifi_fbw_sel(1);
 
-    /* Force clean, non-saturating receiver gain (index 24).
-     * High SNR sweet spot without ADC clipping. */
+    /* Force stable sweet-spot gain (index 32).
+     * Empirical hardware verification: Mode F (Forced Gain 32) eliminates Wi-Fi
+     * AGC hunting and near-field ADC overdrive while providing clean sensitivity. */
     extern void phy_force_rx_gain(bool enable, uint8_t gain_idx);
-    phy_force_rx_gain(true, 24);
+    phy_force_rx_gain(true, 32);
 
     /* Disable PHY PLL / RXCAL tracking timer if compiled in, so it never
      * recalibrates RF / RX hardware during continuous analog video reception.
@@ -413,7 +405,7 @@ esp_err_t rf_start(void)
     phy_track_pll_deinit();
 #endif
 
-    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / agc=frozen / sta_disconnected_pm=0 / pll_track=disabled",
+    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / gain=forced(32) / sta_disconnected_pm=0 / pll_track=disabled",
                    RF_CHANNEL_NUMBER);
     return ESP_OK;
 }

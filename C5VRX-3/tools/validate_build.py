@@ -72,8 +72,8 @@ check("no true40 in production", "true40" not in all_c)
 check("no wbfm_q4.h in production", "wbfm_q4.h" not in all_c)
 
 # Fixed constants
-check("RAW_RING_BYTES == 32768",
-      bool(re.search(r"RAW_RING_BYTES\s+32768", all_c)))
+check("RAW_RING_BYTES valid (16384 or 32768)",
+      bool(re.search(r"RAW_RING_BYTES\s+(16384|32768)", all_c)))
 check("DAC_IDLE_CODE == 20",
       bool(re.search(r"DAC_IDLE_CODE\s+20", all_c)))
 check("IQ_RATE_HZ == 40000000",

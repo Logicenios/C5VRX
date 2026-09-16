@@ -76,13 +76,30 @@ C5VRX-3 introduces `patch_descriptors_clear_eof()` in `main/video.c`. After star
 
 ---
 
-## RF Front-End Optimization
+## RF Front-End Characterization & Empirical Tuning
 
-To ensure a pristine, stable analog video feed:
-- **Frozen Hardware AGC**: Disabled Wi-Fi AGC preamble hunting (`phy_disable_agc()`, `phy_rfagc_disable()`). Prevents periodic 500 ms gain recalibration jumps.
-- **Analog Bandwidth Selection**: `phy_wifi_fbw_sel(0)` applies BW20 analog anti-aliasing filtering while running at full 40 MS/s BW40 digital sampling rate, removing RF hash and high-frequency noise.
-- **Forced High-SNR Gain**: Default gain set to index `24` via `phy_force_rx_gain(true, 24)`, avoiding ADC clipping while delivering high SNR.
+To ensure a pristine, stable analog video feed across the full dynamic range:
+- **Forced Sweet-Spot Gain (Mode F, Index 32)**:
+  - Live testing proved that stock Wi-Fi AGC struggles with continuous analog FM: because there are no 802.11 packet preambles, the AGC watchdog stays at maximum gain or hunts erratically. With 200 mW at close range (10–20 cm), the 4-bit ADC was severely overdriven/clipped ($I, Q = \pm 7$).
+  - Manually sweeping gain from 0 to 64 on live hardware confirmed that **Forced Gain Index 32 (`reg=0x20c053e2`)** is the optimal operating sweet spot: zero near-field clipping, no AGC hunting, and high sensitivity across room distances.
+- **Full BW40 Analog Bandwidth (`phy_wifi_fbw_sel(1)`)**:
+  - Narrow BW20 filtering (`fbw_sel(0)`) rolled off the second-order FM sidebands of the 3.58 MHz NTSC subcarrier ($\approx 11.16\text{ MHz}$), causing phase distortion and chroma rainbow overlay.
+  - Setting `phy_wifi_fbw_sel(1)` opens the full 20 MHz analog filter, delivering razor-sharp video and significantly reducing the chroma rainbow overlay.
+- **MODEM_DIAG Sample Edge Margin**:
+  - Interactive testing of sample clock inversion (POS vs NEG via key `'e'`) confirmed clean video on both edges, proving wide setup/hold margin on the 40 MHz MODEM_DIAG bus.
 - **Disabled PLL Tracking**: Compiled with `CONFIG_ESP_PHY_DISABLE_PLL_TRACK=y` to eliminate periodic 1.0s radio recalibration stalls.
+
+---
+
+## NTSC 9-Line Chroma Precession Analysis
+
+In NTSC, one scanline lasts $63.555...\ \mu\text{s}$. At 20 MS/s discrete DAC sampling:
+$$\text{Samples per line} = 63.555...\ \mu\text{s} \times 20\text{ MHz} = \mathbf{1271 + \frac{1}{9}\text{ samples}}$$
+- Every scanline drifts by $\frac{1}{9}\text{ sample}$ ($5.55\text{ ns}$) relative to the discrete DAC clock grid.
+- Over 9 scanlines, this accumulates to $50\text{ ns}$ (1 sample slip).
+- At the NTSC subcarrier frequency ($3.58\text{ MHz}$), a 50–100 ns shift rotates subcarrier phase by $\approx 120^\circ$.
+- A $120^\circ$ phase shift rotates the color wheel by $\frac{1}{3}\text{rd}$: $\mathbf{\text{Red} \to \text{Green} \to \text{Blue} \to \text{Red}}$, producing repeating 9-line horizontal color layers.
+- Additionally, at Pedestal 20, negative peaks of the pre-emphasized 3.58 MHz color burst dip below 0 and are clamped at code 0, which can impair the monitor's burst PLL. Raising pedestal to 24–26 prevents burst clipping.
 
 ---
 

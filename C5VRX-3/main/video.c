@@ -71,7 +71,7 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 /* ----- Fixed production constants ----- */
 #define IQ_RATE_HZ       40000000u   /* MODEM_DIAG / PARLIO RX clock */
 #define DAC_RATE_HZ      40000000u   /* PARLIO TX clock ([D,D] = 20 MS/s unique) */
-#define RAW_RING_BYTES   32768u      /* 32768 byte cyclic ring (32 KiB standard) */
+#define RAW_RING_BYTES   16384u      /* 16384 byte cyclic ring (16 KiB Seamless Golden) */
 #define DAC_IDLE_CODE    20u         /* Pedestal 20 (sync tip level) */
 
 /* TX GPIO mapping: 6-bit resistor DAC.
@@ -82,7 +82,7 @@ static const int s_dac_gpio[8] = {23, 24, 11, 12, 8, 9, -1, -1};
 
 _Static_assert(IQ_RATE_HZ == 40000000u, "IQ rate must be 40 MHz");
 _Static_assert(DAC_RATE_HZ == 40000000u, "DAC rate must be 40 MHz");
-_Static_assert(RAW_RING_BYTES == 32768u, "Ring must be exactly 32768 bytes");
+_Static_assert(RAW_RING_BYTES == 16384u, "Ring must be exactly 16384 bytes");
 
 static const char *TAG = "c5vrx3_video";
 
@@ -266,8 +266,8 @@ static int patch_descriptors_clear_eof(int dma_ch, bool is_rx)
     return count;
 }
 
-static uint8_t s_forced_gain = 24u;
-static bool s_gain_forced = false;
+static uint8_t s_forced_gain = 32u;
+static bool s_gain_forced = true;
 
 static void console_diag_task(void *arg)
 {
@@ -306,7 +306,7 @@ static void console_diag_task(void *arg)
                 int rx_nodes = patch_descriptors_clear_eof(s_rx_dma_ch, true);
                 int tx_nodes = patch_descriptors_clear_eof(s_tx_dma_ch, false);
                 printf("\n=======================================================\n");
-                printf(" C5VRX-3 SEAMLESS 32K (Zero-EOF Descriptor Ring)\n");
+                printf(" C5VRX-3 SEAMLESS 16K (Zero-EOF Descriptor Ring)\n");
                 printf(" GDMA Ring:                  dist=%lu (rx_off=%lu, tx_off=%lu)\n",
                        (unsigned long)dist, (unsigned long)rx_off, (unsigned long)tx_off);
                 printf(" Descriptors:                rx_dscr=0x%08lx, tx_dscr=0x%08lx\n",
@@ -367,7 +367,7 @@ esp_err_t video_start(void)
     PARL_IO.rx_genrl_cfg.rx_eof_gen_sel = 1;
 
     /* Establish producer/consumer separation before starting TX.
-     * Use quarter of the ring size (8192 bytes = 204.8 µs).
+     * Use quarter of the ring size (4096 bytes = 102.4 µs for 16K).
      * Delay = (RAW_RING_BYTES / 4) bytes / 40,000,000 bytes/s */
     esp_rom_delay_us((RAW_RING_BYTES / 4u) * 1000000u / IQ_RATE_HZ);
 
@@ -394,11 +394,11 @@ esp_err_t video_start(void)
     /* Print startup stamp (visible on serial monitor at boot). */
     ESP_EARLY_LOGW(TAG,
         "\n=======================================================\n"
-        " C5VRX-3  Seamless 32K Phase5 receiver (Zero-EOF Circular GDMA)\n"
+        " C5VRX-3  Seamless 16K Phase5 receiver (Zero-EOF Circular GDMA)\n"
         " Clock:   PARLIO_CLK_SRC_DEFAULT 40MHz (SPLL internal)\n"
         " Telemetry: Live GDMA ring pointer tracking (rx_ch=%d, tx_ch=%d)\n"
-        " Buffer:  32,768 bytes cyclic ring (Zero-EOF patched: RX=%d TX=%d)\n"
-        " RX:      40 MS/s POS edge, 32,768 bytes pure HW cyclic GDMA\n"
+        " Buffer:  16,384 bytes cyclic ring (Zero-EOF patched: RX=%d TX=%d)\n"
+        " RX:      40 MS/s POS edge, 16,384 bytes pure HW cyclic GDMA\n"
         " Demod:   Phase5 50ns / P%u / G%u / current-minus-previous\n"
         " TX:      40 MHz [D,D] / eof=downstream / tail=0\n"
         " Lock:    GDMA ISRs disabled, RX EOF disabled, suc_eof=0 cleared\n"
