@@ -45,7 +45,7 @@ def main():
         "--chip", "esp32c5",
         "-p", port,
         "-b", "460800",
-        "--before", "default-reset",
+        "--before", "usb-reset",
         "--after", "hard-reset",
         "write-flash",
         "--flash-mode", "dio",

@@ -24,6 +24,7 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "soc/gpio_sig_map.h"
+#include "modem/modem_syscon_reg.h"
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
 #include "heap_memory_layout.h"
@@ -264,17 +265,18 @@ static void tracked_timer_done(void *ptimer)
 
 void rf_dump_tracked_timers(void)
 {
-    esp_rom_printf("\n=== WI-FI VENDOR TIMERS INVENTORY (%u tracked) ===\n", (unsigned)s_num_tracked_timers);
+    printf("\n=== WI-FI VENDOR TIMERS INVENTORY (%u tracked) ===\n", (unsigned)s_num_tracked_timers);
     for (size_t i = 0; i < s_num_tracked_timers; ++i) {
-        esp_rom_printf(" [%u] fn=0x%08lx period=%4lu ms repeat=%d armed=%d arms=%lu\n",
-                       (unsigned)i,
-                       (unsigned long)(uintptr_t)s_tracked_timers[i].fn,
-                       (unsigned long)s_tracked_timers[i].period_ms,
-                       s_tracked_timers[i].repeat ? 1 : 0,
-                       s_tracked_timers[i].armed ? 1 : 0,
-                       (unsigned long)s_tracked_timers[i].arm_count);
+        printf(" [%u] fn=0x%08lx period=%4lu ms repeat=%d armed=%d arms=%lu\n",
+               (unsigned)i,
+               (unsigned long)(uintptr_t)s_tracked_timers[i].fn,
+               (unsigned long)s_tracked_timers[i].period_ms,
+               s_tracked_timers[i].repeat ? 1 : 0,
+               s_tracked_timers[i].armed ? 1 : 0,
+               (unsigned long)s_tracked_timers[i].arm_count);
     }
-    esp_rom_printf("==================================================\n\n");
+    printf("==================================================\n\n");
+    fflush(stdout);
 }
 
 static esp_err_t init_nvs(void)
@@ -384,6 +386,25 @@ esp_err_t rf_start(void)
     /* Un-gate modem ADC clock and force continuous sampling. */
     rf_enable_continuous_modem();
 
+    /* Freeze hardware AGC (Automatic Gain Control). In Wi-Fi mode, the hardware
+     * AGC searches for 802.11 preambles; when only analog FM is present, the AGC
+     * watchdog periodically steps gain / recalibrates every ~500ms, causing I/Q
+     * phase jumps that corrupt H/V-sync and make the monitor lose vertical lock. */
+    extern void phy_disable_agc(void);
+    extern void phy_rfagc_disable(void);
+    phy_disable_agc();
+    phy_rfagc_disable();
+
+    /* Select BW20 analog filter bandwidth while keeping 40 MS/s pipeline of BW40.
+     * Significantly eliminates jagged edges ("kartels") and high-frequency noise. */
+    extern void phy_wifi_fbw_sel(uint32_t val);
+    phy_wifi_fbw_sel(0);
+
+    /* Force clean, non-saturating receiver gain (index 24).
+     * High SNR sweet spot without ADC clipping. */
+    extern void phy_force_rx_gain(bool enable, uint8_t gain_idx);
+    phy_force_rx_gain(true, 24);
+
     /* Disable PHY PLL / RXCAL tracking timer if compiled in, so it never
      * recalibrates RF / RX hardware during continuous analog video reception.
      * With CONFIG_ESP_PHY_DISABLE_PLL_TRACK=y, the tracking timer is omitted entirely. */
@@ -392,7 +413,19 @@ esp_err_t rf_start(void)
     phy_track_pll_deinit();
 #endif
 
-    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / sta_disconnected_pm=0 / pll_track=disabled",
+    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / agc=frozen / sta_disconnected_pm=0 / pll_track=disabled",
                    RF_CHANNEL_NUMBER);
     return ESP_OK;
+}
+
+extern void phy_force_rx_gain(bool enable, uint8_t gain_idx);
+
+void rf_set_rx_gain(bool force, uint8_t gain_idx)
+{
+    phy_force_rx_gain(force, gain_idx);
+}
+
+uint32_t rf_get_rx_gain_reg(void)
+{
+    return REG32(0x600a702cu);
 }

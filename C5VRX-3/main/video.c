@@ -47,6 +47,11 @@
 #include "freertos/task.h"
 #include "soc/parl_io_struct.h"
 #include "soc/bitscrambler_struct.h"
+#include "soc/ahb_dma_struct.h"
+#include "soc/pcr_struct.h"
+#include "modem/modem_syscon_reg.h"
+#include "hal/dma_types.h"
+#include "esp_clock_output.h"
 
 /* Hardware diagnostic counters in IRAM to measure transport hiccups without printf spam */
 typedef struct {
@@ -66,7 +71,7 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 /* ----- Fixed production constants ----- */
 #define IQ_RATE_HZ       40000000u   /* MODEM_DIAG / PARLIO RX clock */
 #define DAC_RATE_HZ      40000000u   /* PARLIO TX clock ([D,D] = 20 MS/s unique) */
-#define RAW_RING_BYTES   16384u      /* 16 KiB cyclic ring -- Seamless Golden 16K */
+#define RAW_RING_BYTES   32768u      /* 32768 byte cyclic ring (32 KiB standard) */
 #define DAC_IDLE_CODE    20u         /* Pedestal 20 (sync tip level) */
 
 /* TX GPIO mapping: 6-bit resistor DAC.
@@ -77,7 +82,7 @@ static const int s_dac_gpio[8] = {23, 24, 11, 12, 8, 9, -1, -1};
 
 _Static_assert(IQ_RATE_HZ == 40000000u, "IQ rate must be 40 MHz");
 _Static_assert(DAC_RATE_HZ == 40000000u, "DAC rate must be 40 MHz");
-_Static_assert(RAW_RING_BYTES == 16384u, "Ring must be exactly 16 KiB");
+_Static_assert(RAW_RING_BYTES == 32768u, "Ring must be exactly 32768 bytes");
 
 static const char *TAG = "c5vrx3_video";
 
@@ -95,7 +100,7 @@ static parlio_tx_unit_handle_t      s_tx;
 
 static esp_err_t prepare_rx(void)
 {
-    /* Proven PARLIO RX config from Seamless Golden 16K reference. */
+    /* Proven PARLIO RX config with clean internal SPLL clock */
     const parlio_rx_unit_config_t cfg = {
         .trans_queue_depth = 1u,
         .max_recv_size     = sizeof(s_raw_ring),
@@ -123,10 +128,9 @@ static esp_err_t prepare_rx(void)
     if (err != ESP_OK) return err;
 
     /* Soft delimiter in infinite (partial_rx_en) mode.
-     * POS sample edge -- proven correct for MODEM_DIAG timing.
-     * eof_data_len marks recurring boundaries; cyclic GDMA keeps running. */
+     * POS sample edge -- proven correct for internal clock. */
     const parlio_rx_soft_delimiter_config_t delim_cfg = {
-        .sample_edge  = PARLIO_SAMPLE_EDGE_POS,    /* FIXED: POS only */
+        .sample_edge  = PARLIO_SAMPLE_EDGE_POS,
         .bit_pack_order = PARLIO_BIT_PACK_ORDER_LSB,
         .eof_data_len = sizeof(s_raw_ring),
         .timeout_ticks = 0u,
@@ -209,46 +213,61 @@ static esp_err_t start_tx(void)
                                    sizeof(s_raw_ring) * 8u, &cfg);
 }
 
-static void hw_diag_task(void *arg)
-{
-    (void)arg;
-    int diag_tick = 0;
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        s_hw_counters.checks++;
-        if (PARL_IO.int_raw.rx_fifo_wovf_int_raw) {
-            s_hw_counters.parl_rx_wovf_count++;
-            PARL_IO.int_clr.rx_fifo_wovf_int_clr = 1;
-        }
-        if (PARL_IO.int_raw.tx_fifo_rempty_int_raw) {
-            s_hw_counters.parl_tx_rempty_count++;
-            PARL_IO.int_clr.tx_fifo_rempty_int_clr = 1;
-        }
-        if (PARL_IO.int_raw.tx_eof_int_raw) {
-            s_hw_counters.parl_tx_eof_count++;
-            PARL_IO.int_clr.tx_eof_int_clr = 1;
-        }
-        if (BITSCRAMBLER.state[1].fifo_empty) {
-            s_hw_counters.bs_fifo_empty_count++;
-        }
-        if (BITSCRAMBLER.state[1].eof_overload) {
-            s_hw_counters.bs_eof_overload_count++;
-            BITSCRAMBLER.state[1].eof_trace_clr = 1;
-        }
+static int s_rx_dma_ch = -1;
+static int s_tx_dma_ch = -1;
 
-        if (++diag_tick >= 30) { /* Every 3.0s */
-            diag_tick = 0;
-            esp_rom_printf("[DIAG 3s] RX_ovf=%lu TX_rempty=%lu TX_eof=%lu BS_empty=%lu BS_ovl=%lu (polls=%lu)\n",
-                           (unsigned long)s_hw_counters.parl_rx_wovf_count,
-                           (unsigned long)s_hw_counters.parl_tx_rempty_count,
-                           (unsigned long)s_hw_counters.parl_tx_eof_count,
-                           (unsigned long)s_hw_counters.bs_fifo_empty_count,
-                           (unsigned long)s_hw_counters.bs_eof_overload_count,
-                           (unsigned long)s_hw_counters.checks);
-            rf_dump_tracked_timers();
+static inline uint32_t get_rx_dma_offset(uint32_t *out_dscr_addr)
+{
+    if (s_rx_dma_ch < 0 || s_rx_dma_ch >= 3) return 0;
+    uint32_t dscr_addr = AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val;
+    if (out_dscr_addr) *out_dscr_addr = dscr_addr;
+    if (dscr_addr >= 0x40800000u && dscr_addr < 0x40860000u) {
+        dma_descriptor_t *dscr = (dma_descriptor_t *)(uintptr_t)dscr_addr;
+        uint8_t *buf = (uint8_t *)dscr->buffer;
+        if (buf >= s_raw_ring && buf < s_raw_ring + sizeof(s_raw_ring)) {
+            return (uint32_t)(buf - s_raw_ring);
         }
     }
+    return 0;
 }
+
+static inline uint32_t get_tx_dma_offset(uint32_t *out_dscr_addr)
+{
+    if (s_tx_dma_ch < 0 || s_tx_dma_ch >= 3) return 0;
+    uint32_t dscr_addr = AHB_DMA.channel[s_tx_dma_ch].out.out_dscr_bf0.val;
+    if (out_dscr_addr) *out_dscr_addr = dscr_addr;
+    if (dscr_addr >= 0x40800000u && dscr_addr < 0x40860000u) {
+        dma_descriptor_t *dscr = (dma_descriptor_t *)(uintptr_t)dscr_addr;
+        uint8_t *buf = (uint8_t *)dscr->buffer;
+        if (buf >= s_raw_ring && buf < s_raw_ring + sizeof(s_raw_ring)) {
+            return (uint32_t)(buf - s_raw_ring);
+        }
+    }
+    return 0;
+}
+
+static int patch_descriptors_clear_eof(int dma_ch, bool is_rx)
+{
+    if (dma_ch < 0 || dma_ch >= 3) return 0;
+    uint32_t first_addr = is_rx ? AHB_DMA.channel[dma_ch].in.in_dscr_bf0.val
+                                : AHB_DMA.channel[dma_ch].out.out_dscr_bf0.val;
+    if (first_addr < 0x40800000u || first_addr >= 0x40860000u) return 0;
+
+    dma_descriptor_t *curr = (dma_descriptor_t *)(uintptr_t)first_addr;
+    int count = 0;
+    while (curr && count < 64) {
+        curr->dw0.suc_eof = 0;
+        (void)esp_cache_msync(curr, sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        curr = curr->next;
+        count++;
+        if ((uintptr_t)curr == first_addr) break;
+    }
+    __asm__ __volatile__("fence rw, rw" ::: "memory");
+    return count;
+}
+
+static uint8_t s_forced_gain = 24u;
+static bool s_gain_forced = false;
 
 static void console_diag_task(void *arg)
 {
@@ -256,16 +275,64 @@ static void console_diag_task(void *arg)
     for (;;) {
         int c = getchar();
         if (c != EOF && c > 0) {
-            printf("\n=======================================================\n");
-            printf(" C5VRX-3 HW DIAGNOSTICS (after %lu polls)\n", (unsigned long)s_hw_counters.checks);
-            printf(" PARLIO RX FIFO overflow:    %lu\n", (unsigned long)s_hw_counters.parl_rx_wovf_count);
-            printf(" PARLIO TX FIFO empty (udf): %lu\n", (unsigned long)s_hw_counters.parl_tx_rempty_count);
-            printf(" PARLIO TX EOF:              %lu\n", (unsigned long)s_hw_counters.parl_tx_eof_count);
-            printf(" BitScrambler TX empty:      %lu\n", (unsigned long)s_hw_counters.bs_fifo_empty_count);
-            printf(" BitScrambler EOF overload:  %lu\n", (unsigned long)s_hw_counters.bs_eof_overload_count);
-            printf("=======================================================\n");
-            esp_timer_dump(stdout);
-            printf("-------------------------------------------------------\n\n");
+            if (c == '+' || c == 'k') {
+                if (s_forced_gain < 63u) s_forced_gain += 2u;
+                s_gain_forced = true;
+                rf_set_rx_gain(true, s_forced_gain);
+                printf("[GAIN] FORCED GAIN = %u (reg=0x%08lx)\n", s_forced_gain, (unsigned long)rf_get_rx_gain_reg());
+            } else if (c == '-' || c == 'j') {
+                if (s_forced_gain >= 2u) s_forced_gain -= 2u;
+                s_gain_forced = true;
+                rf_set_rx_gain(true, s_forced_gain);
+                printf("[GAIN] FORCED GAIN = %u (reg=0x%08lx)\n", s_forced_gain, (unsigned long)rf_get_rx_gain_reg());
+            } else if (c == 'a') {
+                s_gain_forced = false;
+                rf_set_rx_gain(false, 0);
+                printf("[GAIN] AUTO GAIN RESTORED (reg=0x%08lx)\n", (unsigned long)rf_get_rx_gain_reg());
+            } else if (c == 'f') {
+                s_gain_forced = !s_gain_forced;
+                rf_set_rx_gain(s_gain_forced, s_forced_gain);
+                printf("[GAIN] TOGGLE FORCED=%d (idx=%u, reg=0x%08lx)\n", s_gain_forced, s_forced_gain, (unsigned long)rf_get_rx_gain_reg());
+            } else if (c == 'e') {
+                PARL_IO.rx_clk_cfg.rx_clk_i_inv = !PARL_IO.rx_clk_cfg.rx_clk_i_inv;
+                printf("[EDGE] RX SAMPLE EDGE TOGGLED -> %s (rx_clk_i_inv=%d)\n",
+                       PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
+                       (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
+            } else {
+                uint32_t rx_dscr = 0, tx_dscr = 0;
+                uint32_t rx_off = get_rx_dma_offset(&rx_dscr);
+                uint32_t tx_off = get_tx_dma_offset(&tx_dscr);
+                uint32_t dist = (rx_off >= tx_off) ? (rx_off - tx_off) : (sizeof(s_raw_ring) - tx_off + rx_off);
+                int rx_nodes = patch_descriptors_clear_eof(s_rx_dma_ch, true);
+                int tx_nodes = patch_descriptors_clear_eof(s_tx_dma_ch, false);
+                printf("\n=======================================================\n");
+                printf(" C5VRX-3 SEAMLESS 32K (Zero-EOF Descriptor Ring)\n");
+                printf(" GDMA Ring:                  dist=%lu (rx_off=%lu, tx_off=%lu)\n",
+                       (unsigned long)dist, (unsigned long)rx_off, (unsigned long)tx_off);
+                printf(" Descriptors:                rx_dscr=0x%08lx, tx_dscr=0x%08lx\n",
+                       (unsigned long)rx_dscr, (unsigned long)tx_dscr);
+                printf(" Zero-EOF Status:            RX patched=%d nodes, TX patched=%d nodes\n",
+                       rx_nodes, tx_nodes);
+                printf(" PARLIO RX FIFO overflow:    %lu (raw=%d)\n",
+                       (unsigned long)s_hw_counters.parl_rx_wovf_count,
+                       PARL_IO.int_raw.rx_fifo_wovf_int_raw);
+                printf(" PARLIO TX FIFO empty (udf): %lu (raw=%d)\n",
+                       (unsigned long)s_hw_counters.parl_tx_rempty_count,
+                       PARL_IO.int_raw.tx_fifo_rempty_int_raw);
+                printf(" PARLIO TX EOF:              %lu (raw=%d)\n",
+                       (unsigned long)s_hw_counters.parl_tx_eof_count,
+                       PARL_IO.int_raw.tx_eof_int_raw);
+                printf(" BitScrambler TX empty:      %d\n",
+                       BITSCRAMBLER.state[1].fifo_empty);
+                printf(" RX Sample Edge:             %s (rx_clk_i_inv=%d)\n",
+                       PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
+                       (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
+                printf(" RF Gain forced:             %s (idx=%u, reg=0x%08lx)\n",
+                       s_gain_forced ? "YES" : "NO", s_forced_gain, (unsigned long)rf_get_rx_gain_reg());
+                printf(" Keys: '+' / '-' adjust gain, 'a' auto, 'f' toggle, 'e' toggle edge\n");
+                printf("=======================================================\n\n");
+            }
+            fflush(stdout);
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -288,48 +355,56 @@ esp_err_t video_start(void)
     /* Start RX cyclic ring. GDMA begins writing at s_raw_ring[0]. */
     if ((err = start_rx()) != ESP_OK) return err;
 
+    /* Put PARLIO RX into pure continuous hardware mode:
+     * 1. Disable all GDMA RX channel interrupts so the CPU is never interrupted
+     *    (~9,775 ISRs/sec eliminated!).
+     * 2. Set rx_eof_gen_sel = 1 (external enable, non-existent in soft mode)
+     *    so PARLIO RX never generates an EOF stall event.
+     * This matches PARLIO TX's unbroken hardware loop, eliminating pointer drift! */
+    AHB_DMA.in_intr[0].ena.val = 0;
+    AHB_DMA.in_intr[1].ena.val = 0;
+    AHB_DMA.in_intr[2].ena.val = 0;
+    PARL_IO.rx_genrl_cfg.rx_eof_gen_sel = 1;
+
     /* Establish producer/consumer separation before starting TX.
-     *
-     * Method: wall-clock delay of one 4096-byte block at 40 MB/s = 102.4 µs.
-     * RX GDMA and TX GDMA both derive their 40 MHz from PLL_F240M/6, so once
-     * started, the separation cannot drift in normal operation.
-     *
-     * Delay = 4096 bytes / 40,000,000 bytes/s = 102.4 µs */
-    esp_rom_delay_us(4096u * 1000000u / IQ_RATE_HZ);
+     * Use quarter of the ring size (8192 bytes = 204.8 µs).
+     * Delay = (RAW_RING_BYTES / 4) bytes / 40,000,000 bytes/s */
+    esp_rom_delay_us((RAW_RING_BYTES / 4u) * 1000000u / IQ_RATE_HZ);
 
     if ((err = start_tx()) != ESP_OK) return err;
 
-    /* Start background transport diagnostics and interactive console */
-    xTaskCreate(hw_diag_task, "hw_diag", 2048, NULL, 1, NULL);
+    /* Discover AHB_DMA channels assigned to PARL_IO (peripheral ID 9) */
+    for (int i = 0; i < 3; i++) {
+        if (AHB_DMA.channel[i].in.in_peri_sel.peri_in_sel_chn == 9) {
+            s_rx_dma_ch = i;
+        }
+        if (AHB_DMA.channel[i].out.out_peri_sel.peri_out_sel_chn == 9) {
+            s_tx_dma_ch = i;
+        }
+    }
+
+    /* Clear suc_eof on ALL GDMA descriptors for both RX and TX to eliminate
+     * hardware wrap EOF bubbles completely! The buffer becomes a truly infinite ring. */
+    int rx_nodes = patch_descriptors_clear_eof(s_rx_dma_ch, true);
+    int tx_nodes = patch_descriptors_clear_eof(s_tx_dma_ch, false);
+
+    /* Start interactive console for on-demand diagnostics (zero periodic CPU/bus traffic) */
     xTaskCreate(console_diag_task, "console_diag", 3072, NULL, 1, NULL);
 
-    /* Print startup stamp before muting (visible on serial monitor at boot). */
+    /* Print startup stamp (visible on serial monitor at boot). */
     ESP_EARLY_LOGW(TAG,
         "\n=======================================================\n"
-        " C5VRX-3  Seamless16K Phase5 receiver\n"
-        " RX:      40 MS/s POS edge, 16 KiB cyclic GDMA\n"
+        " C5VRX-3  Seamless 32K Phase5 receiver (Zero-EOF Circular GDMA)\n"
+        " Clock:   PARLIO_CLK_SRC_DEFAULT 40MHz (SPLL internal)\n"
+        " Telemetry: Live GDMA ring pointer tracking (rx_ch=%d, tx_ch=%d)\n"
+        " Buffer:  32,768 bytes cyclic ring (Zero-EOF patched: RX=%d TX=%d)\n"
+        " RX:      40 MS/s POS edge, 32,768 bytes pure HW cyclic GDMA\n"
         " Demod:   Phase5 50ns / P%u / G%u / current-minus-previous\n"
         " TX:      40 MHz [D,D] / eof=downstream / tail=0\n"
-        " CPU:     done (no periodic tasks)\n"
+        " Lock:    GDMA ISRs disabled, RX EOF disabled, suc_eof=0 cleared\n"
+        " CPU:     done (hardware runs in unbroken infinite loop)\n"
         "=======================================================\n",
-        DAC_IDLE_CODE, 2u);
-
-    /* Allow background tasks/timers to run for 2 seconds, then dump all active timers! */
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    ESP_EARLY_LOGW(TAG, "\n--- ACTIVE ESP_TIMERS (after 2s) ---");
-    esp_timer_dump(stdout);
-    ESP_EARLY_LOGW(TAG, "------------------------------------");
-    ESP_EARLY_LOGW(TAG, "HW Transport Diagnostics (initial 2s):");
-    ESP_EARLY_LOGW(TAG, "  RX FIFO ovf:      %lu", (unsigned long)s_hw_counters.parl_rx_wovf_count);
-    ESP_EARLY_LOGW(TAG, "  TX FIFO rempty:   %lu", (unsigned long)s_hw_counters.parl_tx_rempty_count);
-    ESP_EARLY_LOGW(TAG, "  TX EOF:           %lu", (unsigned long)s_hw_counters.parl_tx_eof_count);
-    ESP_EARLY_LOGW(TAG, "  BS FIFO empty:    %lu", (unsigned long)s_hw_counters.bs_fifo_empty_count);
-    ESP_EARLY_LOGW(TAG, "  BS EOF overload:  %lu", (unsigned long)s_hw_counters.bs_eof_overload_count);
-    ESP_EARLY_LOGW(TAG, "------------------------------------\n");
-
-    /* Mute all logging. After this point the CPU has nothing to do.
-     * USB, logging, and any periodic IDF tasks must not touch the DMA ring. */
-    esp_log_level_set("*", ESP_LOG_NONE);
+        s_rx_dma_ch, s_tx_dma_ch, rx_nodes, tx_nodes, DAC_IDLE_CODE, 2u);
 
     return ESP_OK;
 }

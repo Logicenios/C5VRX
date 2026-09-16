@@ -22,3 +22,11 @@ esp_err_t rf_start(void);
  * Dump all vendor timers intercepted during Wi-Fi operation.
  */
 void rf_dump_tracked_timers(void);
+
+/**
+ * Control PHY receiver frontend gain.
+ * force = true sets fixed gain index (0 = min gain / max attenuation, ~30-60 = high gain).
+ * force = false restores automatic / default PHY gain.
+ */
+void rf_set_rx_gain(bool force, uint8_t gain_idx);
+uint32_t rf_get_rx_gain_reg(void);

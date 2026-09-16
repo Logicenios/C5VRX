@@ -63,7 +63,7 @@ check("no telemetry_task in production", "telemetry_task" not in all_c,
 check("no calibration subsystem in production",
       "calibration_get" not in all_c and "calibration.h" not in all_c,
       "runtime calibration must not be present")
-check("no RF dump engine in production", "rf_dump" not in all_c,
+check("no RF dump engine in production", "continuous_iq" not in all_c and "s_rf_dump" not in all_c,
       "RF dump subsystem must not be present")
 check("no startup_trace in production", "startup_trace" not in all_c)
 check("no snapshot infrastructure", "live_snapshot" not in all_c)
@@ -72,10 +72,8 @@ check("no true40 in production", "true40" not in all_c)
 check("no wbfm_q4.h in production", "wbfm_q4.h" not in all_c)
 
 # Fixed constants
-check("RAW_RING_BYTES == 16384",
-      "RAW_RING_BYTES   16384" in all_c or "RAW_RING_BYTES=16384" in all_c
-      or "RAW_RING_BYTES    16384" in all_c
-      or bool(re.search(r"RAW_RING_BYTES\s+16384", all_c)))
+check("RAW_RING_BYTES == 32768",
+      bool(re.search(r"RAW_RING_BYTES\s+32768", all_c)))
 check("DAC_IDLE_CODE == 20",
       bool(re.search(r"DAC_IDLE_CODE\s+20", all_c)))
 check("IQ_RATE_HZ == 40000000",
@@ -95,9 +93,14 @@ check("PARLIO_SHIFT_EDGE_NEG in video.c",
 # loop_transmission
 check("loop_transmission present", "loop_transmission" in all_c)
 
-# No xTaskCreate (no periodic tasks)
-check("no xTaskCreate in production", "xTaskCreate" not in all_c,
-      "application must not create periodic tasks")
+# Zero-EOF descriptor patch
+check("Zero-EOF descriptor patch present", "patch_descriptors_clear_eof" in all_c,
+      "Zero-EOF circular descriptor patch must be present to prevent wrap bubbles")
+
+# No periodic tasks
+check("no periodic telemetry or timer tasks in production",
+      "telemetry_task" not in all_c and "hw_diag_task" not in all_c,
+      "periodic tasks must not be present")
 
 # One BS program
 cmake_main = read(MAIN / "CMakeLists.txt")

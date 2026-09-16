@@ -17,6 +17,8 @@ idf_component_register(
         esp_timer
         freertos
         heap
+        hal
+        esp_hw_support
 )
 
 # One BitScrambler program: the proven Phase5 FM demodulator.
