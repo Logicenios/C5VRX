@@ -428,12 +428,6 @@ static void osd_draw_string(int row_idx, int col_words, const char *str)
 {
     if (row_idx < 0 || row_idx >= (int)OSD_MENU_ROWS) return;
     int base_line = row_idx * (int)OSD_FONT_HEIGHT;
-
-    /* First reset all 8 scanlines of this text row to blank line */
-    for (int r = 0; r < (int)OSD_FONT_HEIGHT; r++) {
-        memcpy(s_osd_lines[base_line + r], s_blank_line, NTSC_LINE_BYTES);
-    }
-
     int start_col = 192 + col_words;
 
     int char_idx = 0;
@@ -453,8 +447,26 @@ static void osd_draw_string(int row_idx, int col_words, const char *str)
                     line_ptr[p + 1] = get_white_word(1);
                     line_ptr[p + 2] = get_white_word(2);
                     line_ptr[p + 3] = get_white_word(3);
+                } else {
+                    /* Black background pixel: 4 words of Phase 0 pedestal */
+                    line_ptr[p]     = IQ_WORD_BLACK;
+                    line_ptr[p + 1] = IQ_WORD_BLACK;
+                    line_ptr[p + 2] = IQ_WORD_BLACK;
+                    line_ptr[p + 3] = IQ_WORD_BLACK;
                 }
                 p += 4;
+            }
+        }
+        char_idx++;
+    }
+
+    /* Pad remaining columns in this row up to 34 chars with black pixels */
+    while (char_idx < 34 && (start_col + char_idx * 32 + 32) < 1240) {
+        for (int r = 0; r < 8; r++) {
+            uint16_t *line_ptr = (uint16_t *)s_osd_lines[base_line + r];
+            int p = start_col + char_idx * 32;
+            for (int b = 0; b < 32; b++) {
+                line_ptr[p + b] = IQ_WORD_BLACK;
             }
         }
         char_idx++;
@@ -733,11 +745,20 @@ static void analog_agc_task(void *arg)
             }
         }
 
-        /* 2. OSD Inactivity Timeout (12.0s auto-exit) & Dynamic Menu Refresh */
+        /* 2. OSD Inactivity Timeout (12.0s auto-exit) & Live VTX CFO Refresh */
         if (s_menu_active) {
             s_menu_timeout_ticks++;
-            if ((s_menu_timeout_ticks % 4) == 0) {
-                osd_render_menu();
+            if ((s_menu_timeout_ticks % 10) == 0) {
+                /* Update only line 3 (VTX CFO) - light, zero-memcpy, zero bus contention */
+                char cfo_buf[48];
+                if (s_last_q_phase >= 40) {
+                    snprintf(cfo_buf, sizeof(cfo_buf), "%c [3] VTX CFO: %+4d kHz [LCK %d%%]",
+                             (s_menu_cursor == 2) ? '>' : ' ', s_cfo_khz, s_last_q_phase);
+                } else {
+                    snprintf(cfo_buf, sizeof(cfo_buf), "%c [3] VTX CFO: NO SIGNAL",
+                             (s_menu_cursor == 2) ? '>' : ' ');
+                }
+                osd_draw_string(3, 100, cfo_buf);
             }
             if (s_menu_timeout_ticks >= 240) { /* 12.0s inactivity auto-exit */
                 video_set_menu_mode(false);
@@ -748,7 +769,7 @@ static void analog_agc_task(void *arg)
         /* 1. Invalidate 256 bytes in CPU L1 cache so we read fresh GDMA samples from SRAM */
         (void)esp_cache_msync((void *)s_raw_ring, 256, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
-        uint8_t sample_buf[256];
+        static uint8_t sample_buf[256];
         for (int i = 0; i < 256; i++) {
             sample_buf[i] = s_raw_ring[i];
         }
@@ -758,7 +779,8 @@ static void analog_agc_task(void *arg)
         int n_coherent = 0;
         int sum_cross = 0;
         int sum_dot = 0;
-        uint16_t hist[129] = {0};
+        static uint16_t hist[129];
+        memset(hist, 0, sizeof(hist));
         int8_t prev_i = 0, prev_q = 0;
 
         for (int i = 0; i < 256; i++) {
@@ -1234,7 +1256,7 @@ esp_err_t video_start(void)
     xTaskCreate(console_diag_task, "console_diag", 3072, NULL, 1, NULL);
 
     /* Start dedicated Analog Video AGC engine (P_median in [20, 30], fast attack) */
-    xTaskCreate(analog_agc_task, "analog_agc", 3072, NULL, 3, NULL);
+    xTaskCreate(analog_agc_task, "analog_agc", 8192, NULL, 3, NULL);
 
 
     /* Print startup stamp (visible on serial monitor at boot). */
