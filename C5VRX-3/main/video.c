@@ -80,9 +80,9 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 #define NTSC_LINE_WORDS   1272u
 #define NTSC_LINE_BYTES   (NTSC_LINE_WORDS * 2u) /* 2544 bytes @ 40 MS/s DAC clock */
 #define NTSC_TOTAL_LINES  262u
-#define OSD_MENU_ROWS     6u
+#define OSD_MENU_ROWS     7u
 #define OSD_FONT_HEIGHT   8u
-#define OSD_ACTIVE_LINES  (OSD_MENU_ROWS * OSD_FONT_HEIGHT) /* 48 scanlines */
+#define OSD_ACTIVE_LINES  (OSD_MENU_ROWS * OSD_FONT_HEIGHT) /* 56 scanlines */
 
 /* Synthesized IQ phase bytes for Phase5 BitScrambler:
  * Phase 0  (0x50): delta=0  -> DAC code 20 (Blanking / Black background)
@@ -461,6 +461,8 @@ static void osd_draw_string(int row_idx, int col_words, const char *str)
     }
 }
 
+static void osd_render_menu(void);
+
 static void osd_init_buffers(void)
 {
     /* H-Sync: 96 words (4.8 µs) of sync cycle, 1176 words of black (20) */
@@ -493,16 +495,16 @@ static void osd_init_buffers(void)
         node->dw0.owner = 1;
         node->dw0.suc_eof = 0;
 
-        if (i < 6) {
-            /* Lines 0..5: Vertical sync serrations */
+        if (i < 3) {
+            /* Lines 0..2: Vertical sync serrations (3 lines of broad pulses = 6 serrations, exact RS-170) */
             node->buffer = s_vsync_line;
-        } else if (i >= 86 && i < (int)(86 + OSD_ACTIVE_LINES * 2)) {
-            /* Lines 86..181 (96 scanlines centered vertically):
+        } else if (i >= 70 && i < (int)(70 + OSD_ACTIVE_LINES * 2)) {
+            /* Lines 70..181 (112 scanlines centered vertically):
              * Active menu text, each font row repeated twice for double-height readability! */
-            int font_line = (i - 86) / 2;
+            int font_line = (i - 70) / 2;
             node->buffer = s_osd_lines[font_line];
         } else {
-            /* Lines 6..85 (top) and 182..261 (bottom): Blank black lines */
+            /* Lines 3..69 (top) and 182..261 (bottom): Blank black lines with standard H-sync */
             node->buffer = s_blank_line;
         }
 
@@ -513,6 +515,9 @@ static void osd_init_buffers(void)
     (void)esp_cache_msync((void *)s_blank_line, sizeof(s_blank_line), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     (void)esp_cache_msync((void *)s_vsync_line, sizeof(s_vsync_line), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     (void)esp_cache_msync((void *)s_osd_lines, sizeof(s_osd_lines), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
+    /* Pre-render initial menu text */
+    osd_render_menu();
 }
 
 static void osd_render_menu(void)
@@ -520,29 +525,38 @@ static void osd_render_menu(void)
     const fpv_channel_t *ch = rf_get_current_channel();
     char buf[40];
 
-    osd_draw_string(0, 100, "=== C5VRX-3 RECEIVER ===");
+    osd_draw_string(0, 100, "=== C5VRX-3 RECEIVER MENU ===");
 
-    snprintf(buf, sizeof(buf), "%c [1] BAND: %s",
+    snprintf(buf, sizeof(buf), "%c [1] BAND:   %s",
              (s_menu_cursor == 0) ? '>' : ' ', rf_get_band_name(rf_get_current_band()));
     osd_draw_string(1, 100, buf);
 
-    snprintf(buf, sizeof(buf), "%c [2] CH:   %s (%uM)",
+    snprintf(buf, sizeof(buf), "%c [2] CH:     %s (%u MHz)",
              (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz);
     osd_draw_string(2, 100, buf);
 
-    snprintf(buf, sizeof(buf), "%c [3] GEAR: %s",
-             (s_menu_cursor == 2) ? '>' : ' ', s_current_bw40 ? "BW40 (COLOR)" : "BW20 (+3dB)");
+    if (s_last_q_phase >= 40) {
+        snprintf(buf, sizeof(buf), "%c [3] VTX CFO: %+4d kHz [LCK %d%%]",
+                 (s_menu_cursor == 2) ? '>' : ' ', s_cfo_khz, s_last_q_phase);
+    } else {
+        snprintf(buf, sizeof(buf), "%c [3] VTX CFO: NO SIGNAL",
+                 (s_menu_cursor == 2) ? '>' : ' ');
+    }
     osd_draw_string(3, 100, buf);
 
-    snprintf(buf, sizeof(buf), "%c [4] AFC:  %s",
-             (s_menu_cursor == 3) ? '>' : ' ',
-             (s_afc_mode == AFC_MODE_AUTO) ? "AUTO (+/-1.5M)" :
-             (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
+    snprintf(buf, sizeof(buf), "%c [4] GEAR:   %s",
+             (s_menu_cursor == 3) ? '>' : ' ', s_current_bw40 ? "BW40 (COLOR)" : "BW20 (+3dB)");
     osd_draw_string(4, 100, buf);
 
-    snprintf(buf, sizeof(buf), "%c [5] SAVE & EXIT",
-             (s_menu_cursor == 4) ? '>' : ' ');
+    snprintf(buf, sizeof(buf), "%c [5] AFC:    %s",
+             (s_menu_cursor == 4) ? '>' : ' ',
+             (s_afc_mode == AFC_MODE_AUTO) ? "AUTO (+/-1.5M)" :
+             (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
     osd_draw_string(5, 100, buf);
+
+    snprintf(buf, sizeof(buf), "%c [6] SAVE & EXIT",
+             (s_menu_cursor == 5) ? '>' : ' ');
+    osd_draw_string(6, 100, buf);
 
     (void)esp_cache_msync((void *)s_osd_lines, sizeof(s_osd_lines), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 }
@@ -552,42 +566,40 @@ static void video_set_menu_mode(bool active)
     if (s_menu_active == active) return;
     s_menu_active = active;
 
-    if (s_tx_dma_ch < 0 || s_tx_dma_ch >= 3) return;
+    if (s_tx_dscr_count <= 0 || !s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr) {
+        printf("[OSD] ERROR: s_tx_dscr_nodes not initialized\n");
+        return;
+    }
 
     if (active) {
-        /* Stop TX GDMA on s_raw_ring */
-        AHB_DMA.channel[s_tx_dma_ch].out.out_link.outlink_stop_chn = 1;
-        PARL_IO.fifo_cfg.tx_fifo_srst = 1;
-        PARL_IO.fifo_cfg.tx_fifo_srst = 0;
+        /* Pre-render fresh menu state */
+        osd_render_menu();
 
-        /* Flush all OSD descriptor and scanline buffers before starting DMA */
-        (void)esp_cache_msync((void *)s_osd_dma_nodes, sizeof(s_osd_dma_nodes), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        (void)esp_cache_msync((void *)s_blank_line, sizeof(s_blank_line), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        (void)esp_cache_msync((void *)s_vsync_line, sizeof(s_vsync_line), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        (void)esp_cache_msync((void *)s_osd_lines, sizeof(s_osd_lines), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        /* Splice OSD menu into GDMA without stopping hardware!
+         * Tail of raw ring -> Head of OSD menu chain.
+         * Tail of OSD menu chain -> Head of OSD menu chain (circular).
+         * GDMA naturally and seamlessly steps into the NTSC 240p menu at the next ring boundary! */
+        s_osd_dma_nodes[NTSC_TOTAL_LINES - 1].next = &s_osd_dma_nodes[0];
+        s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = &s_osd_dma_nodes[0];
+        __asm__ __volatile__("fence rw, rw" ::: "memory");
 
-        /* Point GDMA to 262-node OSD menu descriptor chain */
-        AHB_DMA.out_link_addr[s_tx_dma_ch].outlink_addr_chn = (uint32_t)(uintptr_t)&s_osd_dma_nodes[0];
-        AHB_DMA.channel[s_tx_dma_ch].out.out_link.outlink_start_chn = 1;
-
-        printf("[OSD] Switched to Local NTSC 240p Menu Mode (Hardware GDMA Circular Link)\n");
+        printf("[OSD] Spliced TX GDMA -> Local NTSC 240p Menu Chain (Seamless)\n");
     } else {
-        /* Stop TX GDMA on menu descriptors */
-        AHB_DMA.channel[s_tx_dma_ch].out.out_link.outlink_stop_chn = 1;
-        PARL_IO.fifo_cfg.tx_fifo_srst = 1;
-        PARL_IO.fifo_cfg.tx_fifo_srst = 0;
-
-        /* Re-establish 8192-byte RX/TX separation delay */
-        esp_rom_delay_us(8192u * 1000000u / IQ_RATE_HZ);
-
-        /* Point GDMA back to s_raw_ring descriptors */
-        if (s_tx_dscr_count > 0 && s_tx_dscr_nodes[0].dscr) {
-            AHB_DMA.out_link_addr[s_tx_dma_ch].outlink_addr_chn = (uint32_t)(uintptr_t)s_tx_dscr_nodes[0].dscr;
+        /* Find current RX descriptor to guarantee safe separation upon return */
+        uint32_t rx_now = (s_rx_dma_ch >= 0 && s_rx_dma_ch < 3)
+                          ? AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val : 0;
+        int rx_idx = find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count, rx_now);
+        int safe_tx_idx = 0;
+        if (rx_idx >= 0 && s_tx_dscr_count > 0) {
+            safe_tx_idx = (rx_idx + (s_tx_dscr_count / 2)) % s_tx_dscr_count;
         }
-        AHB_DMA.channel[s_tx_dma_ch].out.out_link.outlink_start_chn = 1;
-        patch_descriptors_clear_eof(s_tx_dma_ch, false);
 
-        printf("[OSD] Restored Live Seamless Video Mode (16K Golden Ring)\n");
+        /* Splice back to raw ring at the end of the current NTSC frame */
+        s_osd_dma_nodes[NTSC_TOTAL_LINES - 1].next = s_tx_dscr_nodes[safe_tx_idx].dscr;
+        s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = s_tx_dscr_nodes[0].dscr;
+        __asm__ __volatile__("fence rw, rw" ::: "memory");
+
+        printf("[OSD] Spliced Menu -> Live Video Ring (Target TX node %d)\n", safe_tx_idx);
     }
 }
 
@@ -606,7 +618,7 @@ static void init_boot_button(void)
 static void handle_button_short_click(void)
 {
     if (s_menu_active) {
-        s_menu_cursor = (s_menu_cursor + 1) % 5;
+        s_menu_cursor = (s_menu_cursor + 1) % 6;
         osd_render_menu();
         s_menu_timeout_ticks = 0;
         printf("[BTN: SHORT] Menu cursor -> %d\n", s_menu_cursor);
@@ -625,7 +637,6 @@ static void handle_button_long_click(void)
     if (!s_menu_active) {
         s_menu_cursor = 0;
         s_menu_timeout_ticks = 0;
-        osd_render_menu();
         video_set_menu_mode(true);
         printf("[BTN: LONG] OSD Menu Opened!\n");
     } else {
@@ -643,20 +654,18 @@ static void handle_button_long_click(void)
             printf("[MENU: CHANNEL] Switched to %s (%u MHz)\n",
                    rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz);
             break;
-        case 2: /* BANDWIDTH */
-            if (s_bw_gear_mode == BW_GEAR_AUTO) {
-                s_bw_gear_mode = BW_GEAR_BW40;
-                s_current_bw40 = true;
-                rf_set_analog_bandwidth(true);
-            } else if (s_bw_gear_mode == BW_GEAR_BW40) {
-                s_bw_gear_mode = BW_GEAR_BW20;
-                s_current_bw40 = false;
-                rf_set_analog_bandwidth(false);
-            } else {
-                s_bw_gear_mode = BW_GEAR_AUTO;
+        case 2: /* VTX CFO AUTO-ZERO TUNE */
+            if (s_last_q_phase >= 40 && s_cfo_khz != 0) {
+                rf_step_frequency_offset_khz(-s_cfo_khz);
+                printf("[MENU: VTX CFO] Auto-tuned offset by %d kHz to match VTX!\n", -s_cfo_khz);
             }
             break;
-        case 3: /* AFC TUNE */
+        case 3: /* GEAR (BW40 / BW20) */
+            s_current_bw40 = !s_current_bw40;
+            rf_set_analog_bandwidth(s_current_bw40);
+            printf("[MENU: GEAR] Bandwidth set to %s\n", s_current_bw40 ? "BW40" : "BW20");
+            break;
+        case 4: /* AFC MODE */
             if (s_afc_mode == AFC_MODE_AUTO) {
                 s_afc_mode = AFC_MODE_HOLD;
             } else if (s_afc_mode == AFC_MODE_HOLD) {
@@ -665,8 +674,9 @@ static void handle_button_long_click(void)
             } else {
                 s_afc_mode = AFC_MODE_AUTO;
             }
+            printf("[MENU: AFC] Mode -> %d\n", s_afc_mode);
             break;
-        case 4: /* SAVE & EXIT */
+        case 5: /* SAVE & EXIT */
             video_set_menu_mode(false);
             printf("[BTN: LONG] OSD Menu Closed -> Live Video!\n");
             return;
@@ -723,12 +733,15 @@ static void analog_agc_task(void *arg)
             }
         }
 
-        /* 2. OSD Inactivity Timeout (6.0s auto-exit) */
+        /* 2. OSD Inactivity Timeout (12.0s auto-exit) & Dynamic Menu Refresh */
         if (s_menu_active) {
             s_menu_timeout_ticks++;
-            if (s_menu_timeout_ticks >= 120) { /* 6.0s inactivity auto-exit */
+            if ((s_menu_timeout_ticks % 4) == 0) {
+                osd_render_menu();
+            }
+            if (s_menu_timeout_ticks >= 240) { /* 12.0s inactivity auto-exit */
                 video_set_menu_mode(false);
-                printf("[MENU] Inactivity timeout (6s) -> Live Video\n");
+                printf("[MENU] Inactivity timeout (12s) -> Live Video\n");
             }
         }
 
