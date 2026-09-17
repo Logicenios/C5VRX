@@ -537,15 +537,15 @@ static void osd_render_menu(void)
     const fpv_channel_t *ch = rf_get_current_channel();
     char buf[40];
 
-    osd_draw_string(0, 100, "=== C5VRX-3 RECEIVER MENU ===");
+    osd_draw_string(0, 32, "=== C5VRX-3 RECEIVER MENU ===");
 
     snprintf(buf, sizeof(buf), "%c [1] BAND:   %s",
              (s_menu_cursor == 0) ? '>' : ' ', rf_get_band_name(rf_get_current_band()));
-    osd_draw_string(1, 100, buf);
+    osd_draw_string(1, 32, buf);
 
     snprintf(buf, sizeof(buf), "%c [2] CH:     %s (%u MHz)",
              (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz);
-    osd_draw_string(2, 100, buf);
+    osd_draw_string(2, 32, buf);
 
     if (s_last_q_phase >= 40) {
         snprintf(buf, sizeof(buf), "%c [3] VTX CFO: %+4d kHz [LCK %d%%]",
@@ -554,21 +554,21 @@ static void osd_render_menu(void)
         snprintf(buf, sizeof(buf), "%c [3] VTX CFO: NO SIGNAL",
                  (s_menu_cursor == 2) ? '>' : ' ');
     }
-    osd_draw_string(3, 100, buf);
+    osd_draw_string(3, 32, buf);
 
     snprintf(buf, sizeof(buf), "%c [4] GEAR:   %s",
              (s_menu_cursor == 3) ? '>' : ' ', s_current_bw40 ? "BW40 (COLOR)" : "BW20 (+3dB)");
-    osd_draw_string(4, 100, buf);
+    osd_draw_string(4, 32, buf);
 
     snprintf(buf, sizeof(buf), "%c [5] AFC:    %s",
              (s_menu_cursor == 4) ? '>' : ' ',
              (s_afc_mode == AFC_MODE_AUTO) ? "AUTO (+/-1.5M)" :
              (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
-    osd_draw_string(5, 100, buf);
+    osd_draw_string(5, 32, buf);
 
     snprintf(buf, sizeof(buf), "%c [6] SAVE & EXIT",
              (s_menu_cursor == 5) ? '>' : ' ');
-    osd_draw_string(6, 100, buf);
+    osd_draw_string(6, 32, buf);
 
     (void)esp_cache_msync((void *)s_osd_lines, sizeof(s_osd_lines), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 }
@@ -592,7 +592,10 @@ static void video_set_menu_mode(bool active)
          * Tail of OSD menu chain -> Head of OSD menu chain (circular).
          * GDMA naturally and seamlessly steps into the NTSC 240p menu at the next ring boundary! */
         s_osd_dma_nodes[NTSC_TOTAL_LINES - 1].next = &s_osd_dma_nodes[0];
+        (void)esp_cache_msync(&s_osd_dma_nodes[NTSC_TOTAL_LINES - 1], sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
         s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = &s_osd_dma_nodes[0];
+        (void)esp_cache_msync(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
         __asm__ __volatile__("fence rw, rw" ::: "memory");
 
         printf("[OSD] Spliced TX GDMA -> Local NTSC 240p Menu Chain (Seamless)\n");
@@ -608,7 +611,10 @@ static void video_set_menu_mode(bool active)
 
         /* Splice back to raw ring at the end of the current NTSC frame */
         s_osd_dma_nodes[NTSC_TOTAL_LINES - 1].next = s_tx_dscr_nodes[safe_tx_idx].dscr;
+        (void)esp_cache_msync(&s_osd_dma_nodes[NTSC_TOTAL_LINES - 1], sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
         s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = s_tx_dscr_nodes[0].dscr;
+        (void)esp_cache_msync(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
         __asm__ __volatile__("fence rw, rw" ::: "memory");
 
         printf("[OSD] Spliced Menu -> Live Video Ring (Target TX node %d)\n", safe_tx_idx);
@@ -745,25 +751,14 @@ static void analog_agc_task(void *arg)
             }
         }
 
-        /* 2. OSD Inactivity Timeout (12.0s auto-exit) & Live VTX CFO Refresh */
+        /* 2. OSD Inactivity Timeout (12.0s auto-exit) */
         if (s_menu_active) {
             s_menu_timeout_ticks++;
-            if ((s_menu_timeout_ticks % 10) == 0) {
-                /* Update only line 3 (VTX CFO) - light, zero-memcpy, zero bus contention */
-                char cfo_buf[48];
-                if (s_last_q_phase >= 40) {
-                    snprintf(cfo_buf, sizeof(cfo_buf), "%c [3] VTX CFO: %+4d kHz [LCK %d%%]",
-                             (s_menu_cursor == 2) ? '>' : ' ', s_cfo_khz, s_last_q_phase);
-                } else {
-                    snprintf(cfo_buf, sizeof(cfo_buf), "%c [3] VTX CFO: NO SIGNAL",
-                             (s_menu_cursor == 2) ? '>' : ' ');
-                }
-                osd_draw_string(3, 100, cfo_buf);
-            }
             if (s_menu_timeout_ticks >= 240) { /* 12.0s inactivity auto-exit */
                 video_set_menu_mode(false);
                 printf("[MENU] Inactivity timeout (12s) -> Live Video\n");
             }
+            continue; /* Freeze AGC, AFC, and avoid modifying DMA memory while menu is displayed! */
         }
 
         /* 1. Invalidate 256 bytes in CPU L1 cache so we read fresh GDMA samples from SRAM */
