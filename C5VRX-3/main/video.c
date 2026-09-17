@@ -72,7 +72,7 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 /* ----- Fixed production constants ----- */
 #define IQ_RATE_HZ       40000000u   /* MODEM_DIAG / PARLIO RX clock */
 #define DAC_RATE_HZ      40000000u   /* PARLIO TX clock ([D,D] = 20 MS/s unique) */
-#define RAW_RING_BYTES   32768u      /* 32768 byte cyclic ring (32 KiB Seamless Golden) */
+#define RAW_RING_BYTES   16384u      /* 16384 byte cyclic ring (16 KiB Seamless Golden) */
 #define DAC_IDLE_CODE    20u         /* Pedestal 20 (sync tip level) */
 #define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
 
@@ -100,7 +100,7 @@ static const int s_dac_gpio[8] = {23, 24, 11, 12, 8, 9, -1, -1};
 
 _Static_assert(IQ_RATE_HZ == 40000000u, "IQ rate must be 40 MHz");
 _Static_assert(DAC_RATE_HZ == 40000000u, "DAC rate must be 40 MHz");
-_Static_assert(RAW_RING_BYTES == 32768u || RAW_RING_BYTES == 16384u, "Ring must be 16K or 32K");
+_Static_assert(RAW_RING_BYTES == 16384u, "Ring must be exactly 16384 bytes");
 
 static const char *TAG = "c5vrx3_video";
 
@@ -305,11 +305,11 @@ static int patch_descriptors_clear_eof(int dma_ch, bool is_rx)
         if (is_rx) {
             s_rx_dscr_nodes[count].dscr = curr;
             s_rx_dscr_nodes[count].buffer = (uint8_t *)curr->buffer;
-            s_rx_dscr_nodes[count].length = curr->dw0.length;
+            s_rx_dscr_nodes[count].length = curr->dw0.size ? curr->dw0.size : 4092u;
         } else {
             s_tx_dscr_nodes[count].dscr = curr;
             s_tx_dscr_nodes[count].buffer = (uint8_t *)curr->buffer;
-            s_tx_dscr_nodes[count].length = curr->dw0.length;
+            s_tx_dscr_nodes[count].length = curr->dw0.size ? curr->dw0.size : 4092u;
         }
 
         curr = curr->next;
@@ -367,7 +367,7 @@ typedef enum {
     AFC_MODE_OFF  = 2, /* AFC Off: reset to 0 kHz offset */
 } afc_mode_t;
 
-static volatile analog_agc_mode_t s_agc_mode = ANALOG_AGC_ACTIVE;
+static volatile analog_agc_mode_t s_agc_mode = ANALOG_AGC_SHADOW;
 static volatile agc_state_t s_agc_state = AGC_STATE_SEARCH;
 static volatile bw_gear_mode_t s_bw_gear_mode = BW_GEAR_AUTO;
 static volatile afc_mode_t s_afc_mode = AFC_MODE_AUTO;
@@ -466,10 +466,15 @@ static int get_safe_osd_descriptor(void)
 
     int N = s_rx_dscr_count;
 
-    /* Candidate is 2 descriptors ahead of TX */
-    int candidate = (tx_idx + 2) % N;
+    /* Candidate: The descriptor right behind RX (which RX has demonstrably finished) */
+    int candidate = (rx_idx + N - 1) % N;
 
-    /* Hardware ownership validation:
+    /* If candidate is the tiny tail descriptor (< 500 bytes), step back to preceding full descriptor */
+    if (s_rx_dscr_nodes[candidate].length < 500) {
+        candidate = (candidate + N - 1) % N;
+    }
+
+    /* Strict hardware ownership validation:
      * - Candidate != RX current (not currently being written)
      * - Candidate != RX next (will not be written next)
      * - Candidate != TX current (not currently being read)
@@ -592,11 +597,11 @@ static void osd_overlay_task(void *arg)
             int hsync = find_hsync_edge_in_buffer(buf, search_pos, (int)len);
             if (hsync < 0) break;
 
-            /* Check deadline: ensure TX has not reached this descriptor or guard area */
+            /* Check deadline: ensure TX has not entered this descriptor */
             uint32_t tx_now = AHB_DMA.channel[s_tx_dma_ch].out.out_dscr_bf0.val;
             int cur_tx_idx = find_dscr_index(s_tx_dscr_nodes, s_tx_dscr_count, tx_now);
-            if (cur_tx_idx == safe_idx || (cur_tx_idx + 1) % s_tx_dscr_count == safe_idx) {
-                /* TX caught up! Abort immediately -- skip overlay to protect video */
+            if (cur_tx_idx == safe_idx) {
+                /* TX reached this descriptor! Abort immediately -- skip overlay to protect video */
                 break;
             }
 
@@ -742,24 +747,32 @@ static void analog_agc_task(void *arg)
     bool btn_long_fired = false;
     bool was_locked = false;
 
+    int boot_grace_ticks = 20; /* 1.0s boot grace period (20 * 50ms): ignore reset/flash glitches */
+
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(50)); /* 20 Hz evaluation (every 50 ms) */
 
         /* 1. BOOT Button Sampling & Debounce (GPIO 28, active LOW) */
-        int btn_level = gpio_get_level(BOOT_BTN_GPIO);
-        if (btn_level == 0) {
-            btn_ticks++;
-            if (btn_ticks >= 12 && !btn_long_fired) { /* 600 ms long press */
-                btn_long_fired = true;
-                handle_button_long_click();
-            }
+        if (boot_grace_ticks > 0) {
+            boot_grace_ticks--;
+            btn_ticks = 0;
+            btn_long_fired = false;
         } else {
-            if (btn_ticks > 0) {
-                if (!btn_long_fired && btn_ticks >= 1) { /* 50 - 550 ms short click */
-                    handle_button_short_click();
+            int btn_level = gpio_get_level(BOOT_BTN_GPIO);
+            if (btn_level == 0) {
+                btn_ticks++;
+                if (btn_ticks >= 12 && !btn_long_fired) { /* 600 ms long press */
+                    btn_long_fired = true;
+                    handle_button_long_click();
                 }
-                btn_ticks = 0;
-                btn_long_fired = false;
+            } else {
+                if (btn_ticks > 0) {
+                    if (!btn_long_fired && btn_ticks >= 2) { /* 100 - 550 ms short click (>= 2 samples) */
+                        handle_button_short_click();
+                    }
+                    btn_ticks = 0;
+                    btn_long_fired = false;
+                }
             }
         }
 
@@ -1231,9 +1244,12 @@ esp_err_t video_start(void)
     PARL_IO.rx_genrl_cfg.rx_eof_gen_sel = 1;
 
     /* Establish producer/consumer separation before starting TX.
-     * Use quarter of the ring size (4096 bytes = 102.4 µs for 16K).
-     * Delay = (RAW_RING_BYTES / 4) bytes / 40,000,000 bytes/s */
-    esp_rom_delay_us((RAW_RING_BYTES / 4u) * 1000000u / IQ_RATE_HZ);
+     * In 16 KiB ring (16384 bytes, 4 full 4092-byte descriptors D0..D3 + 16-byte tail D4):
+     * Delay by exactly 8192 bytes (2 full descriptors = 204.8 µs).
+     * This places TX at D0 while RX is at D2, leaving D1 sitting safely between them.
+     * RX has demonstrably finished D1 (>100 µs ago), and TX has not yet reached D1 (>100 µs away).
+     * D1 is 100% safe for OSD overlay! */
+    esp_rom_delay_us(8192u * 1000000u / IQ_RATE_HZ);
 
     if ((err = start_tx()) != ESP_OK) return err;
 
