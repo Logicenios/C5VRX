@@ -109,6 +109,7 @@ static inline uint16_t get_white_word(int idx) {
 /* Static NTSC CVBS scanline buffers & 262-node DMA descriptor chain in HP SRAM */
 static DMA_ATTR __attribute__((aligned(64))) uint8_t s_blank_line[NTSC_LINE_BYTES];
 static DMA_ATTR __attribute__((aligned(64))) uint8_t s_vsync_line[NTSC_LINE_BYTES];
+static DMA_ATTR __attribute__((aligned(64))) uint8_t s_eq_line[NTSC_LINE_BYTES];
 static DMA_ATTR __attribute__((aligned(64))) uint8_t s_osd_lines[OSD_ACTIVE_LINES][NTSC_LINE_BYTES];
 static DMA_ATTR __attribute__((aligned(64))) dma_descriptor_t s_osd_dma_nodes[NTSC_TOTAL_LINES];
 
@@ -477,7 +478,38 @@ static void osd_render_menu(void);
 
 static void osd_init_buffers(void)
 {
-    /* H-Sync: 96 words (4.8 µs) of sync cycle, 1176 words of black (20) */
+    /* Pre- and post-equalizing pulse line:
+     * EIA RS-170 standard: 2 half-line equalizing pulses per line.
+     * Each half-line (636 words = 31.8 µs):
+     * - 48 words (2.4 µs) of sync tip (DAC code 0)
+     * - 588 words (29.4 µs) of pedestal / blanking (DAC code 20)
+     * 48 + 588 + 48 + 588 = 1272 words (63.6 µs = 2544 bytes).
+     * All segments are multiples of 4 -> exact Phase 0 closure! */
+    uint16_t *eq_words = (uint16_t *)s_eq_line;
+    int eq_pos = 0;
+    for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
+    for (int i = 0; i < 588; i++) eq_words[eq_pos++] = IQ_WORD_BLACK;
+    for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
+    for (int i = 0; i < 588; i++) eq_words[eq_pos++] = IQ_WORD_BLACK;
+
+    /* V-Sync broad pulse serration line:
+     * EIA RS-170 standard: 2 half-line broad pulses per line.
+     * Each half-line (636 words = 31.8 µs):
+     * - 540 words (27.0 µs) of sync tip (DAC code 0)
+     * - 96 words (4.8 µs) of serration / blanking (DAC code 20)
+     * 540 + 96 + 540 + 96 = 1272 words (63.6 µs = 2544 bytes).
+     * All segments are multiples of 4 -> exact Phase 0 closure! */
+    uint16_t *vsync_words = (uint16_t *)s_vsync_line;
+    int vsync_pos = 0;
+    for (int i = 0; i < 540; i++) vsync_words[vsync_pos++] = get_sync_word(i);
+    for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = IQ_WORD_BLACK;
+    for (int i = 0; i < 540; i++) vsync_words[vsync_pos++] = get_sync_word(i);
+    for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = IQ_WORD_BLACK;
+
+    /* Standard horizontal blank line:
+     * Words 0..95 (96 words = 4.8 µs): H-Sync tip (DAC code 0)
+     * Words 96..1271 (1176 words = 58.8 µs): Blanking / black pedestal (DAC code 20)
+     * 96 + 1176 = 1272 words (63.6 µs = 2544 bytes). */
     uint16_t *blank_words = (uint16_t *)s_blank_line;
     for (int i = 0; i < 96; i++) {
         blank_words[i] = get_sync_word(i);
@@ -486,20 +518,19 @@ static void osd_init_buffers(void)
         blank_words[i] = IQ_WORD_BLACK;
     }
 
-    /* V-Sync serration line: 540 words sync, 96 porch, 540 sync, 96 porch */
-    uint16_t *vsync_words = (uint16_t *)s_vsync_line;
-    int pos = 0;
-    for (int i = 0; i < 540; i++) vsync_words[pos++] = get_sync_word(i);
-    for (int i = 0; i < 96; i++)  vsync_words[pos++] = IQ_WORD_BLACK;
-    for (int i = 0; i < 540; i++) vsync_words[pos++] = get_sync_word(i);
-    for (int i = 0; i < 96; i++)  vsync_words[pos++] = IQ_WORD_BLACK;
-
-    /* Initialize all 48 active text scanlines to blank line */
+    /* Initialize all 56 active text scanlines to blank line */
     for (int l = 0; l < (int)OSD_ACTIVE_LINES; l++) {
         memcpy(s_osd_lines[l], s_blank_line, NTSC_LINE_BYTES);
     }
 
-    /* 262 DMA descriptors for rock-solid 60.012 Hz NTSC 240p */
+    /* Full EIA RS-170 NTSC 240p standard 262-node circular DMA descriptor chain:
+     * - Lines 0..2 (3 lines): Pre-equalizing pulses (s_eq_line)
+     * - Lines 3..5 (3 lines): Vertical sync broad pulses (s_vsync_line)
+     * - Lines 6..8 (3 lines): Post-equalizing pulses (s_eq_line)
+     * - Lines 9..69 (61 lines): Top blank border & VBI (s_blank_line)
+     * - Lines 70..181 (112 lines): Active menu text (s_osd_lines, 56 scanlines doubled)
+     * - Lines 182..261 (80 lines): Bottom blank border (s_blank_line)
+     * Total = 3 + 3 + 3 + 61 + 112 + 80 = 262 scanlines @ 60.012 Hz! */
     for (int i = 0; i < (int)NTSC_TOTAL_LINES; i++) {
         dma_descriptor_t *node = &s_osd_dma_nodes[i];
         node->dw0.size = NTSC_LINE_BYTES;
@@ -508,25 +539,28 @@ static void osd_init_buffers(void)
         node->dw0.suc_eof = 0;
 
         if (i < 3) {
-            /* Lines 0..2: Vertical sync serrations (3 lines of broad pulses = 6 serrations, exact RS-170) */
+            /* Lines 0..2: Pre-equalizing pulses (RS-170 standard) */
+            node->buffer = s_eq_line;
+        } else if (i < 6) {
+            /* Lines 3..5: Vertical sync serrations (3 lines of broad pulses) */
             node->buffer = s_vsync_line;
+        } else if (i < 9) {
+            /* Lines 6..8: Post-equalizing pulses (RS-170 standard) */
+            node->buffer = s_eq_line;
         } else if (i >= 70 && i < (int)(70 + OSD_ACTIVE_LINES * 2)) {
             /* Lines 70..181 (112 scanlines centered vertically):
              * Active menu text, each font row repeated twice for double-height readability! */
             int font_line = (i - 70) / 2;
             node->buffer = s_osd_lines[font_line];
         } else {
-            /* Lines 3..69 (top) and 182..261 (bottom): Blank black lines with standard H-sync */
+            /* Lines 9..69 and 182..261: Blank black lines with standard H-sync */
             node->buffer = s_blank_line;
         }
 
         node->next = (i < (int)NTSC_TOTAL_LINES - 1) ? &s_osd_dma_nodes[i + 1] : &s_osd_dma_nodes[0];
-        (void)esp_cache_msync(node, sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     }
 
-    (void)esp_cache_msync((void *)s_blank_line, sizeof(s_blank_line), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-    (void)esp_cache_msync((void *)s_vsync_line, sizeof(s_vsync_line), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-    (void)esp_cache_msync((void *)s_osd_lines, sizeof(s_osd_lines), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    __asm__ __volatile__("fence rw, rw" ::: "memory");
 
     /* Pre-render initial menu text */
     osd_render_menu();
