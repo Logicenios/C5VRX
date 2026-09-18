@@ -80,13 +80,29 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 #define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
 #define OSD_BOOT_BTN_ENABLE_DEFAULT  1 /* 1 = Enabled by default (Long-press BOOT enters menu) */
 
-/* NTSC 240p Composite Video Synthesized OSD Engine (60.012 Hz, 1272 words/line) */
+/* Dual Video Standard OSD Synthesizer Architecture (NTSC 240p / PAL 288p) */
 #define NTSC_LINE_WORDS   1272u
-#define NTSC_LINE_BYTES   (NTSC_LINE_WORDS * 2u) /* 2544 bytes @ 40 MS/s DAC clock */
-#define NTSC_TOTAL_LINES  262u
+#define NTSC_LINE_BYTES   (NTSC_LINE_WORDS * 2u) /* 2544 bytes @ 40 MS/s DAC clock (63.600 µs) */
+#define NTSC_TOTAL_LINES  262u                  /* 60.012 Hz field rate */
+
+#define PAL_LINE_WORDS    1280u
+#define PAL_LINE_BYTES    (PAL_LINE_WORDS * 2u)  /* 2560 bytes @ 40 MS/s DAC clock (64.000 µs) */
+#define PAL_TOTAL_LINES   312u                  /* 50.080 Hz field rate */
+
+#define MAX_LINE_WORDS    PAL_LINE_WORDS
+#define MAX_LINE_BYTES    PAL_LINE_BYTES
+#define MAX_TOTAL_LINES   PAL_TOTAL_LINES
+
 #define OSD_MENU_ROWS     7u
 #define OSD_FONT_HEIGHT   8u
 #define OSD_ACTIVE_LINES  (OSD_MENU_ROWS * OSD_FONT_HEIGHT) /* 56 scanlines */
+
+typedef enum {
+    VIDEO_STD_NTSC = 0, /* NTSC 240p: 262 lines @ 60.012 Hz, 1272 words/line (63.600 µs) */
+    VIDEO_STD_PAL  = 1, /* PAL 288p:  312 lines @ 50.080 Hz, 1280 words/line (64.000 µs) */
+} video_standard_t;
+
+static volatile video_standard_t s_video_std = VIDEO_STD_NTSC;
 
 /* Synthesized IQ cycles for the embedded Phase5 LUT.
  *
@@ -149,12 +165,22 @@ static inline void sync_dma_m2c(const void *addr, size_t size)
                           ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 }
 
-/* Static NTSC CVBS scanline buffers & 262-node DMA descriptor chain in HP SRAM */
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_blank_line[NTSC_LINE_BYTES];
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_vsync_line[NTSC_LINE_BYTES];
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_eq_line[NTSC_LINE_BYTES];
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_osd_lines[OSD_ACTIVE_LINES][NTSC_LINE_BYTES];
-static DMA_ATTR __attribute__((aligned(64))) dma_descriptor_t s_osd_dma_nodes[NTSC_TOTAL_LINES];
+/* Static CVBS scanline buffers & DMA descriptor chain in HP SRAM (sized for PAL/NTSC) */
+static DMA_ATTR __attribute__((aligned(64))) uint8_t s_blank_line[MAX_LINE_BYTES];
+static DMA_ATTR __attribute__((aligned(64))) uint8_t s_vsync_line[MAX_LINE_BYTES];
+static DMA_ATTR __attribute__((aligned(64))) uint8_t s_eq_line[MAX_LINE_BYTES];
+static DMA_ATTR __attribute__((aligned(64))) uint8_t s_osd_lines[OSD_ACTIVE_LINES][MAX_LINE_BYTES];
+static DMA_ATTR __attribute__((aligned(64))) dma_descriptor_t s_osd_dma_nodes[MAX_TOTAL_LINES];
+
+static inline uint32_t osd_get_line_words(void) {
+    return (s_video_std == VIDEO_STD_PAL) ? PAL_LINE_WORDS : NTSC_LINE_WORDS;
+}
+static inline uint32_t osd_get_line_bytes(void) {
+    return (s_video_std == VIDEO_STD_PAL) ? PAL_LINE_BYTES : NTSC_LINE_BYTES;
+}
+static inline uint32_t osd_get_total_lines(void) {
+    return (s_video_std == VIDEO_STD_PAL) ? PAL_TOTAL_LINES : NTSC_TOTAL_LINES;
+}
 
 /* OSD State */
 static volatile bool s_menu_active = false;
@@ -504,9 +530,10 @@ static void osd_draw_string(int row_idx, int col_words, const char *str)
     if (row_idx < 0 || row_idx >= (int)OSD_MENU_ROWS) return;
     int base_line = row_idx * (int)OSD_FONT_HEIGHT;
     int start_col = 224 + col_words;
+    uint32_t max_col = osd_get_line_words() - 32;
 
     int char_idx = 0;
-    while (*str && (start_col + char_idx * 32 + 32) <= 1260) {
+    while (*str && (start_col + char_idx * 32 + 32) <= max_col) {
         char ch = *str++;
         int font_idx = (ch >= 32 && ch <= 126) ? (ch - 32) : 0;
 
@@ -536,7 +563,7 @@ static void osd_draw_string(int row_idx, int col_words, const char *str)
     }
 
     /* Pad remaining columns in this row up to 32 chars with black pixels */
-    while (char_idx < 32 && (start_col + char_idx * 32 + 32) <= 1260) {
+    while (char_idx < 32 && (start_col + char_idx * 32 + 32) <= max_col) {
         for (int r = 0; r < 8; r++) {
             uint16_t *line_ptr = (uint16_t *)s_osd_lines[base_line + r];
             int p = start_col + char_idx * 32;
@@ -552,106 +579,139 @@ static void osd_render_menu(void);
 
 static void osd_init_buffers(void)
 {
-    /* Pre- and post-equalizing pulse line:
-     * EIA RS-170 standard: 2 half-line equalizing pulses per line.
-     * Each half-line (636 words = 31.8 µs):
-     * - 16 words (0.8 µs) of front porch / blanking pedestal (DAC code 20)
-     * - 48 words (2.4 µs) of sync tip (DAC code 0)
-     * - 572 words (28.6 µs) of pedestal / blanking (DAC code 20)
-     * (16 + 48 + 572) * 2 = 1272 words (63.6 µs = 2544 bytes).
-     * All segments are multiples of 4 -> exact Phase 0 closure! */
+    const uint32_t line_bytes = osd_get_line_bytes();
+    const uint32_t total_lines = osd_get_total_lines();
+
     uint16_t *eq_words = (uint16_t *)s_eq_line;
-    int eq_pos = 0;
-    for (int i = 0; i < 16; i++)  eq_words[eq_pos++] = get_black_word(i);
-    for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
-    for (int i = 0; i < 572; i++) eq_words[eq_pos++] = get_black_word(i);
-    for (int i = 0; i < 16; i++)  eq_words[eq_pos++] = get_black_word(i);
-    for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
-    for (int i = 0; i < 572; i++) eq_words[eq_pos++] = get_black_word(i);
-
-    /* V-Sync broad pulse serration line:
-     * EIA RS-170 standard: 2 half-line broad pulses per line.
-     * Each half-line (636 words = 31.8 µs):
-     * - 16 words (0.8 µs) of front porch / blanking pedestal (DAC code 20)
-     * - 524 words (26.2 µs) of sync tip (DAC code 0)
-     * - 96 words (4.8 µs) of serration / blanking (DAC code 20)
-     * (16 + 524 + 96) * 2 = 1272 words (63.6 µs = 2544 bytes).
-     * All segments are multiples of 4 -> exact Phase 0 closure! */
     uint16_t *vsync_words = (uint16_t *)s_vsync_line;
-    int vsync_pos = 0;
-    for (int i = 0; i < 16; i++)  vsync_words[vsync_pos++] = get_black_word(i);
-    for (int i = 0; i < 524; i++) vsync_words[vsync_pos++] = get_sync_word(i);
-    for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
-    for (int i = 0; i < 16; i++)  vsync_words[vsync_pos++] = get_black_word(i);
-    for (int i = 0; i < 524; i++) vsync_words[vsync_pos++] = get_sync_word(i);
-    for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
-
-    /* Standard EIA RS-170 horizontal blank line:
-     * - Words 0..31   (32 words = 1.6 µs): Front Porch (DAC code 20 / 0.33V blanking pedestal)
-     * - Words 32..127  (96 words = 4.8 µs): H-Sync Tip (DAC code 0 / 0.0V sync tip)
-     * - Words 128..223 (96 words = 4.8 µs): Back Porch (DAC code 20 / 0.33V blanking pedestal)
-     * - Words 224..1271 (1048 words = 52.4 µs): Blanking / black pedestal (DAC code 20)
-     * 32 + 96 + 96 + 1048 = 1272 words (63.6 µs = 2544 bytes).
-     *
-     * Every segment is an exact multiple of 4 words -> Phase 0 closure across all boundaries!
-     * Front porch placed at the descriptor head (Words 0..31) absorbs GDMA next-descriptor
-     * fetch latency and boundary jitter safely inside the 0.33V blanking pedestal, ensuring
-     * an ultra-clean H-sync falling edge at Word 32 that analog video decoder PLLs and
-     * back-porch DC restorers lock onto with rock-solid stability! */
     uint16_t *blank_words = (uint16_t *)s_blank_line;
-    for (int i = 0; i < 32; i++) {
-        blank_words[i] = get_black_word(i);
-    }
-    for (int i = 32; i < 128; i++) {
-        blank_words[i] = get_sync_word(i - 32);
-    }
-    for (int i = 128; i < 224; i++) {
-        blank_words[i] = get_black_word(i - 128);
-    }
-    for (int i = 224; i < (int)NTSC_LINE_WORDS; i++) {
-        blank_words[i] = get_black_word(i - 224);
+
+    if (s_video_std == VIDEO_STD_PAL) {
+        /* ----- PAL 288p (50.080 Hz, 1280 words = 2560 bytes per line, 312 lines) -----
+         * Pure mathematical sample-exact 64.000 µs line timing @ 40 MS/s DAC clock!
+         * - Words 0..31   (32 words = 1.6 µs): Front Porch (DAC code 20 / 0.33V blanking pedestal)
+         * - Words 32..127  (96 words = 4.8 µs): H-Sync Tip (DAC code 0 / 0.0V sync tip) -> Falling edge at Word 32!
+         * - Words 128..255 (128 words = 6.4 µs): Back Porch (DAC code 20 / 0.33V blanking pedestal)
+         * - Words 256..1279 (1024 words = 51.2 µs): Active Video / Black pedestal (DAC code 20)
+         * 32 + 96 + 128 + 1024 = 1280 words (2560 bytes = 64.000 µs).
+         * Every segment is an exact multiple of 4 words -> Phase 0 closure across all boundaries! */
+
+        /* Blank line */
+        for (int i = 0; i < 32; i++)    blank_words[i] = get_black_word(i);
+        for (int i = 32; i < 128; i++)   blank_words[i] = get_sync_word(i - 32);
+        for (int i = 128; i < 256; i++)  blank_words[i] = get_black_word(i - 128);
+        for (int i = 256; i < 1280; i++) blank_words[i] = get_black_word(i - 256);
+
+        /* Pre- and post-equalizing pulse line:
+         * 2 half-lines of 640 words (32.000 µs each).
+         * Falling sync edges placed precisely at Word 32 and Word 672 (32 + 640):
+         * - Half 1: 32 front porch (20), 48 sync tip (0), 560 blanking (20) = 640 words.
+         * - Half 2: 32 front porch (20), 48 sync tip (0), 560 blanking (20) = 640 words.
+         * Zero horizontal PLL phase jump on entering/exiting vertical blanking! */
+        int eq_pos = 0;
+        for (int i = 0; i < 32; i++)  eq_words[eq_pos++] = get_black_word(i);
+        for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
+        for (int i = 0; i < 560; i++) eq_words[eq_pos++] = get_black_word(i);
+        for (int i = 0; i < 32; i++)  eq_words[eq_pos++] = get_black_word(i);
+        for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
+        for (int i = 0; i < 560; i++) eq_words[eq_pos++] = get_black_word(i);
+
+        /* V-Sync broad pulse serration line:
+         * 2 broad pulses per line (640 words each).
+         * Falling sync edges placed precisely at Word 32 and Word 672 (32 + 640):
+         * - Half 1: 32 front porch (20), 512 broad sync (0), 96 serration (20) = 640 words.
+         * - Half 2: 32 front porch (20), 512 broad sync (0), 96 serration (20) = 640 words.
+         * Zero phase jitter, rock-solid DC clamp and vertical integrator stability! */
+        int vsync_pos = 0;
+        for (int i = 0; i < 32; i++)  vsync_words[vsync_pos++] = get_black_word(i);
+        for (int i = 0; i < 512; i++) vsync_words[vsync_pos++] = get_sync_word(i);
+        for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
+        for (int i = 0; i < 32; i++)  vsync_words[vsync_pos++] = get_black_word(i);
+        for (int i = 0; i < 512; i++) vsync_words[vsync_pos++] = get_sync_word(i);
+        for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
+
+    } else {
+        /* ----- NTSC 240p (60.012 Hz, 1272 words = 2544 bytes per line, 262 lines) -----
+         * Mathematical sample-exact 63.600 µs line timing @ 40 MS/s DAC clock!
+         * - Words 0..31   (32 words = 1.6 µs): Front Porch (DAC code 20 / 0.33V blanking pedestal)
+         * - Words 32..127  (96 words = 4.8 µs): H-Sync Tip (DAC code 0 / 0.0V sync tip) -> Falling edge at Word 32!
+         * - Words 128..223 (96 words = 4.8 µs): Back Porch (DAC code 20 / 0.33V blanking pedestal)
+         * - Words 224..1271 (1048 words = 52.4 µs): Active Video / Black pedestal (DAC code 20)
+         * 32 + 96 + 96 + 1048 = 1272 words (2544 bytes = 63.600 µs).
+         * Every segment is an exact multiple of 4 words -> Phase 0 closure across all boundaries! */
+
+        /* Blank line */
+        for (int i = 0; i < 32; i++)    blank_words[i] = get_black_word(i);
+        for (int i = 32; i < 128; i++)   blank_words[i] = get_sync_word(i - 32);
+        for (int i = 128; i < 224; i++)  blank_words[i] = get_black_word(i - 128);
+        for (int i = 224; i < 1272; i++) blank_words[i] = get_black_word(i - 224);
+
+        /* Pre- and post-equalizing pulse line:
+         * 2 half-lines of 636 words (31.800 µs each).
+         * Falling sync edges placed precisely at Word 32 and Word 668 (32 + 636):
+         * - Half 1: 32 front porch (20), 48 sync tip (0), 556 blanking (20) = 636 words.
+         * - Half 2: 32 front porch (20), 48 sync tip (0), 556 blanking (20) = 636 words.
+         * Eliminates the old 800 ns vertical phase jump! */
+        int eq_pos = 0;
+        for (int i = 0; i < 32; i++)  eq_words[eq_pos++] = get_black_word(i);
+        for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
+        for (int i = 0; i < 556; i++) eq_words[eq_pos++] = get_black_word(i);
+        for (int i = 0; i < 32; i++)  eq_words[eq_pos++] = get_black_word(i);
+        for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
+        for (int i = 0; i < 556; i++) eq_words[eq_pos++] = get_black_word(i);
+
+        /* V-Sync broad pulse serration line:
+         * 2 broad pulses per line (636 words each).
+         * Falling sync edges placed precisely at Word 32 and Word 668 (32 + 636):
+         * - Half 1: 32 front porch (20), 508 broad sync (0), 96 serration (20) = 636 words.
+         * - Half 2: 32 front porch (20), 508 broad sync (0), 96 serration (20) = 636 words.
+         * Zero phase jitter, rock-solid DC clamp and vertical integrator stability! */
+        int vsync_pos = 0;
+        for (int i = 0; i < 32; i++)  vsync_words[vsync_pos++] = get_black_word(i);
+        for (int i = 0; i < 508; i++) vsync_words[vsync_pos++] = get_sync_word(i);
+        for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
+        for (int i = 0; i < 32; i++)  vsync_words[vsync_pos++] = get_black_word(i);
+        for (int i = 0; i < 508; i++) vsync_words[vsync_pos++] = get_sync_word(i);
+        for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
     }
 
     /* Initialize all 56 active text scanlines to blank line */
     for (int l = 0; l < (int)OSD_ACTIVE_LINES; l++) {
-        memcpy(s_osd_lines[l], s_blank_line, NTSC_LINE_BYTES);
+        memcpy(s_osd_lines[l], s_blank_line, line_bytes);
     }
 
-    /* Full EIA RS-170 NTSC 240p standard 262-node circular DMA descriptor chain:
-     * - Lines 0..2 (3 lines): Pre-equalizing pulses (s_eq_line)
-     * - Lines 3..5 (3 lines): Vertical sync broad pulses (s_vsync_line)
-     * - Lines 6..8 (3 lines): Post-equalizing pulses (s_eq_line)
-     * - Lines 9..69 (61 lines): Top blank border & VBI (s_blank_line)
-     * - Lines 70..181 (112 lines): Active menu text (s_osd_lines, 56 scanlines doubled)
-     * - Lines 182..261 (80 lines): Bottom blank border (s_blank_line)
-     * Total = 3 + 3 + 3 + 61 + 112 + 80 = 262 scanlines @ 60.012 Hz! */
-    for (int i = 0; i < (int)NTSC_TOTAL_LINES; i++) {
+    /* Build circular DMA descriptor chain:
+     * For NTSC (262 lines): text at lines 70..181 (112 doubled scanlines)
+     * For PAL (312 lines): text at lines 90..201 (112 doubled scanlines) */
+    int text_start = (s_video_std == VIDEO_STD_PAL) ? 90 : 70;
+    int text_end = text_start + (int)(OSD_ACTIVE_LINES * 2);
+
+    for (int i = 0; i < (int)total_lines; i++) {
         dma_descriptor_t *node = &s_osd_dma_nodes[i];
-        node->dw0.size = NTSC_LINE_BYTES;
-        node->dw0.length = NTSC_LINE_BYTES;
+        node->dw0.size = line_bytes;
+        node->dw0.length = line_bytes;
         node->dw0.owner = 1;
         node->dw0.suc_eof = 0;
 
         if (i < 3) {
-            /* Lines 0..2: Pre-equalizing pulses (RS-170 standard) */
+            /* Lines 0..2: Pre-equalizing pulses */
             node->buffer = s_eq_line;
         } else if (i < 6) {
-            /* Lines 3..5: Vertical sync serrations (3 lines of broad pulses) */
+            /* Lines 3..5: Vertical sync serrations */
             node->buffer = s_vsync_line;
         } else if (i < 9) {
-            /* Lines 6..8: Post-equalizing pulses (RS-170 standard) */
+            /* Lines 6..8: Post-equalizing pulses */
             node->buffer = s_eq_line;
-        } else if (i >= 70 && i < (int)(70 + OSD_ACTIVE_LINES * 2)) {
-            /* Lines 70..181 (112 scanlines centered vertically):
-             * Active menu text, each font row repeated twice for double-height readability! */
-            int font_line = (i - 70) / 2;
+        } else if (i >= text_start && i < text_end) {
+            /* Active menu text, each font row repeated twice for double-height readability */
+            int font_line = (i - text_start) / 2;
             node->buffer = s_osd_lines[font_line];
         } else {
-            /* Lines 9..69 and 182..261: Blank black lines with standard H-sync */
+            /* Blank black lines with standard H-sync */
             node->buffer = s_blank_line;
         }
 
-        node->next = (i < (int)NTSC_TOTAL_LINES - 1) ? &s_osd_dma_nodes[i + 1] : &s_osd_dma_nodes[0];
+        node->next = (i < (int)total_lines - 1) ? &s_osd_dma_nodes[i + 1] : &s_osd_dma_nodes[0];
     }
 
     __asm__ __volatile__("fence rw, rw" ::: "memory");
@@ -659,12 +719,12 @@ static void osd_init_buffers(void)
     /* Pre-render initial menu text */
     osd_render_menu();
 
-    /* Flush all NTSC line buffers and entire 262-node DMA descriptor chain to physical SRAM */
-    sync_dma_c2m(s_eq_line, sizeof(s_eq_line));
-    sync_dma_c2m(s_vsync_line, sizeof(s_vsync_line));
-    sync_dma_c2m(s_blank_line, sizeof(s_blank_line));
+    /* Flush line buffers and descriptor chain to physical SRAM */
+    sync_dma_c2m(s_eq_line, line_bytes);
+    sync_dma_c2m(s_vsync_line, line_bytes);
+    sync_dma_c2m(s_blank_line, line_bytes);
     sync_dma_c2m(s_osd_lines, sizeof(s_osd_lines));
-    sync_dma_c2m(s_osd_dma_nodes, sizeof(s_osd_dma_nodes));
+    sync_dma_c2m(s_osd_dma_nodes, sizeof(dma_descriptor_t) * total_lines);
 }
 
 static void osd_render_menu(void)
@@ -672,33 +732,36 @@ static void osd_render_menu(void)
     const fpv_channel_t *ch = rf_get_current_channel();
     char buf[40];
 
-    osd_draw_string(0, 16, "=== C5VRX-3 RECEIVER MENU ===");
+    snprintf(buf, sizeof(buf), "=== C5VRX-3 MENU (%s) ===",
+             (s_video_std == VIDEO_STD_PAL) ? "PAL 288p" : "NTSC 240p");
+    osd_draw_string(0, 16, buf);
 
     snprintf(buf, sizeof(buf), "%c [1] BAND:   %s",
              (s_menu_cursor == 0) ? '>' : ' ', rf_get_band_name(rf_get_current_band()));
     osd_draw_string(1, 16, buf);
 
-    snprintf(buf, sizeof(buf), "%c [2] CH:     %s (%u MHz)",
-             (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz);
+    if (s_last_q_phase >= 40) {
+        snprintf(buf, sizeof(buf), "%c [2] CH:     %s (%uM) [CFO:%+dk]",
+                 (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz, s_cfo_khz);
+    } else {
+        snprintf(buf, sizeof(buf), "%c [2] CH:     %s (%u MHz)",
+                 (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz);
+    }
     osd_draw_string(2, 16, buf);
 
-    if (s_last_q_phase >= 40) {
-        snprintf(buf, sizeof(buf), "%c [3] VTX CFO: %+4d kHz [LCK %d%%]",
-             (s_menu_cursor == 2) ? '>' : ' ', s_cfo_khz, s_last_q_phase);
-    } else {
-        snprintf(buf, sizeof(buf), "%c [3] VTX CFO: NO SIGNAL",
-                 (s_menu_cursor == 2) ? '>' : ' ');
-    }
+    snprintf(buf, sizeof(buf), "%c [3] GEAR:   %s",
+             (s_menu_cursor == 2) ? '>' : ' ', s_current_bw40 ? "BW40 (COLOR)" : "BW20 (+3dB)");
     osd_draw_string(3, 16, buf);
 
-    snprintf(buf, sizeof(buf), "%c [4] GEAR:   %s",
-             (s_menu_cursor == 3) ? '>' : ' ', s_current_bw40 ? "BW40 (COLOR)" : "BW20 (+3dB)");
-    osd_draw_string(4, 16, buf);
-
-    snprintf(buf, sizeof(buf), "%c [5] AFC:    %s",
-             (s_menu_cursor == 4) ? '>' : ' ',
+    snprintf(buf, sizeof(buf), "%c [4] AFC:    %s",
+             (s_menu_cursor == 3) ? '>' : ' ',
              (s_afc_mode == AFC_MODE_AUTO) ? "AUTO EXP (+/-1.5M)" :
              (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
+    osd_draw_string(4, 16, buf);
+
+    snprintf(buf, sizeof(buf), "%c [5] STD:    %s",
+             (s_menu_cursor == 4) ? '>' : ' ',
+             (s_video_std == VIDEO_STD_PAL) ? "PAL 288p (50Hz)" : "NTSC 240p (60Hz)");
     osd_draw_string(5, 16, buf);
 
     snprintf(buf, sizeof(buf), "%c [6] SAVE & EXIT",
@@ -718,23 +781,26 @@ static void video_set_menu_mode(bool active)
         return;
     }
 
+    uint32_t total_lines = osd_get_total_lines();
+
     if (active) {
         /* Pre-render fresh menu state */
         osd_render_menu();
 
         /* Ensure all OSD descriptors are firmly synced to physical SRAM */
-        s_osd_dma_nodes[NTSC_TOTAL_LINES - 1].next = &s_osd_dma_nodes[0];
-        sync_dma_c2m(s_osd_dma_nodes, sizeof(s_osd_dma_nodes));
+        s_osd_dma_nodes[total_lines - 1].next = &s_osd_dma_nodes[0];
+        sync_dma_c2m(s_osd_dma_nodes, sizeof(dma_descriptor_t) * total_lines);
 
         /* Splice OSD menu into GDMA without stopping hardware!
          * Tail of raw ring -> Head of OSD menu chain.
          * Tail of OSD menu chain -> Head of OSD menu chain (circular).
-         * GDMA naturally and seamlessly steps into the NTSC 240p menu at the next ring boundary! */
+         * GDMA naturally and seamlessly steps into the local menu at the next ring boundary! */
         s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = &s_osd_dma_nodes[0];
         sync_dma_c2m(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t));
         __asm__ __volatile__("fence rw, rw" ::: "memory");
 
-        printf("[OSD] Spliced TX GDMA -> Local NTSC 240p Menu Chain (Seamless)\n");
+        printf("[OSD] Spliced TX GDMA -> Local %s Menu Chain (Seamless)\n",
+               (s_video_std == VIDEO_STD_PAL) ? "PAL 288p" : "NTSC 240p");
     } else {
         /* Find current RX descriptor to guarantee safe separation upon return */
         uint32_t rx_now = (s_rx_dma_ch >= 0 && s_rx_dma_ch < 3)
@@ -745,9 +811,9 @@ static void video_set_menu_mode(bool active)
             safe_tx_idx = (rx_idx + (s_tx_dscr_count / 2)) % s_tx_dscr_count;
         }
 
-        /* Splice back to raw ring at the end of the current NTSC frame */
-        s_osd_dma_nodes[NTSC_TOTAL_LINES - 1].next = s_tx_dscr_nodes[safe_tx_idx].dscr;
-        sync_dma_c2m(&s_osd_dma_nodes[NTSC_TOTAL_LINES - 1], sizeof(dma_descriptor_t));
+        /* Splice back to raw ring at the end of the current frame */
+        s_osd_dma_nodes[total_lines - 1].next = s_tx_dscr_nodes[safe_tx_idx].dscr;
+        sync_dma_c2m(&s_osd_dma_nodes[total_lines - 1], sizeof(dma_descriptor_t));
 
         s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = s_tx_dscr_nodes[0].dscr;
         sync_dma_c2m(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t));
@@ -812,18 +878,12 @@ static void handle_button_long_click(void)
             printf("[MENU: CHANNEL] Switched to %s (%u MHz)\n",
                    rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz);
             break;
-        case 2: /* VTX CFO AUTO-ZERO TUNE */
-            if (s_last_q_phase >= 40 && s_cfo_khz != 0) {
-                rf_step_frequency_offset_khz(-s_cfo_khz);
-                printf("[MENU: VTX CFO] Auto-tuned offset by %d kHz to match VTX!\n", -s_cfo_khz);
-            }
-            break;
-        case 3: /* GEAR (BW40 / BW20) */
+        case 2: /* GEAR (BW40 / BW20) */
             s_current_bw40 = !s_current_bw40;
             rf_set_analog_bandwidth(s_current_bw40);
             printf("[MENU: GEAR] Bandwidth set to %s\n", s_current_bw40 ? "BW40" : "BW20");
             break;
-        case 4: /* AFC MODE */
+        case 3: /* AFC MODE */
             if (s_afc_mode == AFC_MODE_AUTO) {
                 s_afc_mode = AFC_MODE_HOLD;
             } else if (s_afc_mode == AFC_MODE_HOLD) {
@@ -833,6 +893,20 @@ static void handle_button_long_click(void)
                 s_afc_mode = AFC_MODE_AUTO;
             }
             printf("[MENU: AFC] Mode -> %d\n", s_afc_mode);
+            break;
+        case 4: /* VIDEO STANDARD (NTSC / PAL) */
+            s_video_std = (s_video_std == VIDEO_STD_NTSC) ? VIDEO_STD_PAL : VIDEO_STD_NTSC;
+            osd_init_buffers();
+            if (s_menu_active) {
+                uint32_t tot_lines = osd_get_total_lines();
+                s_osd_dma_nodes[tot_lines - 1].next = &s_osd_dma_nodes[0];
+                sync_dma_c2m(s_osd_dma_nodes, sizeof(dma_descriptor_t) * tot_lines);
+                if (s_tx_dscr_count > 0 && s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr) {
+                    s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = &s_osd_dma_nodes[0];
+                    sync_dma_c2m(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t));
+                }
+            }
+            printf("[MENU: STD] Switched standard -> %s\n", (s_video_std == VIDEO_STD_PAL) ? "PAL 288p (50Hz)" : "NTSC 240p (60Hz)");
             break;
         case 5: /* SAVE & EXIT */
             video_set_menu_mode(false);
@@ -901,14 +975,11 @@ static void analog_agc_task(void *arg)
             }
         }
 
-        /* 2. OSD Inactivity Timeout (12.0s auto-exit) */
+        /* 2. OSD Inactivity Timeout (12.0s auto-exit).
+         * Zero console I/O or fflush calls inside this loop to guarantee
+         * non-blocking execution regardless of USB host connection state! */
         if (s_menu_active) {
             s_menu_timeout_ticks++;
-            if ((s_menu_timeout_ticks % 20) == 0) { /* 1 Hz periodic console heartbeat while in menu */
-                printf("[MENU ACTIVE] Cursor=%d | Timeout=%ds/12s | Hotkeys: [Space]/[n]=Next, [x]/[Enter]=Select, [o]=Exit\n",
-                       s_menu_cursor, (240 - s_menu_timeout_ticks) / 20);
-                fflush(stdout);
-            }
             if (s_menu_timeout_ticks >= 240) { /* 12.0s inactivity auto-exit */
                 video_set_menu_mode(false);
                 printf("[MENU] Inactivity timeout (12s) -> Live Video\n");
@@ -1210,7 +1281,6 @@ update_telemetry:
                    s_cfo_khz,
                    s_current_gain,
                    s_last_p_median, s_last_q_phase, s_last_n_clip);
-            fflush(stdout);
         }
     }
 }
@@ -1311,6 +1381,19 @@ static void console_diag_task(void *arg)
             } else if (c == 'o') {
                 video_set_menu_mode(!s_menu_active);
                 printf("[OSD] Menu %s via console\n", s_menu_active ? "OPENED" : "CLOSED");
+            } else if (c == 'v' || c == 'V') {
+                s_video_std = (s_video_std == VIDEO_STD_NTSC) ? VIDEO_STD_PAL : VIDEO_STD_NTSC;
+                osd_init_buffers();
+                if (s_menu_active) {
+                    uint32_t tot_lines = osd_get_total_lines();
+                    s_osd_dma_nodes[tot_lines - 1].next = &s_osd_dma_nodes[0];
+                    sync_dma_c2m(s_osd_dma_nodes, sizeof(dma_descriptor_t) * tot_lines);
+                    if (s_tx_dscr_count > 0 && s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr) {
+                        s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = &s_osd_dma_nodes[0];
+                        sync_dma_c2m(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t));
+                    }
+                }
+                printf("[VIDEO STD] -> %s\n", (s_video_std == VIDEO_STD_PAL) ? "PAL 288p (50Hz)" : "NTSC 240p (60Hz)");
             } else if (c == 'O') {
                 s_osd_boot_btn_enabled = !s_osd_boot_btn_enabled;
                 printf("[OSD] BOOT button menu trigger -> %s\n",
@@ -1368,6 +1451,9 @@ static void console_diag_task(void *arg)
                 printf(" RX Sample Edge:             %s (rx_clk_i_inv=%d)\n",
                        PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
                        (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
+                printf(" OSD Menu Standard:          %s (%s)\n",
+                       (s_video_std == VIDEO_STD_PAL) ? "PAL 288p" : "NTSC 240p",
+                       (s_video_std == VIDEO_STD_PAL) ? "50.08Hz, 1280 words/line" : "60.01Hz, 1272 words/line");
                 printf(" OSD Menu Status:            %s (BOOT button trigger: %s)\n",
                        s_menu_active ? "OPEN" : "CLOSED",
                        s_osd_boot_btn_enabled ? "ENABLED" : "DISABLED (Safe Flight Mode)");
@@ -1380,6 +1466,7 @@ static void console_diag_task(void *arg)
                 printf("  ',' / '.':   Fine-tune offset (-50 / +50 kHz)\n");
                 printf("  '0':         Reset offset to 0 kHz\n");
                 printf("  'e':         Toggle RX sample edge (POS/NEG)\n");
+                printf("  'v':         Toggle Video Standard (NTSC 240p / PAL 288p)\n");
                 printf("  'o':         Toggle OSD Menu via console\n");
                 printf("  'O':         Toggle BOOT button menu trigger (Safe Flight Mode)\n");
                 printf("  'd':         Print this diagnostic summary\n");
@@ -1396,10 +1483,20 @@ static void console_diag_task(void *arg)
 
 esp_err_t video_start(void)
 {
+    /* Configure unbuffered and non-blocking I/O on USB-Serial/JTAG console globally
+     * so printf/stdout never stalls FreeRTOS tasks when no host is actively reading */
+    setvbuf(stdin, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IONBF, 0);
+    int flags = fcntl(fileno(stdin), F_GETFL, 0);
+    fcntl(fileno(stdin), F_SETFL, flags | O_NONBLOCK);
+    flags = fcntl(fileno(stdout), F_GETFL, 0);
+    fcntl(fileno(stdout), F_SETFL, flags | O_NONBLOCK);
+    usb_serial_jtag_vfs_use_nonblocking();
+
     /* Initialize BOOT button on GPIO 28 */
     init_boot_button();
 
-    /* Initialize NTSC 240p OSD buffers and 262-node DMA descriptor chain */
+    /* Initialize dual-standard OSD buffers and circular DMA descriptor chain */
     osd_init_buffers();
 
     /* Zero the ring before starting. Flush to DMA-visible SRAM. */
