@@ -458,9 +458,9 @@ static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in k
  *    The BitScrambler demodulates these into textbook NTSC 240p composite video:
  *    - H-Sync tip:  Exact DAC code 0  (0.0V sync tip)
  *    - Blanking:    Exact DAC code 20 (0.3V pedestal)
- *    - White text:  Exact DAC code 63 (1.0V peak white)
- *    - 60.012 Hz field rate: 100% rock-solid lock in all FPV goggles and monitors.
- * 3. EXIT (Hold BOOT on SAVE & EXIT or 6s inactivity timeout):
+ *    - White text:  Exact DAC code 60 (stable high-luma level)
+ *    - 60.012 Hz field rate with phase-coherent scanline boundaries.
+ * 3. EXIT (Hold BOOT on SAVE & EXIT or 12s inactivity timeout):
  *    Instantly re-establishes 8192-byte RX/TX separation and restores live video.
  * ========================================================================= */
 
