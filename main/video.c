@@ -867,6 +867,16 @@ static void analog_agc_task(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(50)); /* 20 Hz evaluation (every 50 ms) */
 
+        /* Poll hardware sticky status registers for truthful PARLIO TX starvation detection */
+        if (PARL_IO.int_raw.tx_fifo_rempty_int_raw) {
+            s_hw_counters.parl_tx_rempty_count++;
+            PARL_IO.int_clr.tx_fifo_rempty_int_clr = 1;
+        }
+        if (PARL_IO.int_raw.rx_fifo_wovf_int_raw) {
+            s_hw_counters.parl_rx_wovf_count++;
+            PARL_IO.int_clr.rx_fifo_wovf_int_clr = 1;
+        }
+
         /* 1. BOOT Button Sampling & Debounce (GPIO 28, active LOW) */
         if (boot_grace_ticks > 0) {
             boot_grace_ticks--;
@@ -1021,26 +1031,25 @@ static void analog_agc_task(void *arg)
 
         case AGC_STATE_LEARN:
             /* Signal too hot or clipping: step gain down */
-            if (p_median > 30 || n_clip >= 3) {
-                int drop = (n_clip >= 8) ? 4 : 2;
+            if (p_median > 34 || n_clip >= 6) {
+                int drop = (n_clip >= 12) ? 6 : 4;
                 target_gain = (target_gain > drop + 2) ? (target_gain - drop) : 2;
-                settle_ticks = 1;
+                settle_ticks = 6; /* 300 ms settle between adjustments */
             }
             /* Signal weak or picture degrading: actively step gain UP towards 62 */
-            else if ((p_median < 20 || q_phase < 70) && target_gain < 62u && n_clip <= 2) {
-                int step = (q_phase < 45 || p_median < 14) ? 4 : 2;
+            else if ((p_median < 16 || q_phase < 55) && target_gain < 62u && n_clip <= 2) {
+                int step = (q_phase < 40 || p_median < 12) ? 4 : 2;
                 if ((int)target_gain + step <= 62) {
                     target_gain += step;
                 } else {
                     target_gain = 62u;
                 }
-                settle_ticks = 1;
+                settle_ticks = 6; /* 300 ms settle between adjustments */
             }
             /* Optimal target zone converged */
             else {
-                /* TRACK requires an actually coherent FM carrier. Reaching the
-                 * gain ceiling alone is never evidence of lock. */
-                if (n_clip <= 2 && q_phase >= 65) {
+                /* TRACK requires an actually coherent FM carrier */
+                if (n_clip <= 3 && q_phase >= 55) {
                     s_agc_state = AGC_STATE_TRACK;
                     drift_counter = 0;
                     lost_counter = 0;
@@ -1050,7 +1059,7 @@ static void analog_agc_task(void *arg)
 
         case AGC_STATE_TRACK:
             /* Check for total carrier loss: 500 ms persistent loss */
-            if (q_phase < 28 && p_median < 14) {
+            if (q_phase < 25 && p_median < 12) {
                 lost_counter++;
                 if (lost_counter >= 10) { /* ~500 ms persistent loss */
                     s_agc_state = AGC_STATE_SEARCH;
@@ -1061,22 +1070,22 @@ static void analog_agc_task(void *arg)
                 lost_counter = 0;
             }
 
-            /* Check for signal quality degradation or overload:
-             * 1. Needs boost: picture is getting noisy (Q_phase < 68% or P_median < 18)
-             *    while not at maximum gain and not clipping.
-             * 2. Needs cut: signal too hot (P_median > 30 or clipping). */
-            bool needs_gain_boost = (q_phase < 68 || p_median < 18) && (target_gain < 62u) && (n_clip <= 2);
-            bool needs_gain_cut   = (p_median > 30) || (n_clip >= 3);
+            /* Rock-solid hysteresis deadband:
+             * 1. Needs boost: signal has genuinely degraded persistently
+             *    (Q_phase < 45% or P_median < 14) while not at maximum gain.
+             * 2. Needs cut: signal is hard clipping (P_median > 36 or n_clip >= 8). */
+            bool needs_gain_boost = (q_phase < 45 || p_median < 14) && (target_gain < 62u) && (n_clip <= 2);
+            bool needs_gain_cut   = (p_median > 36) || (n_clip >= 8);
 
             if (needs_gain_boost || needs_gain_cut) {
                 drift_counter++;
-                if (drift_counter >= 3) { /* Persistent for 150 ms */
+                if (drift_counter >= 15) { /* Must persist for 750 ms continuously! */
                     s_agc_state = AGC_STATE_LEARN;
                     drift_counter = 0;
                 }
             } else {
                 drift_counter = 0;
-                /* Inside deadband: 100% frozen, ZERO register writes */
+                /* Inside wide deadband: 100% frozen, ZERO register writes */
             }
             break;
         }
@@ -1088,6 +1097,7 @@ apply_target:
                 uint8_t old_g = s_current_gain;
                 s_current_gain = target_gain;
                 rf_set_rx_gain(true, s_current_gain);
+                settle_ticks = 10; /* 500 ms settle delay after RF gain write to prevent rapid staircasing */
                 printf("[AGC:GAIN] %u -> %u (P_med=%d, Q_phase=%d%%, Clip=%d, State=%s)\n",
                        old_g, s_current_gain, p_median, q_phase, n_clip,
                        (s_agc_state == AGC_STATE_TRACK) ? "TRACK" :
