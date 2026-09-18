@@ -463,6 +463,45 @@ static uint8_t s_current_channel_idx = 0; /* 0..7 (Default A1: 5865 MHz) */
 static uint16_t s_current_freq_mhz = 5865u;
 static int s_current_offset_khz = 0;
 
+#define C5_WIFI5_MIN_MHZ 5180u
+#define C5_WIFI5_MAX_MHZ 5885u
+
+typedef struct {
+    uint8_t channel;
+    uint16_t mhz;
+} wifi5_center_t;
+
+/* Public ESP-IDF 5 GHz centers used as the supported RF bootstrap.
+ * Non-exact FPV centers are experimental and are retuned only after first
+ * placing the closed PHY on the nearest known-good public center. */
+static const wifi5_center_t s_wifi5_centers[] = {
+    {132, 5660}, {136, 5680}, {140, 5700}, {144, 5720},
+    {149, 5745}, {153, 5765}, {157, 5785}, {161, 5805},
+    {165, 5825}, {169, 5845}, {173, 5865}, {177, 5885},
+};
+
+static bool plan_wifi5_center(uint16_t freq_mhz, uint8_t *channel, uint16_t *center_mhz)
+{
+    if (freq_mhz < C5_WIFI5_MIN_MHZ || freq_mhz > C5_WIFI5_MAX_MHZ) {
+        return false;
+    }
+
+    unsigned best = 0;
+    int best_delta = 0x7fffffff;
+    for (unsigned i = 0; i < sizeof(s_wifi5_centers) / sizeof(s_wifi5_centers[0]); ++i) {
+        int d = (int)freq_mhz - (int)s_wifi5_centers[i].mhz;
+        if (d < 0) d = -d;
+        if (d < best_delta) {
+            best_delta = d;
+            best = i;
+        }
+    }
+
+    if (channel) *channel = s_wifi5_centers[best].channel;
+    if (center_mhz) *center_mhz = s_wifi5_centers[best].mhz;
+    return true;
+}
+
 void rf_set_analog_bandwidth(bool bw40)
 {
     s_analog_bw40 = bw40;
@@ -552,38 +591,90 @@ esp_err_t rf_set_channel(size_t index)
     if (index >= FPV_BAND_COUNT * 8u) {
         return ESP_ERR_INVALID_ARG;
     }
-    s_current_band = (fpv_band_t)(index / 8u);
-    s_current_channel_idx = (uint8_t)(index % 8u);
-    s_current_freq_mhz = s_fpv_channels[s_current_band][s_current_channel_idx].freq_mhz;
-    s_current_offset_khz = 0;
 
-    phy_set_freq(s_current_freq_mhz, 0);
+    fpv_band_t new_band = (fpv_band_t)(index / 8u);
+    uint8_t new_idx = (uint8_t)(index % 8u);
+    uint16_t requested_mhz = s_fpv_channels[new_band][new_idx].freq_mhz;
+
+    uint8_t wifi_channel = 0;
+    uint16_t wifi_center_mhz = 0;
+    if (!plan_wifi5_center(requested_mhz, &wifi_channel, &wifi_center_mhz)) {
+        printf("[RF:TUNE] Refusing %u MHz: outside ESP32-C5 5 GHz operating window %u-%u MHz\n",
+               requested_mhz, C5_WIFI5_MIN_MHZ, C5_WIFI5_MAX_MHZ);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    /* Always establish a supported/public RF center first. Exact-overlap FPV
+     * channels (e.g. A1/A2/...) need no undocumented frequency call at all. */
+    esp_err_t err = esp_wifi_set_channel(wifi_channel, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint8_t verify_primary = 0;
+    wifi_second_chan_t verify_secondary = WIFI_SECOND_CHAN_NONE;
+    err = esp_wifi_get_channel(&verify_primary, &verify_secondary);
+    if (err != ESP_OK || verify_primary != wifi_channel) {
+        return (err != ESP_OK) ? err : ESP_ERR_INVALID_STATE;
+    }
+
+    if (requested_mhz != wifi_center_mhz) {
+        /* EXPERIMENTAL: two-argument ABI is known, but arbitrary-frequency
+         * semantics still require RF hardware validation. Starting from the
+         * nearest public center minimizes the size of this undocumented step. */
+        phy_set_freq(requested_mhz, 0);
+    }
+
     rf_enable_continuous_modem();
 
-    /* phy_set_freq() walks the vendor channel-retune path and may touch AGC
-     * state. Re-assert the production analog-FM contract after every retune. */
+    /* Public/undocumented retune paths can touch PHY receive state. Re-assert
+     * the analog-FM contract after every channel change. */
     phy_disable_agc();
     phy_rfagc_disable();
     phy_wifi_fbw_sel(s_analog_bw40 ? 1u : 0u);
     phy_force_rx_gain(true, s_current_gain_val);
+
+    /* Commit logical state only after the supported bootstrap succeeded. */
+    s_current_band = new_band;
+    s_current_channel_idx = new_idx;
+    s_current_freq_mhz = requested_mhz;
+    s_current_offset_khz = 0;
 
     return ESP_OK;
 }
 
 esp_err_t rf_cycle_channel(void)
 {
-    size_t next = (rf_get_channel_index() + 1u) % (FPV_BAND_COUNT * 8u);
-    return rf_set_channel(next);
+    size_t start = rf_get_channel_index();
+    for (size_t step = 1; step <= FPV_BAND_COUNT * 8u; ++step) {
+        size_t next = (start + step) % (FPV_BAND_COUNT * 8u);
+        esp_err_t err = rf_set_channel(next);
+        if (err == ESP_OK) return ESP_OK;
+        if (err != ESP_ERR_NOT_SUPPORTED) return err;
+    }
+    return ESP_ERR_NOT_FOUND;
 }
 
 void rf_cycle_band(void)
 {
-    s_current_band = (fpv_band_t)((s_current_band + 1u) % FPV_BAND_COUNT);
-    (void)rf_set_channel((size_t)s_current_band * 8u + s_current_channel_idx);
+    fpv_band_t start_band = s_current_band;
+    uint8_t channel_idx = s_current_channel_idx;
+    for (unsigned step = 1; step <= FPV_BAND_COUNT; ++step) {
+        fpv_band_t band = (fpv_band_t)((start_band + step) % FPV_BAND_COUNT);
+        esp_err_t err = rf_set_channel((size_t)band * 8u + channel_idx);
+        if (err == ESP_OK) return;
+        if (err != ESP_ERR_NOT_SUPPORTED) return;
+    }
 }
 
 void rf_cycle_channel_in_band(void)
 {
-    s_current_channel_idx = (s_current_channel_idx + 1u) % 8u;
-    (void)rf_set_channel((size_t)s_current_band * 8u + s_current_channel_idx);
+    fpv_band_t band = s_current_band;
+    uint8_t start_idx = s_current_channel_idx;
+    for (unsigned step = 1; step <= 8u; ++step) {
+        uint8_t idx = (uint8_t)((start_idx + step) % 8u);
+        esp_err_t err = rf_set_channel((size_t)band * 8u + idx);
+        if (err == ESP_OK) return;
+        if (err != ESP_ERR_NOT_SUPPORTED) return;
+    }
 }
