@@ -75,6 +75,7 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 #define RAW_RING_BYTES   16384u      /* 16384 byte cyclic ring (16 KiB Seamless Golden) */
 #define DAC_IDLE_CODE    20u         /* Pedestal 20 (sync tip level) */
 #define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
+#define OSD_BOOT_BTN_ENABLE_DEFAULT  0 /* 0 = Disabled by default (Safe Flight Mode) */
 
 /* NTSC 240p Composite Video Synthesized OSD Engine (60.012 Hz, 1272 words/line) */
 #define NTSC_LINE_WORDS   1272u
@@ -154,6 +155,7 @@ static DMA_ATTR __attribute__((aligned(64))) dma_descriptor_t s_osd_dma_nodes[NT
 
 /* OSD State */
 static volatile bool s_menu_active = false;
+static volatile bool s_osd_boot_btn_enabled = (OSD_BOOT_BTN_ENABLE_DEFAULT != 0);
 static volatile int s_menu_cursor = 0;
 static int s_menu_timeout_ticks = 0;
 
@@ -764,6 +766,10 @@ static void handle_button_short_click(void)
 static void handle_button_long_click(void)
 {
     if (!s_menu_active) {
+        if (!s_osd_boot_btn_enabled) {
+            printf("[BTN: LONG] OSD menu via BOOT button is DISABLED (Safe Flight Mode)\n");
+            return;
+        }
         s_menu_cursor = 0;
         s_menu_timeout_ticks = 0;
         video_set_menu_mode(true);
@@ -1257,9 +1263,13 @@ static void console_diag_task(void *arg)
                 printf("[EDGE] RX SAMPLE EDGE TOGGLED -> %s (rx_clk_i_inv=%d)\n",
                        PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
                        (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
-            } else if (c == 'o' || c == 'O') {
+            } else if (c == 'o') {
                 video_set_menu_mode(!s_menu_active);
                 printf("[OSD] Menu %s via console\n", s_menu_active ? "OPENED" : "CLOSED");
+            } else if (c == 'O') {
+                s_osd_boot_btn_enabled = !s_osd_boot_btn_enabled;
+                printf("[OSD] BOOT button menu trigger -> %s\n",
+                       s_osd_boot_btn_enabled ? "ENABLED (Long-press BOOT enters menu)" : "DISABLED (Safe Flight Mode)");
             } else if (s_menu_active && (c == ' ' || c == 'n')) {
                 s_menu_cursor = (s_menu_cursor + 1) % 6;
                 osd_render_menu();
@@ -1310,6 +1320,9 @@ static void console_diag_task(void *arg)
                 printf(" RX Sample Edge:             %s (rx_clk_i_inv=%d)\n",
                        PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
                        (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
+                printf(" OSD Menu Status:            %s (BOOT button trigger: %s)\n",
+                       s_menu_active ? "OPEN" : "CLOSED",
+                       s_osd_boot_btn_enabled ? "ENABLED" : "DISABLED (Safe Flight Mode)");
                 printf(" Keys:\n");
                 printf("  'a'/'s'/'m': AGC mode (active / shadow / manual)\n");
                 printf("  '+' / '-':   Manual gain step (+/-2)\n");
@@ -1319,6 +1332,8 @@ static void console_diag_task(void *arg)
                 printf("  ',' / '.':   Fine-tune offset (-50 / +50 kHz)\n");
                 printf("  '0':         Reset offset to 0 kHz\n");
                 printf("  'e':         Toggle RX sample edge (POS/NEG)\n");
+                printf("  'o':         Toggle OSD Menu via console\n");
+                printf("  'O':         Toggle BOOT button menu trigger (Safe Flight Mode)\n");
                 printf("  'd':         Print this diagnostic summary\n");
                 printf("=======================================================\n\n");
             }
