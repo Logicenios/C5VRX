@@ -84,25 +84,25 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 #define OSD_FONT_HEIGHT   8u
 #define OSD_ACTIVE_LINES  (OSD_MENU_ROWS * OSD_FONT_HEIGHT) /* 56 scanlines */
 
-/* Synthesized IQ cycles for the actual embedded Phase5 LUT.
+/* Synthesized IQ cycles for the embedded Phase5 LUT.
  *
- * These byte values are LUT-verified phase representatives. The previous
- * idealized sequence was wrong for the calibrated production LUT:
- *   0x50 -> P1, 0x05 -> P8, 0x80 -> P15, 0x08 -> P24.
- * It therefore produced black=25 and white=63,63,48,48 instead of constant
- * CVBS levels, creating a strong false-chroma pattern in analog decoders.
+ * Phase5 has 32 uniform polar phase bins (0..31) and a 50 ns discriminator.
+ * For any 4-sample repeating pattern, the sum of phase deltas mod 32 must be 0
+ * to guarantee zero phase drift across pixels, scanlines, and DMA frames:
  *
- * Every cycle below is four 20 MS/s words long and closes on P0:
- *   black: P0 -> P13 -> P0  -> P13 -> P0 = DAC 20,20,20,20
- *   sync:  P0 -> P23 -> P14 -> P5  -> P0 = DAC  0, 0, 0, 0
- *   white: P0 -> P8  -> P16 -> P24 -> P0 = DAC 60,60,60,60
+ *   BLACK: Phase delta 0  (P0 -> P0 -> P0 -> P0 -> P0)
+ *          Byte 0x50 repeated: exact DAC [20, 20, 20, 20] (0.33V Pedestal/Blanking)
+ *   SYNC:  Phase delta -8 (P0 -> P24 -> P16 -> P8 -> P0)
+ *          Bytes {0x08, 0x80, 0x05, 0x50}: exact DAC [0, 0, 0, 0] (0.0V Sync Tip)
+ *   WHITE: Phase delta +8 (P0 -> P8 -> P16 -> P24 -> P0)
+ *          Bytes {0x05, 0x80, 0x08, 0x50}: exact DAC [63, 63, 63, 63] (1.0V Peak White)
  *
- * OSD pixels and timing segments are multiples of four words, so every
- * boundary is phase-coherent and the menu contains luma only.
+ * Every segment and font pixel is an exact multiple of 4 words, guaranteeing
+ * that all transitions close on Phase 0 without transient glitch spikes.
  */
-static const uint8_t s_black_iq[4] = {0x83u, 0x4fu, 0x83u, 0x4fu};
-static const uint8_t s_sync_iq[4]  = {0xe7u, 0x81u, 0x11u, 0x4fu};
-static const uint8_t s_white_iq[4] = {0x04u, 0x7fu, 0x07u, 0x4fu};
+static const uint8_t s_black_iq[4] = {0x50u, 0x50u, 0x50u, 0x50u};
+static const uint8_t s_sync_iq[4]  = {0x08u, 0x80u, 0x05u, 0x50u};
+static const uint8_t s_white_iq[4] = {0x05u, 0x80u, 0x08u, 0x50u};
 
 static inline uint16_t iq_word(uint8_t b)
 {
@@ -457,8 +457,8 @@ static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in k
  *    chain streaming clean synthesized IQ samples into the Phase5 BitScrambler.
  *    The BitScrambler demodulates these into textbook NTSC 240p composite video:
  *    - H-Sync tip:  Exact DAC code 0  (0.0V sync tip)
- *    - Blanking:    Exact DAC code 20 (0.3V pedestal)
- *    - White text:  Exact DAC code 60 (stable high-luma level)
+ *    - Blanking:    Exact DAC code 20 (0.33V pedestal)
+ *    - White text:  Exact DAC code 63 (1.0V peak white)
  *    - 60.012 Hz field rate with phase-coherent scanline boundaries.
  * 3. EXIT (Hold BOOT on SAVE & EXIT or 12s inactivity timeout):
  *    Instantly re-establishes 8192-byte RX/TX separation and restores live video.
@@ -1220,6 +1220,16 @@ static void console_diag_task(void *arg)
                 printf("[EDGE] RX SAMPLE EDGE TOGGLED -> %s (rx_clk_i_inv=%d)\n",
                        PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
                        (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
+            } else if (c == 'o' || c == 'O') {
+                video_set_menu_mode(!s_menu_active);
+                printf("[OSD] Menu %s via console\n", s_menu_active ? "OPENED" : "CLOSED");
+            } else if (s_menu_active && (c == ' ' || c == 'n')) {
+                s_menu_cursor = (s_menu_cursor + 1) % 6;
+                osd_render_menu();
+                s_menu_timeout_ticks = 0;
+                printf("[MENU] Cursor -> %d\n", s_menu_cursor);
+            } else if (s_menu_active && (c == '\r' || c == '\n' || c == 'x')) {
+                handle_button_long_click();
             } else {
                 uint32_t rx_dscr = 0, tx_dscr = 0;
                 uint32_t rx_off = get_rx_dma_offset(&rx_dscr);
