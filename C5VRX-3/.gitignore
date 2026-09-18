@@ -1,5 +1,0 @@
-build/
-sdkconfig
-sdkconfig.old
-*.log
-build_log.txt
