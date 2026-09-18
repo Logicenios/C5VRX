@@ -33,7 +33,10 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
+#include "driver/usb_serial_jtag_vfs.h"
 #include "driver/bitscrambler.h"
 #include "driver/gpio.h"
 #include "driver/parlio_bitscrambler.h"
@@ -500,10 +503,10 @@ static void osd_draw_string(int row_idx, int col_words, const char *str)
 {
     if (row_idx < 0 || row_idx >= (int)OSD_MENU_ROWS) return;
     int base_line = row_idx * (int)OSD_FONT_HEIGHT;
-    int start_col = 192 + col_words;
+    int start_col = 224 + col_words;
 
     int char_idx = 0;
-    while (*str && (start_col + char_idx * 32 + 32) < 1240) {
+    while (*str && (start_col + char_idx * 32 + 32) <= 1260) {
         char ch = *str++;
         int font_idx = (ch >= 32 && ch <= 126) ? (ch - 32) : 0;
 
@@ -532,8 +535,8 @@ static void osd_draw_string(int row_idx, int col_words, const char *str)
         char_idx++;
     }
 
-    /* Pad remaining columns in this row up to 34 chars with black pixels */
-    while (char_idx < 34 && (start_col + char_idx * 32 + 32) < 1240) {
+    /* Pad remaining columns in this row up to 32 chars with black pixels */
+    while (char_idx < 32 && (start_col + char_idx * 32 + 32) <= 1260) {
         for (int r = 0; r < 8; r++) {
             uint16_t *line_ptr = (uint16_t *)s_osd_lines[base_line + r];
             int p = start_col + char_idx * 32;
@@ -552,41 +555,61 @@ static void osd_init_buffers(void)
     /* Pre- and post-equalizing pulse line:
      * EIA RS-170 standard: 2 half-line equalizing pulses per line.
      * Each half-line (636 words = 31.8 µs):
+     * - 16 words (0.8 µs) of front porch / blanking pedestal (DAC code 20)
      * - 48 words (2.4 µs) of sync tip (DAC code 0)
-     * - 588 words (29.4 µs) of pedestal / blanking (DAC code 20)
-     * 48 + 588 + 48 + 588 = 1272 words (63.6 µs = 2544 bytes).
+     * - 572 words (28.6 µs) of pedestal / blanking (DAC code 20)
+     * (16 + 48 + 572) * 2 = 1272 words (63.6 µs = 2544 bytes).
      * All segments are multiples of 4 -> exact Phase 0 closure! */
     uint16_t *eq_words = (uint16_t *)s_eq_line;
     int eq_pos = 0;
+    for (int i = 0; i < 16; i++)  eq_words[eq_pos++] = get_black_word(i);
     for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
-    for (int i = 0; i < 588; i++) eq_words[eq_pos++] = get_black_word(i);
+    for (int i = 0; i < 572; i++) eq_words[eq_pos++] = get_black_word(i);
+    for (int i = 0; i < 16; i++)  eq_words[eq_pos++] = get_black_word(i);
     for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
-    for (int i = 0; i < 588; i++) eq_words[eq_pos++] = get_black_word(i);
+    for (int i = 0; i < 572; i++) eq_words[eq_pos++] = get_black_word(i);
 
     /* V-Sync broad pulse serration line:
      * EIA RS-170 standard: 2 half-line broad pulses per line.
      * Each half-line (636 words = 31.8 µs):
-     * - 540 words (27.0 µs) of sync tip (DAC code 0)
+     * - 16 words (0.8 µs) of front porch / blanking pedestal (DAC code 20)
+     * - 524 words (26.2 µs) of sync tip (DAC code 0)
      * - 96 words (4.8 µs) of serration / blanking (DAC code 20)
-     * 540 + 96 + 540 + 96 = 1272 words (63.6 µs = 2544 bytes).
+     * (16 + 524 + 96) * 2 = 1272 words (63.6 µs = 2544 bytes).
      * All segments are multiples of 4 -> exact Phase 0 closure! */
     uint16_t *vsync_words = (uint16_t *)s_vsync_line;
     int vsync_pos = 0;
-    for (int i = 0; i < 540; i++) vsync_words[vsync_pos++] = get_sync_word(i);
+    for (int i = 0; i < 16; i++)  vsync_words[vsync_pos++] = get_black_word(i);
+    for (int i = 0; i < 524; i++) vsync_words[vsync_pos++] = get_sync_word(i);
     for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
-    for (int i = 0; i < 540; i++) vsync_words[vsync_pos++] = get_sync_word(i);
+    for (int i = 0; i < 16; i++)  vsync_words[vsync_pos++] = get_black_word(i);
+    for (int i = 0; i < 524; i++) vsync_words[vsync_pos++] = get_sync_word(i);
     for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
 
-    /* Standard horizontal blank line:
-     * Words 0..95 (96 words = 4.8 µs): H-Sync tip (DAC code 0)
-     * Words 96..1271 (1176 words = 58.8 µs): Blanking / black pedestal (DAC code 20)
-     * 96 + 1176 = 1272 words (63.6 µs = 2544 bytes). */
+    /* Standard EIA RS-170 horizontal blank line:
+     * - Words 0..31   (32 words = 1.6 µs): Front Porch (DAC code 20 / 0.33V blanking pedestal)
+     * - Words 32..127  (96 words = 4.8 µs): H-Sync Tip (DAC code 0 / 0.0V sync tip)
+     * - Words 128..223 (96 words = 4.8 µs): Back Porch (DAC code 20 / 0.33V blanking pedestal)
+     * - Words 224..1271 (1048 words = 52.4 µs): Blanking / black pedestal (DAC code 20)
+     * 32 + 96 + 96 + 1048 = 1272 words (63.6 µs = 2544 bytes).
+     *
+     * Every segment is an exact multiple of 4 words -> Phase 0 closure across all boundaries!
+     * Front porch placed at the descriptor head (Words 0..31) absorbs GDMA next-descriptor
+     * fetch latency and boundary jitter safely inside the 0.33V blanking pedestal, ensuring
+     * an ultra-clean H-sync falling edge at Word 32 that analog video decoder PLLs and
+     * back-porch DC restorers lock onto with rock-solid stability! */
     uint16_t *blank_words = (uint16_t *)s_blank_line;
-    for (int i = 0; i < 96; i++) {
-        blank_words[i] = get_sync_word(i);
+    for (int i = 0; i < 32; i++) {
+        blank_words[i] = get_black_word(i);
     }
-    for (int i = 96; i < (int)NTSC_LINE_WORDS; i++) {
-        blank_words[i] = get_black_word(i - 96);
+    for (int i = 32; i < 128; i++) {
+        blank_words[i] = get_sync_word(i - 32);
+    }
+    for (int i = 128; i < 224; i++) {
+        blank_words[i] = get_black_word(i - 128);
+    }
+    for (int i = 224; i < (int)NTSC_LINE_WORDS; i++) {
+        blank_words[i] = get_black_word(i - 224);
     }
 
     /* Initialize all 56 active text scanlines to blank line */
@@ -649,15 +672,15 @@ static void osd_render_menu(void)
     const fpv_channel_t *ch = rf_get_current_channel();
     char buf[40];
 
-    osd_draw_string(0, 32, "=== C5VRX-3 RECEIVER MENU ===");
+    osd_draw_string(0, 16, "=== C5VRX-3 RECEIVER MENU ===");
 
     snprintf(buf, sizeof(buf), "%c [1] BAND:   %s",
              (s_menu_cursor == 0) ? '>' : ' ', rf_get_band_name(rf_get_current_band()));
-    osd_draw_string(1, 32, buf);
+    osd_draw_string(1, 16, buf);
 
     snprintf(buf, sizeof(buf), "%c [2] CH:     %s (%u MHz)",
              (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz);
-    osd_draw_string(2, 32, buf);
+    osd_draw_string(2, 16, buf);
 
     if (s_last_q_phase >= 40) {
         snprintf(buf, sizeof(buf), "%c [3] VTX CFO: %+4d kHz [LCK %d%%]",
@@ -666,21 +689,21 @@ static void osd_render_menu(void)
         snprintf(buf, sizeof(buf), "%c [3] VTX CFO: NO SIGNAL",
                  (s_menu_cursor == 2) ? '>' : ' ');
     }
-    osd_draw_string(3, 32, buf);
+    osd_draw_string(3, 16, buf);
 
     snprintf(buf, sizeof(buf), "%c [4] GEAR:   %s",
              (s_menu_cursor == 3) ? '>' : ' ', s_current_bw40 ? "BW40 (COLOR)" : "BW20 (+3dB)");
-    osd_draw_string(4, 32, buf);
+    osd_draw_string(4, 16, buf);
 
     snprintf(buf, sizeof(buf), "%c [5] AFC:    %s",
              (s_menu_cursor == 4) ? '>' : ' ',
              (s_afc_mode == AFC_MODE_AUTO) ? "AUTO EXP (+/-1.5M)" :
              (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
-    osd_draw_string(5, 32, buf);
+    osd_draw_string(5, 16, buf);
 
     snprintf(buf, sizeof(buf), "%c [6] SAVE & EXIT",
              (s_menu_cursor == 5) ? '>' : ' ');
-    osd_draw_string(6, 32, buf);
+    osd_draw_string(6, 16, buf);
 
     sync_dma_c2m(s_osd_lines, sizeof(s_osd_lines));
 }
@@ -871,6 +894,11 @@ static void analog_agc_task(void *arg)
         /* 2. OSD Inactivity Timeout (12.0s auto-exit) */
         if (s_menu_active) {
             s_menu_timeout_ticks++;
+            if ((s_menu_timeout_ticks % 20) == 0) { /* 1 Hz periodic console heartbeat while in menu */
+                printf("[MENU ACTIVE] Cursor=%d | Timeout=%ds/12s | Hotkeys: [Space]/[n]=Next, [x]/[Enter]=Select, [o]=Exit\n",
+                       s_menu_cursor, (240 - s_menu_timeout_ticks) / 20);
+                fflush(stdout);
+            }
             if (s_menu_timeout_ticks >= 240) { /* 12.0s inactivity auto-exit */
                 video_set_menu_mode(false);
                 printf("[MENU] Inactivity timeout (12s) -> Live Video\n");
@@ -1180,6 +1208,13 @@ update_telemetry:
 static void console_diag_task(void *arg)
 {
     (void)arg;
+
+    /* Make stdin unbuffered and non-blocking for instantaneous single-key response */
+    setvbuf(stdin, NULL, _IONBF, 0);
+    int flags = fcntl(fileno(stdin), F_GETFL, 0);
+    fcntl(fileno(stdin), F_SETFL, flags | O_NONBLOCK);
+    usb_serial_jtag_vfs_use_nonblocking();
+
     for (;;) {
         int c = getchar();
         if (c != EOF && c > 0) {
@@ -1270,7 +1305,7 @@ static void console_diag_task(void *arg)
                 s_osd_boot_btn_enabled = !s_osd_boot_btn_enabled;
                 printf("[OSD] BOOT button menu trigger -> %s\n",
                        s_osd_boot_btn_enabled ? "ENABLED (Long-press BOOT enters menu)" : "DISABLED (Safe Flight Mode)");
-            } else if (s_menu_active && (c == ' ' || c == 'n')) {
+            } else if (s_menu_active && (c == ' ' || c == 'n' || c == '\t')) {
                 s_menu_cursor = (s_menu_cursor + 1) % 6;
                 osd_render_menu();
                 s_menu_timeout_ticks = 0;
@@ -1283,7 +1318,10 @@ static void console_diag_task(void *arg)
                 uint32_t tx_off = get_tx_dma_offset(&tx_dscr);
                 uint32_t dist = (rx_off >= tx_off) ? (rx_off - tx_off) : (sizeof(s_raw_ring) - tx_off + rx_off);
                 int rx_nodes = patch_descriptors_clear_eof(s_rx_dma_ch, true);
-                int tx_nodes = patch_descriptors_clear_eof(s_tx_dma_ch, false);
+                int tx_nodes = 0;
+                if (!s_menu_active) {
+                    tx_nodes = patch_descriptors_clear_eof(s_tx_dma_ch, false);
+                }
                 const fpv_channel_t *ch = rf_get_current_channel();
                 int off = rf_get_frequency_offset_khz();
                 int tot = (int)ch->freq_mhz * 1000 + off;
@@ -1396,6 +1434,14 @@ esp_err_t video_start(void)
             s_tx_dma_ch = i;
         }
     }
+
+    /* Put PARLIO TX into pure continuous hardware mode:
+     * Disable all GDMA TX channel interrupts and PARL_IO core interrupts.
+     * Prevents PARLIO_LL_EVENT_TX_FIFO_EMPTY and EOF interrupts from stealing CPU cycles! */
+    AHB_DMA.out_intr[0].ena.val = 0;
+    AHB_DMA.out_intr[1].ena.val = 0;
+    AHB_DMA.out_intr[2].ena.val = 0;
+    PARL_IO.int_ena.val = 0;
 
     /* Clear suc_eof on ALL GDMA descriptors for both RX and TX to eliminate
      * hardware wrap EOF bubbles completely! The buffer becomes a truly infinite ring. */
