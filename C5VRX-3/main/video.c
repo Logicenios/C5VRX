@@ -106,6 +106,27 @@ static inline uint16_t get_white_word(int idx) {
     return (uint16_t)((b << 8) | b);
 }
 
+/* Cache synchronization helpers for DMA buffers and descriptors on ESP32-C5.
+ * Aligns address down and size up to 64-byte cache line boundaries so esp_cache_msync
+ * never fails with ESP_ERR_INVALID_ARG on unaligned descriptors or buffers. */
+static inline void sync_dma_c2m(const void *addr, size_t size)
+{
+    if (!addr || size == 0) return;
+    uint32_t start = (uint32_t)addr & ~(64u - 1u);
+    uint32_t end = ((uint32_t)addr + size + 63u) & ~(64u - 1u);
+    (void)esp_cache_msync((void *)start, end - start,
+                          ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+}
+
+static inline void sync_dma_m2c(const void *addr, size_t size)
+{
+    if (!addr || size == 0) return;
+    uint32_t start = (uint32_t)addr & ~(64u - 1u);
+    uint32_t end = ((uint32_t)addr + size + 63u) & ~(64u - 1u);
+    (void)esp_cache_msync((void *)start, end - start,
+                          ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+}
+
 /* Static NTSC CVBS scanline buffers & 262-node DMA descriptor chain in HP SRAM */
 static DMA_ATTR __attribute__((aligned(64))) uint8_t s_blank_line[NTSC_LINE_BYTES];
 static DMA_ATTR __attribute__((aligned(64))) uint8_t s_vsync_line[NTSC_LINE_BYTES];
@@ -326,7 +347,7 @@ static int patch_descriptors_clear_eof(int dma_ch, bool is_rx)
 
     while (curr && count < MAX_RING_DESCRIPTORS) {
         curr->dw0.suc_eof = 0;
-        (void)esp_cache_msync(curr, sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        sync_dma_c2m(curr, sizeof(dma_descriptor_t));
 
         if (is_rx) {
             s_rx_dscr_nodes[count].dscr = curr;
@@ -564,6 +585,13 @@ static void osd_init_buffers(void)
 
     /* Pre-render initial menu text */
     osd_render_menu();
+
+    /* Flush all NTSC line buffers and entire 262-node DMA descriptor chain to physical SRAM */
+    sync_dma_c2m(s_eq_line, sizeof(s_eq_line));
+    sync_dma_c2m(s_vsync_line, sizeof(s_vsync_line));
+    sync_dma_c2m(s_blank_line, sizeof(s_blank_line));
+    sync_dma_c2m(s_osd_lines, sizeof(s_osd_lines));
+    sync_dma_c2m(s_osd_dma_nodes, sizeof(s_osd_dma_nodes));
 }
 
 static void osd_render_menu(void)
@@ -583,7 +611,7 @@ static void osd_render_menu(void)
 
     if (s_last_q_phase >= 40) {
         snprintf(buf, sizeof(buf), "%c [3] VTX CFO: %+4d kHz [LCK %d%%]",
-                 (s_menu_cursor == 2) ? '>' : ' ', s_cfo_khz, s_last_q_phase);
+             (s_menu_cursor == 2) ? '>' : ' ', s_cfo_khz, s_last_q_phase);
     } else {
         snprintf(buf, sizeof(buf), "%c [3] VTX CFO: NO SIGNAL",
                  (s_menu_cursor == 2) ? '>' : ' ');
@@ -604,7 +632,7 @@ static void osd_render_menu(void)
              (s_menu_cursor == 5) ? '>' : ' ');
     osd_draw_string(6, 32, buf);
 
-    (void)esp_cache_msync((void *)s_osd_lines, sizeof(s_osd_lines), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    sync_dma_c2m(s_osd_lines, sizeof(s_osd_lines));
 }
 
 static void video_set_menu_mode(bool active)
@@ -621,15 +649,16 @@ static void video_set_menu_mode(bool active)
         /* Pre-render fresh menu state */
         osd_render_menu();
 
+        /* Ensure all OSD descriptors are firmly synced to physical SRAM */
+        s_osd_dma_nodes[NTSC_TOTAL_LINES - 1].next = &s_osd_dma_nodes[0];
+        sync_dma_c2m(s_osd_dma_nodes, sizeof(s_osd_dma_nodes));
+
         /* Splice OSD menu into GDMA without stopping hardware!
          * Tail of raw ring -> Head of OSD menu chain.
          * Tail of OSD menu chain -> Head of OSD menu chain (circular).
          * GDMA naturally and seamlessly steps into the NTSC 240p menu at the next ring boundary! */
-        s_osd_dma_nodes[NTSC_TOTAL_LINES - 1].next = &s_osd_dma_nodes[0];
-        (void)esp_cache_msync(&s_osd_dma_nodes[NTSC_TOTAL_LINES - 1], sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-
         s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = &s_osd_dma_nodes[0];
-        (void)esp_cache_msync(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        sync_dma_c2m(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t));
         __asm__ __volatile__("fence rw, rw" ::: "memory");
 
         printf("[OSD] Spliced TX GDMA -> Local NTSC 240p Menu Chain (Seamless)\n");
@@ -645,10 +674,10 @@ static void video_set_menu_mode(bool active)
 
         /* Splice back to raw ring at the end of the current NTSC frame */
         s_osd_dma_nodes[NTSC_TOTAL_LINES - 1].next = s_tx_dscr_nodes[safe_tx_idx].dscr;
-        (void)esp_cache_msync(&s_osd_dma_nodes[NTSC_TOTAL_LINES - 1], sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        sync_dma_c2m(&s_osd_dma_nodes[NTSC_TOTAL_LINES - 1], sizeof(dma_descriptor_t));
 
         s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = s_tx_dscr_nodes[0].dscr;
-        (void)esp_cache_msync(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        sync_dma_c2m(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t));
         __asm__ __volatile__("fence rw, rw" ::: "memory");
 
         printf("[OSD] Spliced Menu -> Live Video Ring (Target TX node %d)\n", safe_tx_idx);
@@ -796,7 +825,7 @@ static void analog_agc_task(void *arg)
         }
 
         /* 1. Invalidate 256 bytes in CPU L1 cache so we read fresh GDMA samples from SRAM */
-        (void)esp_cache_msync((void *)s_raw_ring, 256, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+        sync_dma_m2c((void *)s_raw_ring, 256);
 
         static uint8_t sample_buf[256];
         for (int i = 0; i < 256; i++) {
@@ -881,8 +910,7 @@ static void analog_agc_task(void *arg)
         }
 
         /* 2. Fast Overload Safety Rem:
-         * Only triggers if BOTH clipping occurs AND median power is high!
-         * Prevents the "noise trap" where thermal noise peaks look like overload. */
+         * Triggers if clipping occurs (n_clip >= 4) AND median power is elevated. */
         if (n_clip >= 4 && p_median > 18) {
             int drop = (n_clip >= 16) ? 6 : 4;
             target_gain = (target_gain > drop + 2) ? (target_gain - drop) : 2;
@@ -896,7 +924,7 @@ static void analog_agc_task(void *arg)
         /* 3. State Machine */
         switch (s_agc_state) {
         case AGC_STATE_SEARCH:
-            /* Sensitive carrier detection threshold: coherent phase, power, or origin departure */
+            /* Sensitive carrier detection: coherent phase, power, or departure from origin */
             if (q_phase >= 25 || p_median >= 8 || n_origin < 180) {
                 s_agc_state = AGC_STATE_LEARN;
                 drift_counter = 0;
@@ -908,39 +936,35 @@ static void analog_agc_task(void *arg)
             break;
 
         case AGC_STATE_LEARN:
-            /* Center P_median into [20, 30] target zone */
-            if (p_median > 30) {
-                target_gain = (target_gain > 3) ? (target_gain - 2) : 2;
+            /* Signal too hot or clipping: step gain down */
+            if (p_median > 30 || n_clip >= 3) {
+                int drop = (n_clip >= 8) ? 4 : 2;
+                target_gain = (target_gain > drop + 2) ? (target_gain - drop) : 2;
                 settle_ticks = 1;
-            } else if (p_median < 20) {
-                /* Climb aggressively to target power up to maximum sensitivity 62 */
-                int max_gain = (q_phase >= 20) ? 62 : 54;
-                int step = (p_median < 14 || n_origin > 60) ? 4 : 2;
-                if ((int)target_gain + step <= max_gain) {
+            }
+            /* Signal weak or picture degrading: actively step gain UP towards 62 */
+            else if ((p_median < 20 || q_phase < 70) && target_gain < 62u && n_clip <= 2) {
+                int step = (q_phase < 45 || p_median < 14) ? 4 : 2;
+                if ((int)target_gain + step <= 62) {
                     target_gain += step;
                 } else {
-                    target_gain = (uint8_t)max_gain;
+                    target_gain = 62u;
                 }
                 settle_ticks = 1;
-            } else {
-                /* Converged into target zone with low clipping */
-                if (n_clip <= 2) {
+            }
+            /* Optimal target zone converged */
+            else {
+                if (n_clip <= 2 && (q_phase >= 65 || target_gain >= 62u)) {
                     s_agc_state = AGC_STATE_TRACK;
                     drift_counter = 0;
                     lost_counter = 0;
                 }
             }
-            /* Edge of range lock: if max gain reached with coherent carrier and low clip */
-            if (n_clip <= 2 && target_gain >= 60 && q_phase >= 25) {
-                s_agc_state = AGC_STATE_TRACK;
-                drift_counter = 0;
-                lost_counter = 0;
-            }
             break;
 
         case AGC_STATE_TRACK:
-            /* Check for carrier loss: 500 ms persistent loss below threshold */
-            if (q_phase < 20 && p_median < 8) {
+            /* Check for total carrier loss: 500 ms persistent loss */
+            if (q_phase < 28 && p_median < 14) {
                 lost_counter++;
                 if (lost_counter >= 10) { /* ~500 ms persistent loss */
                     s_agc_state = AGC_STATE_SEARCH;
@@ -951,11 +975,16 @@ static void analog_agc_task(void *arg)
                 lost_counter = 0;
             }
 
-            /* Check for drift outside deadband [18, 32].
-             * If at maximum gain (62), don't bounce out of track if p_median is low. */
-            if ((p_median < 18 && target_gain < 62) || p_median > 32) {
+            /* Check for signal quality degradation or overload:
+             * 1. Needs boost: picture is getting noisy (Q_phase < 68% or P_median < 18)
+             *    while not at maximum gain and not clipping.
+             * 2. Needs cut: signal too hot (P_median > 30 or clipping). */
+            bool needs_gain_boost = (q_phase < 68 || p_median < 18) && (target_gain < 62u) && (n_clip <= 2);
+            bool needs_gain_cut   = (p_median > 30) || (n_clip >= 3);
+
+            if (needs_gain_boost || needs_gain_cut) {
                 drift_counter++;
-                if (drift_counter >= 4) { /* Drift persisted for 200 ms */
+                if (drift_counter >= 3) { /* Persistent for 150 ms */
                     s_agc_state = AGC_STATE_LEARN;
                     drift_counter = 0;
                 }
@@ -970,8 +999,13 @@ apply_target:
         s_shadow_gain = target_gain;
         if (s_agc_mode == ANALOG_AGC_ACTIVE) {
             if (target_gain != s_current_gain) {
+                uint8_t old_g = s_current_gain;
                 s_current_gain = target_gain;
                 rf_set_rx_gain(true, s_current_gain);
+                printf("[AGC:GAIN] %u -> %u (P_med=%d, Q_phase=%d%%, Clip=%d, State=%s)\n",
+                       old_g, s_current_gain, p_median, q_phase, n_clip,
+                       (s_agc_state == AGC_STATE_TRACK) ? "TRACK" :
+                       (s_agc_state == AGC_STATE_LEARN) ? "LEARN" : "SRCH");
             }
         }
 
@@ -979,11 +1013,12 @@ apply_target:
         if (s_bw_gear_mode == BW_GEAR_AUTO) {
             if (s_current_bw40) {
                 /* In BW40: downshift to BW20 if entering deep fade / severe starvation */
-                if (s_current_gain >= 58u && (p_median < 12 || q_phase < 45)) {
+                if (s_current_gain >= 56u && (q_phase < 55 || p_median < 16)) {
                     deep_fade_ticks++;
                     if (deep_fade_ticks >= 4) { /* Persisted for 200 ms */
                         s_current_bw40 = false;
                         rf_set_analog_bandwidth(false); /* DOWNSHIFT to BW20 (+3 dB boost!) */
+                        printf("[GEARBOX] DOWNSHIFT -> BW20 (+3 dB SNR boost for deep fade)\n");
                         deep_fade_ticks = 0;
                         strong_signal_ticks = 0;
                         settle_ticks = 2;
@@ -993,11 +1028,12 @@ apply_target:
                 }
             } else {
                 /* In BW20: upshift to BW40 if signal strongly recovered */
-                if (p_median >= 22 && q_phase >= 80) {
+                if (p_median >= 22 && q_phase >= 75) {
                     strong_signal_ticks++;
                     if (strong_signal_ticks >= 20) { /* Persisted continuously for 1.0s */
                         s_current_bw40 = true;
                         rf_set_analog_bandwidth(true); /* UPSHIFT to BW40 (restore full color!) */
+                        printf("[GEARBOX] UPSHIFT -> BW40 (Signal recovered, full color restored)\n");
                         strong_signal_ticks = 0;
                         deep_fade_ticks = 0;
                         settle_ticks = 2;
@@ -1240,8 +1276,7 @@ esp_err_t video_start(void)
 
     /* Zero the ring before starting. Flush to DMA-visible SRAM. */
     memset(s_raw_ring, 0, sizeof(s_raw_ring));
-    (void)esp_cache_msync(s_raw_ring, sizeof(s_raw_ring),
-                          ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    sync_dma_c2m(s_raw_ring, sizeof(s_raw_ring));
 
     esp_err_t err;
 
