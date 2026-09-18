@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 import serial.tools.list_ports
 
-ROOT = Path("C:/Users/leonb/Twotoz/C5VRX-issue11-output/C5VRX-3")
+ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 
 bootloader = BUILD / "bootloader" / "bootloader.bin"
