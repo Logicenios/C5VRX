@@ -377,8 +377,17 @@ esp_err_t rf_start(void)
     /* Un-gate modem ADC clock and force continuous sampling. */
     rf_enable_continuous_modem();
 
-    /* Select full BW40 analog filter bandwidth (val=1) to prevent phase distortion
-     * and roll-off of 3.58 MHz NTSC chroma sidebands and color burst. */
+    /* Keep the vendor Wi-Fi packet AGC out of the analog-FM receive path.
+     * C5VRX has its own slow analog-video gain controller below; leaving the
+     * packet AGC enabled lets the closed PHY hunt/recalibrate independently,
+     * which invalidates our gain model and can desensitize weak-signal receive. */
+    extern void phy_disable_agc(void);
+    extern void phy_rfagc_disable(void);
+    phy_disable_agc();
+    phy_rfagc_disable();
+
+    /* Start wide for full colour/detail. The software gearbox will switch the
+     * analog front-end to BW20 during weak-signal acquisition/deep fades. */
     extern void phy_wifi_fbw_sel(uint32_t val);
     phy_wifi_fbw_sel(1);
 
@@ -403,6 +412,8 @@ esp_err_t rf_start(void)
 
 extern void phy_wifi_fbw_sel(uint32_t val);
 extern void phy_force_rx_gain(bool enable, uint8_t gain_idx);
+extern void phy_disable_agc(void);
+extern void phy_rfagc_disable(void);
 extern void phy_set_freq(uint16_t freq_mhz, int offset);
 extern void phy_chip_set_chan_offset(int offset_khz);
 
@@ -548,6 +559,11 @@ esp_err_t rf_set_channel(size_t index)
 
     phy_set_freq(s_current_freq_mhz, 0);
     rf_enable_continuous_modem();
+
+    /* phy_set_freq() walks the vendor channel-retune path and may touch AGC
+     * state. Re-assert the production analog-FM contract after every retune. */
+    phy_disable_agc();
+    phy_rfagc_disable();
     phy_wifi_fbw_sel(s_analog_bw40 ? 1u : 0u);
     phy_force_rx_gain(true, s_current_gain_val);
 
