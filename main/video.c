@@ -78,7 +78,7 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 #define RAW_RING_BYTES   16384u      /* 16384 byte cyclic ring (16 KiB Seamless Golden) */
 #define DAC_IDLE_CODE    20u         /* Pedestal 20 (sync tip level) */
 #define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
-#define OSD_BOOT_BTN_ENABLE_DEFAULT  0 /* 0 = Disabled by default (Safe Flight Mode) */
+#define OSD_BOOT_BTN_ENABLE_DEFAULT  1 /* 1 = Enabled by default (Long-press BOOT enters menu) */
 
 /* NTSC 240p Composite Video Synthesized OSD Engine (60.012 Hz, 1272 words/line) */
 #define NTSC_LINE_WORDS   1272u
