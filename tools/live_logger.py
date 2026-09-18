@@ -34,7 +34,7 @@ time.sleep(0.2)
 start_time = time.time()
 print(f"--- Live Telemetry Started at {time.strftime('%H:%M:%S')} ---")
 
-log_path = "C5VRX-3/live_walkaround_log.txt"
+log_path = "live_walkaround_log.txt"
 with open(log_path, "w", encoding="utf-8") as f_log:
     while time.time() - start_time < DURATION:
         line = ser.readline().decode("utf-8", errors="replace").strip()
