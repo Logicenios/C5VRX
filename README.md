@@ -1,172 +1,169 @@
-# C5VRX-3: Standalone Zero-EOF Production FPV Receiver
+<div align="center">
+  <img src="assets/c5vrx-logo.jpg" alt="C5VRX logo" width="760" />
 
-C5VRX-3 is an ultra-minimal, high-performance standalone 5.8 GHz analog video (FPV) receiver running on the **Seeed Studio XIAO ESP32-C5** (ESP32-C5 RISC-V SoC).
+  <p><strong>ESP32-C5 Analog 5.8 GHz FPV Receiver</strong></p>
+  <p>From live RF to real-time analog NTSC composite video with one Seeed Studio XIAO ESP32-C5 and a passive resistor DAC.</p>
 
-It captures raw Wi-Fi PHY I/Q samples directly from the RF front-end, demodulates Wideband FM (WBFM) in real-time hardware using the ESP32-C5 **BitScrambler**, and generates analog CVBS video output via **PARLIO TX** and a 6-bit resistor DAC ladder.
+  <p>
+    <img src="https://img.shields.io/badge/status-production%20proven-success" alt="Production proven" />
+    <img src="https://img.shields.io/badge/chip-ESP32--C5-111111" alt="ESP32-C5" />
+    <img src="https://img.shields.io/badge/RF-5.8%20GHz%20(48%20channels)-6f42c1" alt="5.8 GHz" />
+    <img src="https://img.shields.io/badge/output-analog%20CVBS%20NTSC-orange" alt="Analog CVBS" />
+    <img src="https://img.shields.io/badge/architecture-Zero--EOF%20Circular%20GDMA-blueviolet" alt="Zero-EOF GDMA" />
+    <img src="https://img.shields.io/badge/license-GPL--3.0--only-blue" alt="GPL-3.0-only" />
+  </p>
+</div>
 
 ---
 
-## Architecture
+## What is C5VRX?
+
+**C5VRX-3** turns the **Seeed Studio XIAO ESP32-C5** (ESP32-C5 RISC-V SoC) into a standalone 5.8 GHz analog video (FPV) receiver.
+
+It captures raw Wi-Fi PHY I/Q samples directly from the 5 GHz RF front-end at 40 MS/s, demodulates Wideband FM (WBFM) in real-time hardware using the ESP32-C5 **BitScrambler**, and outputs analog NTSC composite video (CVBS) via **PARLIO TX** and a 6-bit passive resistor DAC ladder into standard 75-ohm FPV goggles or monitors.
 
 ```text
-RF @ 5865 MHz (ch 173) / BW40
-  │
-  ▼
-Wi-Fi Modem ADC (40 MS/s I/Q, AGC frozen, fbw_sel=0, fixed gain 24)
-  │
-  ▼
-MODEM_DIAG Bus (Q[9:6] & I[9:6] -> 8-bit Cartesian state)
-  │
-  ▼
+5.8 GHz Analog FPV (48 Channels)
+        │
+        ▼
+ESP32-C5 RF / MODEM_DIAG Bus (40 MS/s Q4/I4)
+        │
+        ▼
 PARLIO RX @ 40 MS/s (POS sample edge, pure continuous hardware GDMA)
-  │
-  ▼
-Circular GDMA Ring (32 KiB in HP SRAM, Zero-EOF patched)
-  │
-  ▼
-Phase5 BitScrambler Demodulator (fm.bsasm: 50 ns discriminator, 16-bit embedded LUT)
-  │
-  ▼
+        │
+        ▼
+Circular GDMA Ring (16 KiB in HP SRAM, Zero-EOF patched)
+        │
+        ▼
+Phase5 BitScrambler Demodulator (fm.bsasm: 50 ns discriminator, embedded LUT)
+        │
+        ▼
 PARLIO TX @ 40 MHz ([D,D] mode -> 20 MS/s unique CVBS output)
-  │
-  ▼
-6-bit Resistor DAC Ladder (GPIO 23, 24, 11, 12, 8, 9) -> Analog Video Monitor
+        │
+        ▼
+6-bit Resistor DAC Ladder + 470 pF Filter -> 75-ohm Goggles
 ```
 
----
-
-## The Breakthrough: Zero-EOF Circular GDMA
-
-### The Problem
-During live hardware testing, the video signal suffered from two severe artifacts:
-1. **Periodic vertical raster drops / black bars ("knalt om de seconde naar beneden")**: The monitor periodically lost vertical sync lock every 1–2 seconds.
-2. **Horizontal edge distortion / jagged scanlines ("kartels")**: Video scanlines drifted horizontally, creating jagged diagonal and vertical lines.
-
-Prior hypotheses suspected Wi-Fi timers, fractional video line buffer sizing (e.g. 30,000 vs 30,336 vs 45,760 bytes), or CPU bus stalls. However, line tuning only shifted the beat frequency and inverted the vertical jump direction.
-
-### Root Cause in ESP-IDF Driver Source
-Deep inspection of the ESP-IDF PARLIO driver revealed:
-- In `components/esp_driver_parlio/src/parlio_tx.c` line 461:
-  ```c
-  .mark_eof = tx_unit->data_width == 1 ? !t->flags.loop_transmission : true;
-  ```
-  For 8-bit DAC output (`data_width == 8`), ESP-IDF **hardcodes `.mark_eof = true`**, setting `dw0.suc_eof = 1` on the final GDMA descriptor even when `loop_transmission = true`!
-- In `components/esp_driver_parlio/src/parlio_rx.c` line 189:
-  ```c
-  mount_config[required_node_num - 1].flags.mark_eof = true;
-  ```
-  The RX driver also forces `suc_eof = 1` on the final descriptor of the circular ring.
-
-Every time GDMA wrapped around the circular buffer, `suc_eof = 1` triggered a hardware EOF pulse into PARLIO TX and BitScrambler. This forced an internal hardware pipeline re-arm / FIFO stall (a microsecond "wrap bubble").
-- When the bubble collided with V-sync, the monitor lost vertical sync and slipped a frame.
-- When the bubble crossed active scanlines, it introduced horizontal line phase delays resulting in jagged edges ("kartels").
-
-### The Solution: Zero-EOF Descriptor Patching
-C5VRX-3 introduces `patch_descriptors_clear_eof()` in `main/video.c`. After starting PARLIO RX and TX:
-1. It traverses the circular linked list of DMA descriptors (`dma_descriptor_t`) directly in HP SRAM.
-2. It sets `dw0.suc_eof = 0` on **all** descriptors in both the RX and TX chains.
-3. It performs cache writeback (`esp_cache_msync(..., DIR_C2M)`) and executes a memory fence (`fence rw, rw`).
-4. It sets `PARL_IO.rx_genrl_cfg.rx_eof_gen_sel = 1` and disables GDMA RX interrupts (`AHB_DMA.in_intr.ena = 0`), eliminating ~9,775 CPU interrupts per second.
-
-### The Result
-- **Zero Wrap Bubble**: The hardware GDMA ring is now truly seamless and infinite.
-- **Format Agnostic**: Buffer sizing is no longer tied to fractional video line math. Standard **32 KiB (`RAW_RING_BYTES 32768u`)** runs rock-solid.
-- **Zero Jagged Edges ("kartels weg")**: 100% stable horizontal scanline lock.
-- **Zero Vertical Sync Loss / Layer Jumps**: Unbroken vertical sync lock.
+After startup, the CPU does not process pixels; the entire pipeline runs continuously in dedicated silicon peripherals (AHB GDMA $\to$ BitScrambler $\to$ PARLIO TX).
 
 ---
 
-## RF Front-End Characterization & Empirical Tuning
+## Key Innovations & Architectural Highlights
 
-To ensure a pristine, stable analog video feed across the full dynamic range:
-- **Dual-Loop Self-Calibrating Adaptive Gain Controller (FM Phase Optimizer)**:
-  - Eliminates the erratic hunting and near-field ADC saturation of stock Wi-Fi AGC, as well as the "Noise Trap" of blind clipping AGC.
-  - Computes real-time integer FM phase coherence $Q_{\text{phase}} = \text{count}(P \ge 8 \land \text{Dot} > 0 \land |\text{Cross}| \le \text{Dot}) \times 100 / 255$ at 20 Hz without floating-point math.
-  - Implements a 3-state controller (`SEARCH` $\to$ `LEARN` $\to$ `TRACK`) with a Fast Overload Rem ($\Delta G = -4 / -6$ only when $N_{\text{clip}} \ge 4$ and $P_{\text{median}} > 18$) and zero-register-write deadband locking in `TRACK` ($P_{\text{median}} \in [18, 32]$).
-  - Proven live dynamic range: automatically tracks from $G = 24$ (near-field 200 mW desk) to $G = 62$ (deep fade behind walls) with $99\%-100\%$ carrier phase coherence and zero blackouts.
-  - Full technical details in [`docs/dual-loop-adaptive-gain-optimizer.md`](../docs/dual-loop-adaptive-gain-optimizer.md).
-- **Dynamic Bandwidth Gearbox (BW40 High Gear <-> BW20 Long-Range Survival)**:
-  - Default: **BW40** (`phy_wifi_fbw_sel(1)`), keeping the full 20 MHz baseband channel filter open for rich color saturation and razor-sharp horizontal resolution.
-  - Deep Fade Survival: In severe fades ($G \ge 58$ and $P_{\text{median}} < 12$ or $Q_{\text{phase}} < 45\%$ for 200 ms), automatically downshifts to **BW20** (`phy_wifi_fbw_sel(0)`), halving thermal noise power to grab a vital $+3\text{ dB}$ SNR sensitivity boost to preserve HSYNC/VSYNC and pilot horizon.
-  - Hysteresis Recovery: Upshifts back to BW40 when carrier strongly recovers ($P_{\text{median}} \ge 22$, $Q_{\text{phase}} \ge 80\%$ for 1.0 s).
-- **Adaptive Gain Ceiling (Noise Confetti Prevention)**:
-  - In pure noise ($Q_{\text{phase}} < 30\%$), gain is strictly capped at $G \le 40$ to prevent thermal noise from clipping into harsh black-and-white square-wave confetti bars. When a carrier is coherent ($Q_{\text{phase}} \ge 30\%$), gain can climb up to $G = 62$.
-- **Exact Channel Matching & Carrier Frequency Offset (CFO / AFC)**:
-  - Real-time baseband CFO estimation via integer cross/dot product rotation ($\Delta f_{\text{kHz}} \approx (\sum \text{Cross} / \sum \text{Dot}) \times 6366\text{ kHz}$).
-  - Full FPV band support (Boscam A/B, RaceBand R, FatShark F) locked to user's selected channel.
-  - Automatic Frequency Control (AFC) with safe $\pm 1.5\text{ MHz}$ boundary clamp: centers onto VTX crystal drift while physically preventing auto-hopping away to adjacent channels.
-  - Manual fine-tuning in $\pm 50\text{ kHz}$ steps via console keys.
-- **MODEM_DIAG Sample Edge Margin**:
-  - Interactive testing of sample clock inversion (POS vs NEG via key `'e'`) confirmed clean video on both edges, proving wide setup/hold margin on the 40 MHz MODEM_DIAG bus.
-- **Disabled PLL Tracking**: Compiled with `CONFIG_ESP_PHY_DISABLE_PLL_TRACK=y` to eliminate periodic 1.0s radio recalibration stalls.
+### 1. The Breakthrough: Zero-EOF Circular GDMA
+- **The Problem**: In continuous loop mode, the stock ESP-IDF PARLIO TX driver injected a GDMA EOF (`suc_eof = 1`) on every cyclic ring wrap (confirmed in [espressif/esp-idf#19091](https://github.com/espressif/esp-idf/issues/19091)). This triggered periodic hardware stalls, causing a 1-second vertical sync drop and jagged horizontal line jitter ("kartels").
+- **The Solution**: C5VRX-3 patches `dw0.suc_eof = 0` across the descriptor ring in SRAM after driver initialization, paired with 64-byte aligned cache synchronization (`sync_dma_c2m`).
+- **The Result**: Truly gapless, infinite circular streaming with zero wrap bubbles, rock-solid vertical sync lock, and crystal-clear horizontal alignment.
 
----
+### 2. Dual-Loop Adaptive AGC with $Q_{\text{phase}}$ Coherence Tracking
+- Eliminates both the erratic hunting of stock packet AGC and the "noise trap" of blind power measurement (where background thermal noise keeps measured power elevated even in deep fades).
+- Computes real-time integer FM phase coherence:
+  $$Q_{\text{phase}} = \frac{\text{count}(P \ge 8 \land \text{Dot} > 0 \land |\text{Cross}| \le \text{Dot})}{255} \times 100\%$$
+- **Dynamic Gain Adaptation**: As signal degrades ($Q_{\text{phase}} < 68\%$ or $P_{\text{median}} < 18$) without clipping, the receiver actively steps RF gain up towards Gain 62 to lift weak carriers above the ADC quantizer floor.
+- **Fast Overload Safety Rem**: Instant gain cut ($\Delta G = -4 / -6$) if clipping occurs ($N_{\text{clip}} \ge 4$ and $P_{\text{median}} > 18$).
+- **Deadband Lock**: Zero register writes when locked in the clean target zone ($Q_{\text{phase}} \ge 70\%, P_{\text{median}} \in [18, 30]$).
 
-## NTSC 9-Line Chroma Precession Analysis
+### 3. Dynamic Bandwidth Gearbox (BW40 <-> BW20)
+- **BW40 (Wide / Color)**: Default mode keeping the full 20 MHz baseband analog filter open (`phy_wifi_fbw_sel(1)`) for vibrant color subcarrier fidelity and horizontal resolution.
+- **BW20 (+3 dB Long-Range Survival)**: In severe fades ($G \ge 56$ and $Q_{\text{phase}} < 55\%$ or $P_{\text{median}} < 16$), the receiver automatically downshifts to BW20 (`phy_wifi_fbw_sel(0)`), halving thermal noise bandwidth for an immediate **$+3\text{ dB}$ SNR boost** (+41% range). Automatically upshifts back to BW40 when signal recovers.
 
-In NTSC, one scanline lasts $63.555...\ \mu\text{s}$. At 20 MS/s discrete DAC sampling:
-$$\text{Samples per line} = 63.555...\ \mu\text{s} \times 20\text{ MHz} = \mathbf{1271 + \frac{1}{9}\text{ samples}}$$
-- Every scanline drifts by $\frac{1}{9}\text{ sample}$ ($5.55\text{ ns}$) relative to the discrete DAC clock grid.
-- Over 9 scanlines, this accumulates to $50\text{ ns}$ (1 sample slip).
-- At the NTSC subcarrier frequency ($3.58\text{ MHz}$), a 50–100 ns shift rotates subcarrier phase by $\approx 120^\circ$.
-- A $120^\circ$ phase shift rotates the color wheel by $\frac{1}{3}\text{rd}$: $\mathbf{\text{Red} \to \text{Green} \to \text{Blue} \to \text{Red}}$, producing repeating 9-line horizontal color layers.
-- Additionally, at Pedestal 20, negative peaks of the pre-emphasized 3.58 MHz color burst dip below 0 and are clamped at code 0, which can impair the monitor's burst PLL. Raising pedestal to 24–26 prevents burst clipping.
+### 4. Soft-Noise Squelched Phase5 Demodulator
+- The `fm.bsasm` BitScrambler program implements soft-noise squelching: phase deltas around $\pm 180^\circ$ (deltas $-16 \dots -12$ and $+13 \dots +15$) are mapped to blanking pedestal (DAC code 20) instead of sync tip (DAC code 0).
+- Eliminates false horizontal sync pulses and screen tearing during noise bursts and static.
 
 ---
 
-## Zero Periodic CPU & Bus Contention
+## Hardware Pinout & Circuit (Seeed Studio XIAO ESP32-C5)
 
-- **No Periodic Telemetry**: Eliminated periodic FreeRTOS tasks and timers (`armed = 0` across all Wi-Fi timers).
-- **No Periodic Cache Flushes**: Eliminated periodic `esp_cache_msync()` calls that stalled the AHB bus.
-- **On-Demand Diagnostics Only**: Interactive serial console (`console_diag_task`) sleeps on `getchar()` with 0% CPU and zero AHB bus traffic.
+Connect a 6-bit binary-weighted resistor DAC ladder to the XIAO pins, meeting at the `VIDEO` node:
+
+| XIAO Pin | ESP32-C5 GPIO | Bit Weight | Series Resistor |
+|:---:|:---:|:---:|:---:|
+| **D4** | GPIO 23 | Bit 0 (LSB) | 8.2 kΩ |
+| **D5** | GPIO 24 | Bit 1 | 3.9 kΩ |
+| **D6** | GPIO 11 | Bit 2 | 2.0 kΩ |
+| **D7** | GPIO 12 | Bit 3 | 1.0 kΩ |
+| **D8** | GPIO 8  | Bit 4 | 470 Ω |
+| **D9** | GPIO 9  | Bit 5 (MSB) | 240 Ω |
+| **GND** | GND | Ground | Ground reference |
+
+### Recommended Analog Filters:
+1. **Shunt Termination**: 200 Ω resistor from `VIDEO` to `GND`. When connected to goggles with standard 75 Ω termination, this forms a matched 0–1.0 V standard CVBS level.
+2. **De-Emphasis Filter**: A **470 pF ceramic capacitor** placed in parallel across `VIDEO` and `GND` creates a 10–14 dB high-frequency de-emphasis low-pass filter, dramatically reducing triangular FM noise and snow.
+3. **BOOT Button**: The built-in BOOT button (GPIO 28) switches channels on short click and toggles the OSD menu on long press (≥ 600 ms).
 
 ---
 
-## Pinout (Seeed Studio XIAO ESP32-C5)
+## Interactive Serial Console Hotkeys
 
-| Signal | GPIO | Function |
-|---|---|---|
-| **DAC Bit 0 (LSB)** | GPIO 23 | 6-bit Resistor Ladder (R = 20k / 2R = 10k) |
-| **DAC Bit 1** | GPIO 24 | Resistor Ladder |
-| **DAC Bit 2** | GPIO 11 | Resistor Ladder |
-| **DAC Bit 3** | GPIO 12 | Resistor Ladder |
-| **DAC Bit 4** | GPIO 8  | Resistor Ladder |
-| **DAC Bit 5 (MSB)** | GPIO 9  | Resistor Ladder |
-| **Video Out** | Output | 75Ω terminated CVBS into monitor |
+Connecting to the USB serial console (115200 baud) provides live telemetry and single-key controls:
+
+| Key | Action |
+|:---:|:---|
+| `c` / `C` | Cycle FPV channel / band (48 standard channels: RaceBand, Boscam A/B/E, FatShark, LowBand) |
+| `+` / `-` | Manual RF gain step (±2 index) |
+| `a` / `s` / `m` | Switch AGC mode: **Active** (auto-adapting) / **Shadow** (dry-run) / **Manual** (fixed) |
+| `b` | Cycle Bandwidth Gear: **Auto Gearbox** / Forced BW40 / Forced BW20 |
+| `f` | Cycle AFC Mode: **Auto Centering** (±1.5 MHz) / **Hold** / **Off** (0 kHz) |
+| `,` / `.` | Fine-tune carrier frequency offset in ±50 kHz steps |
+| `0` | Reset frequency offset to 0 kHz |
+| `e` | Toggle RX sample clock edge (POS / NEG) |
+| `d` | Print real-time reception diagnostics summary |
 
 ---
 
-## Building and Flashing
+## Build & Flash
 
-### Validate Build Constraints
+### Prerequisites
+- ESP-IDF v6.0.x (or Docker `espressif/idf:v6.0.2`)
+- Python 3.10+
+
+### 1. Build via Docker (Recommended)
+```bash
+docker run --rm -v "${PWD}:/workspace" -w /workspace espressif/idf:v6.0.2 idf.py build
+```
+
+### 2. Verify Build Constraints
 ```bash
 python tools/validate_build.py
 ```
 
-### Build with Docker (ESP-IDF v6.0.2)
-```powershell
-docker run --rm -v "${PWD}/..:/workspace" -w /workspace/C5VRX-3 espressif/idf:v6.0.2 idf.py build
+### 3. Zero-Friction Auto-Flash
+```bash
+python tools/auto_flash.py
+```
+*(The script monitors COM ports; simply plug in or reset the XIAO ESP32-C5 into download mode and it will flash automatically!)*
+
+---
+
+## Repository Structure
+
+```text
+├── CMakeLists.txt             # Production top-level project
+├── sdkconfig.defaults         # Production build configuration
+├── partitions.csv             # Partition table
+├── main/                      # Standalone C5VRX-3 firmware
+│   ├── main.c                 # Application entry point
+│   ├── rf.c / rf.h            # Wi-Fi PHY RX-only frontend & frequency tuning
+│   ├── video.c / video.h      # Realtime PARLIO RX/TX, Zero-EOF GDMA & AGC engine
+│   ├── fm.bsasm               # Phase5 BitScrambler demodulator program
+│   └── osd_font.h             # 8x8 font tables for OSD
+├── tools/                     # Production validation & flashing utilities
+│   ├── validate_build.py      # Architectural constraint validator
+│   ├── auto_flash.py          # Auto-detecting flashing watcher
+│   ├── monitor.py             # Serial monitor
+│   └── live_logger.py         # Real-time CSV logger
+├── docs/                      # Architectural specs & mathematical proofs
+├── archive/
+│   └── c5vrx2/                # Complete historical C5VRX-2 firmware, research & tools
+└── legacy/
+    └── c5vrx1/                # Original proof-of-concept repository snapshot
 ```
 
-### Flash to Device
-```bash
-python tools/flash.py COM10
-```
+---
 
-### Interactive Serial Monitor
-```bash
-python tools/monitor.py COM10
-```
-- `a`: Activate Adaptive Gain Controller (`ACTIVE` mode)
-- `s`: Switch to `SHADOW` mode (dry-run recommendations, physical gain frozen)
-- `m`: Switch to `MANUAL` mode
-- `+` / `k`: Manual gain +2
-- `-` / `j`: Manual gain -2
-- `b`: Cycle Bandwidth Gearbox (`AUTO GEARBOX` -> `FORCED BW40` -> `FORCED BW20`)
-- `c`: Cycle FPV channel (`A1`..`A8`, `R1`..`R8`, `B1`..`B8`, `F1`..`F8`)
-- `f`: Cycle AFC mode (`AUTO` -> `HOLD` -> `OFF`)
-- `,` / `<`: Fine-tune carrier offset -50 kHz
-- `.` / `>`: Fine-tune carrier offset +50 kHz
-- `0`: Reset carrier offset to 0 kHz
-- `e`: Toggle RX sample edge (POS / NEG)
-- `d` / `Space`: Print live diagnostic summary (channel, frequency, CFO, ring offsets, AGC/AFC metrics, FIFO status).
+## License
+
+C5VRX is open-source software licensed under the **GNU General Public License v3.0 only** (`GPL-3.0-only`).
+
+See [LICENSE](LICENSE) for full licensing terms.
