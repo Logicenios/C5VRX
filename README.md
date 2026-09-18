@@ -112,52 +112,114 @@ Connecting to the USB serial console (115200 baud) provides live telemetry and s
 
 ---
 
-## Build & Flash
+## Build & Flash Guide
 
 ### Prerequisites
-- ESP-IDF v6.0.x (or Docker `espressif/idf:v6.0.2`)
-- Python 3.10+
+- **Option A (Docker - Recommended)**: Docker Desktop or Docker engine installed.
+- **Option B (Native ESP-IDF)**: [ESP-IDF v6.0.x](https://docs.espressif.com/projects/esp-idf/en/v6.0/esp32c5/get-started/) installed with Python 3.10+.
 
-### 1. Build via Docker (Recommended)
+---
+
+### Step 1: Build the Firmware
+
+#### Option A: Build via Docker (Zero-Install Toolchain)
+No ESP-IDF installation required on your host machine. Run from the repository root:
+
+**Linux / macOS / Git Bash:**
 ```bash
 docker run --rm -v "${PWD}:/workspace" -w /workspace espressif/idf:v6.0.2 idf.py build
 ```
 
-### 2. Verify Build Constraints
+**Windows PowerShell:**
+```powershell
+docker run --rm -v "${PWD}:/workspace" -w /workspace espressif/idf:v6.0.2 idf.py build
+```
+
+#### Option B: Build with Native ESP-IDF v6.0+
+If you have ESP-IDF installed locally:
+
+**Linux / macOS:**
+```bash
+. $IDF_PATH/export.sh
+idf.py build
+```
+
+**Windows (ESP-IDF PowerShell Environment):**
+```powershell
+export.ps1
+idf.py build
+```
+
+The build produces three critical binaries in `build/`:
+- `build/bootloader/bootloader.bin` (at flash offset `0x2000`)
+- `build/partition_table/partition-table.bin` (at flash offset `0x8000`)
+- `build/c5vrx3.bin` (at flash offset `0x10000`)
+
+---
+
+### Step 2: Verify Architectural Constraints
+Before flashing, run the built-in validator to ensure zero DMA/BitScrambler constraint violations:
 ```bash
 python tools/validate_build.py
 ```
+*(All 31 architectural checks must pass.)*
 
-### 3. Zero-Friction Auto-Flash
+---
+
+### Step 3: Flash to ESP32-C5
+
+#### Option A: Zero-Friction Auto-Flash (Recommended)
+Run the auto-flash watcher:
 ```bash
 python tools/auto_flash.py
 ```
-*(The script monitors COM ports; simply plug in or reset the XIAO ESP32-C5 into download mode and it will flash automatically!)*
+*Plug in or reset your Seeed Studio XIAO ESP32-C5 into download mode (hold BOOT while tapping RESET), and the watcher will detect the COM port, flash the firmware, and automatically trigger a watchdog reset into the application!*
+
+#### Option B: Direct Flash Script
+Specify your COM port (or omit to auto-detect):
+```bash
+python tools/flash.py COM10
+```
+
+#### Option C: Native ESP-IDF Flasher
+```bash
+idf.py -p COM10 flash
+```
+
+---
+
+### Step 4: Interactive Serial Monitor & Diagnostics
+Launch the dedicated low-latency serial monitor:
+```bash
+python tools/monitor.py COM10
+```
+Use the interactive hotkeys (`c` to cycle channels, `+`/`-` for manual gain, `b` for bandwidth gearbox, `a` for active AGC, `d` for hardware diagnostics).
 
 ---
 
 ## Repository Structure
 
 ```text
-├── CMakeLists.txt             # Production top-level project
-├── sdkconfig.defaults         # Production build configuration
-├── partitions.csv             # Partition table
-├── main/                      # Standalone C5VRX-3 firmware
+├── CMakeLists.txt             # Production top-level ESP-IDF project
+├── sdkconfig.defaults         # Production build configuration (ESP32-C5 @ 240MHz)
+├── partitions.csv             # Custom minimal partition table
+├── main/                      # Standalone C5VRX-3 production firmware
+│   ├── CMakeLists.txt         # Component manifest & BitScrambler registration
 │   ├── main.c                 # Application entry point
 │   ├── rf.c / rf.h            # Wi-Fi PHY RX-only frontend & frequency tuning
 │   ├── video.c / video.h      # Realtime PARLIO RX/TX, Zero-EOF GDMA & AGC engine
 │   ├── fm.bsasm               # Phase5 BitScrambler demodulator program
 │   └── osd_font.h             # 8x8 font tables for OSD
 ├── tools/                     # Production validation & flashing utilities
-│   ├── validate_build.py      # Architectural constraint validator
+│   ├── validate_build.py      # Architectural constraint validator (31 checks)
 │   ├── auto_flash.py          # Auto-detecting flashing watcher
-│   ├── monitor.py             # Serial monitor
-│   └── live_logger.py         # Real-time CSV logger
+│   ├── flash.py               # One-click direct flasher
+│   ├── monitor.py             # Low-latency interactive serial console
+│   └── live_logger.py         # Real-time CSV telemetry logger
 ├── docs/                      # Architectural specs & mathematical proofs
-├── archive/
-│   └── c5vrx2/                # Complete historical C5VRX-2 firmware, research & tools
 └── legacy/
-    └── c5vrx1/                # Original proof-of-concept repository snapshot
+    ├── c5vrx1/                # Original proof-of-concept repository snapshot
+    └── c5vrx2/                # Complete historical C5VRX-2 firmware, research & tools
 ```
 
 ---

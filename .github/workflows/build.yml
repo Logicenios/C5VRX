@@ -1,103 +1,59 @@
-name: C5VRX realtime build
+name: C5VRX-3 Production CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "codex/**"]
   pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  validate:
+    name: Architectural & DSP Verification
     runs-on: ubuntu-latest
-    container: espressif/idf:v6.0.1
     steps:
-      - uses: actions/checkout@v4
-      - name: Build ESP32-C5 realtime firmware
-        shell: bash
-        run: |
-          source /opt/esp/idf/export.sh
-          idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.flash40.defaults" build
-          idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.flash40.defaults" merge-bin -o c5vrx2-full.bin -f raw
-      - name: Prepare hardware-test bundle
-        shell: bash
-        run: |
-          mkdir -p build/c5vrx2-hardware-test
-          cp build/c5vrx2-full.bin build/c5vrx2-hardware-test/
-          cp build/c5vrx2-full.bin build/c5vrx2-hardware-test/c5vrx2-iq-fm-idf601-40.bin
-          cp docs/hardware-test.md build/c5vrx2-hardware-test/TESTING.md
-          cp tools/flasher/index.html build/c5vrx2-hardware-test/flasher.html
-          printf '%s\n' "$GITHUB_SHA" > build/c5vrx2-hardware-test/FIRMWARE-COMMIT.txt
-          cd build/c5vrx2-hardware-test
-          sha256sum c5vrx2-full.bin > c5vrx2-full.bin.sha256
-      - name: Upload hardware-test bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: c5vrx2-full
-          path: build/c5vrx2-hardware-test/
-          if-no-files-found: error
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  trajectory-host:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install numpy matplotlib
-      - run: python tools/validate_trajectory.py
-      - run: python tools/validate_phase5_quality.py
-      - run: python tools/validate_linear80.py
-      - run: python tools/validate_continuous_pipeline.py
-      - run: python tools/test_issue11_output.py
-      - run: python tools/test_linear80_oracle.py
 
-  linear80-build:
+      - name: Verify Architectural Constraints
+        run: python tools/validate_build.py
+
+  build:
+    name: Build Production Firmware (ESP32-C5)
     runs-on: ubuntu-latest
-    container: espressif/idf:v6.0.1
-    strategy:
-      matrix:
-        mode: [linear80, linear80-oracle]
-        cpu: [160, 240]
+    container: espressif/idf:v6.0.2
     steps:
-      - uses: actions/checkout@v4
-      - name: Build experimental interpolator and RF-off oracle
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build C5VRX-3 Firmware
         shell: bash
         run: |
-          source /opt/esp/idf/export.sh
-          defaults="sdkconfig.defaults;sdkconfig.flash40.defaults;sdkconfig.${{ matrix.mode }}.defaults"
-          if [[ "${{ matrix.cpu }}" == "240" ]]; then
-            defaults="$defaults;sdkconfig.cpu240.defaults"
-          fi
-          idf.py -D SDKCONFIG_DEFAULTS="$defaults" build
-          idf.py merge-bin -o "${{ matrix.mode }}-cpu${{ matrix.cpu }}.bin" -f raw
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.mode }}-cpu${{ matrix.cpu }}-experimental
-          path: build/${{ matrix.mode }}-cpu${{ matrix.cpu }}.bin
+          . /opt/esp/idf/export.sh
+          idf.py build
 
-  trajectory-build:
-    runs-on: ubuntu-latest
-    container: espressif/idf:v6.0.1
-    strategy:
-      matrix:
-        mode: [live, oracle-low, oracle-high]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build trajectory candidate and bounded oracle
+      - name: Prepare Release Artifacts
         shell: bash
         run: |
-          source /opt/esp/idf/export.sh
-          defaults="sdkconfig.defaults;sdkconfig.flash40.defaults"
-          if [[ "${{ matrix.mode }}" != live ]]; then
-            defaults="$defaults;sdkconfig.tx-wbfm-test.defaults"
-          fi
-          defaults="$defaults;sdkconfig.trajectory.defaults"
-          if [[ "${{ matrix.mode }}" == oracle-high ]]; then
-            defaults="$defaults;sdkconfig.trajectory-high.defaults"
-          fi
-          idf.py -D SDKCONFIG_DEFAULTS="$defaults" build
-          idf.py merge-bin -o trajectory-${{ matrix.mode }}.bin -f raw
-      - uses: actions/upload-artifact@v4
+          mkdir -p release
+          cp build/bootloader/bootloader.bin release/
+          cp build/partition_table/partition-table.bin release/
+          cp build/c5vrx3.bin release/
+          cp build/flasher_args.json release/
+          cd release
+          sha256sum * > SHA256SUMS
+
+      - name: Upload Production Firmware Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: trajectory-${{ matrix.mode }}
-          path: build/trajectory-${{ matrix.mode }}.bin
+          name: c5vrx3-production-firmware
+          path: release/
           if-no-files-found: error
