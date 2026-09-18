@@ -84,26 +84,44 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 #define OSD_FONT_HEIGHT   8u
 #define OSD_ACTIVE_LINES  (OSD_MENU_ROWS * OSD_FONT_HEIGHT) /* 56 scanlines */
 
-/* Synthesized IQ phase bytes for Phase5 BitScrambler:
- * Phase 0  (0x50): delta=0  -> DAC code 20 (Blanking / Black background)
- * Phase 8  (0x05): delta=+8 -> DAC code 63 (Peak White Text)
- * Phase 16 (0x80)
- * Phase 24 (0x08): delta=-8 -> DAC code 0  (Sync Tip)
+/* Synthesized IQ cycles for the actual embedded Phase5 LUT.
+ *
+ * These byte values are LUT-verified phase representatives. The previous
+ * idealized sequence was wrong for the calibrated production LUT:
+ *   0x50 -> P1, 0x05 -> P8, 0x80 -> P15, 0x08 -> P24.
+ * It therefore produced black=25 and white=63,63,48,48 instead of constant
+ * CVBS levels, creating a strong false-chroma pattern in analog decoders.
+ *
+ * Every cycle below is four 20 MS/s words long and closes on P0:
+ *   black: P0 -> P13 -> P0  -> P13 -> P0 = DAC 20,20,20,20
+ *   sync:  P0 -> P23 -> P14 -> P5  -> P0 = DAC  0, 0, 0, 0
+ *   white: P0 -> P8  -> P16 -> P24 -> P0 = DAC 60,60,60,60
+ *
+ * OSD pixels and timing segments are multiples of four words, so every
+ * boundary is phase-coherent and the menu contains luma only.
  */
-#define IQ_BYTE_BLACK     0x50u
-#define IQ_WORD_BLACK     ((uint16_t)((IQ_BYTE_BLACK << 8) | IQ_BYTE_BLACK))
+static const uint8_t s_black_iq[4] = {0x83u, 0x4fu, 0x83u, 0x4fu};
+static const uint8_t s_sync_iq[4]  = {0xe7u, 0x81u, 0x11u, 0x4fu};
+static const uint8_t s_white_iq[4] = {0x04u, 0x7fu, 0x07u, 0x4fu};
 
-static const uint8_t s_sync_iq[4]  = {0x08u, 0x80u, 0x05u, 0x50u};
-static const uint8_t s_white_iq[4] = {0x05u, 0x80u, 0x08u, 0x50u};
-
-static inline uint16_t get_sync_word(int idx) {
-    uint8_t b = s_sync_iq[idx & 3];
-    return (uint16_t)((b << 8) | b);
+static inline uint16_t iq_word(uint8_t b)
+{
+    return (uint16_t)(((uint16_t)b << 8) | b);
 }
 
-static inline uint16_t get_white_word(int idx) {
-    uint8_t b = s_white_iq[idx & 3];
-    return (uint16_t)((b << 8) | b);
+static inline uint16_t get_black_word(int idx)
+{
+    return iq_word(s_black_iq[idx & 3]);
+}
+
+static inline uint16_t get_sync_word(int idx)
+{
+    return iq_word(s_sync_iq[idx & 3]);
+}
+
+static inline uint16_t get_white_word(int idx)
+{
+    return iq_word(s_white_iq[idx & 3]);
 }
 
 /* Cache synchronization helpers for DMA buffers and descriptors on ESP32-C5.
@@ -470,11 +488,11 @@ static void osd_draw_string(int row_idx, int col_words, const char *str)
                     line_ptr[p + 2] = get_white_word(2);
                     line_ptr[p + 3] = get_white_word(3);
                 } else {
-                    /* Black background pixel: 4 words of Phase 0 pedestal */
-                    line_ptr[p]     = IQ_WORD_BLACK;
-                    line_ptr[p + 1] = IQ_WORD_BLACK;
-                    line_ptr[p + 2] = IQ_WORD_BLACK;
-                    line_ptr[p + 3] = IQ_WORD_BLACK;
+                    /* Black pixel: exact DAC 20 cycle, closing on P0 */
+                    line_ptr[p]     = get_black_word(0);
+                    line_ptr[p + 1] = get_black_word(1);
+                    line_ptr[p + 2] = get_black_word(2);
+                    line_ptr[p + 3] = get_black_word(3);
                 }
                 p += 4;
             }
@@ -488,7 +506,7 @@ static void osd_draw_string(int row_idx, int col_words, const char *str)
             uint16_t *line_ptr = (uint16_t *)s_osd_lines[base_line + r];
             int p = start_col + char_idx * 32;
             for (int b = 0; b < 32; b++) {
-                line_ptr[p + b] = IQ_WORD_BLACK;
+                line_ptr[p + b] = get_black_word(b);
             }
         }
         char_idx++;
@@ -509,9 +527,9 @@ static void osd_init_buffers(void)
     uint16_t *eq_words = (uint16_t *)s_eq_line;
     int eq_pos = 0;
     for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
-    for (int i = 0; i < 588; i++) eq_words[eq_pos++] = IQ_WORD_BLACK;
+    for (int i = 0; i < 588; i++) eq_words[eq_pos++] = get_black_word(i);
     for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
-    for (int i = 0; i < 588; i++) eq_words[eq_pos++] = IQ_WORD_BLACK;
+    for (int i = 0; i < 588; i++) eq_words[eq_pos++] = get_black_word(i);
 
     /* V-Sync broad pulse serration line:
      * EIA RS-170 standard: 2 half-line broad pulses per line.
@@ -523,9 +541,9 @@ static void osd_init_buffers(void)
     uint16_t *vsync_words = (uint16_t *)s_vsync_line;
     int vsync_pos = 0;
     for (int i = 0; i < 540; i++) vsync_words[vsync_pos++] = get_sync_word(i);
-    for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = IQ_WORD_BLACK;
+    for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
     for (int i = 0; i < 540; i++) vsync_words[vsync_pos++] = get_sync_word(i);
-    for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = IQ_WORD_BLACK;
+    for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
 
     /* Standard horizontal blank line:
      * Words 0..95 (96 words = 4.8 µs): H-Sync tip (DAC code 0)
@@ -536,7 +554,7 @@ static void osd_init_buffers(void)
         blank_words[i] = get_sync_word(i);
     }
     for (int i = 96; i < (int)NTSC_LINE_WORDS; i++) {
-        blank_words[i] = IQ_WORD_BLACK;
+        blank_words[i] = get_black_word(i - 96);
     }
 
     /* Initialize all 56 active text scanlines to blank line */
