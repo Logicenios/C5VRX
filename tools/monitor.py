@@ -35,7 +35,10 @@ print("  'b'         : Cycle Bandwidth Gear (Auto Gearbox / Forced BW40 / Forced
 print("  'f'         : Cycle AFC Mode (Auto Centering / Hold / Off)")
 print("  ',' / '.'   : Fine-tune carrier offset (-50 / +50 kHz)")
 print("  '0'         : Reset frequency offset to +0 kHz")
-print("  'd' / Space : Dump real-time hardware reception diagnostics")
+print("  'o'         : Toggle OSD On-Screen Display Menu (receiver settings)")
+print("  ' ' / 'n'   : Move menu cursor (when menu active)")
+print("  'x' / Enter : Select / change menu setting (when menu active)")
+print("  'd'         : Dump real-time hardware reception diagnostics")
 print("  Ctrl+C      : Exit")
 print("-" * 60)
 sys.stdout.flush()
@@ -85,8 +88,11 @@ t.start()
 
 # Query current channel and diagnostics on connect
 time.sleep(0.1)
-ser.write(b"d\n")
-ser.flush()
+try:
+    ser.write(b"d\n")
+    ser.flush()
+except Exception:
+    pass
 
 try:
     while True:
@@ -94,8 +100,11 @@ try:
             ch = msvcrt.getch()
             if ch == b"\x03":  # Ctrl+C
                 break
-            ser.write(ch)
-            ser.flush()
+            try:
+                ser.write(ch)
+                ser.flush()
+            except Exception:
+                pass
         time.sleep(0.02)
 except KeyboardInterrupt:
     pass
