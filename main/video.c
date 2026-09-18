@@ -388,6 +388,33 @@ static int patch_descriptors_clear_eof(int dma_ch, bool is_rx)
     return count;
 }
 
+/* Pick a descriptor that RX has already completed, rather than sampling a
+ * fixed address that GDMA may be overwriting at the same instant. This keeps
+ * AGC/coherence decisions based on one coherent 256-byte RF snapshot. */
+static uint8_t *get_completed_rx_sample_window(size_t bytes)
+{
+    if (s_rx_dma_ch < 0 || s_rx_dma_ch >= 3 || s_rx_dscr_count < 2) {
+        return s_raw_ring;
+    }
+
+    uint32_t current_addr = AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val;
+    int current_idx = find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count, current_addr);
+    if (current_idx < 0) {
+        return s_raw_ring;
+    }
+
+    for (int back = 1; back < s_rx_dscr_count; ++back) {
+        int idx = (current_idx - back + s_rx_dscr_count) % s_rx_dscr_count;
+        uint8_t *buf = s_rx_dscr_nodes[idx].buffer;
+        uint32_t len = s_rx_dscr_nodes[idx].length;
+        if (buf && len >= bytes &&
+            buf >= s_raw_ring && (buf + bytes) <= (s_raw_ring + sizeof(s_raw_ring))) {
+            return buf;
+        }
+    }
+    return s_raw_ring;
+}
+
 /* =========================================================================
  * Receiver Modes, Dual-Loop AGC, Bandwidth Gearbox, and AFC State
  *
@@ -435,7 +462,10 @@ typedef enum {
 static volatile analog_agc_mode_t s_agc_mode = ANALOG_AGC_ACTIVE;
 static volatile agc_state_t s_agc_state = AGC_STATE_SEARCH;
 static volatile bw_gear_mode_t s_bw_gear_mode = BW_GEAR_AUTO;
-static volatile afc_mode_t s_afc_mode = AFC_MODE_AUTO;
+/* WBFM instantaneous phase slope contains the video modulation itself.
+ * The short-window CFO estimator is useful diagnostics, but it is not yet a
+ * calibrated LO-error estimator. Never retune automatically at boot. */
+static volatile afc_mode_t s_afc_mode = AFC_MODE_OFF;
 static volatile bool s_current_bw40 = true;
 static volatile uint8_t s_current_gain = 52u;   /* Physical RF gain applied */
 static volatile uint8_t s_shadow_gain = 52u;    /* Controller recommended gain */
@@ -642,7 +672,7 @@ static void osd_render_menu(void)
 
     snprintf(buf, sizeof(buf), "%c [5] AFC:    %s",
              (s_menu_cursor == 4) ? '>' : ' ',
-             (s_afc_mode == AFC_MODE_AUTO) ? "AUTO (+/-1.5M)" :
+             (s_afc_mode == AFC_MODE_AUTO) ? "AUTO EXP (+/-1.5M)" :
              (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
     osd_draw_string(5, 32, buf);
 
@@ -842,13 +872,13 @@ static void analog_agc_task(void *arg)
             continue; /* Freeze AGC, AFC, and avoid modifying DMA memory while menu is displayed! */
         }
 
-        /* 1. Invalidate 256 bytes in CPU L1 cache so we read fresh GDMA samples from SRAM */
-        sync_dma_m2c((void *)s_raw_ring, 256);
+        /* Read a completed RX descriptor. Sampling s_raw_ring[0] directly can
+         * race GDMA and create impossible mixed-window power/coherence metrics. */
+        uint8_t *sample_src = get_completed_rx_sample_window(256);
+        sync_dma_m2c((void *)sample_src, 256);
 
         static uint8_t sample_buf[256];
-        for (int i = 0; i < 256; i++) {
-            sample_buf[i] = s_raw_ring[i];
-        }
+        memcpy(sample_buf, sample_src, sizeof(sample_buf));
 
         int n_clip = 0;
         int n_origin = 0;
@@ -948,8 +978,10 @@ static void analog_agc_task(void *arg)
                 drift_counter = 0;
                 lost_counter = 0;
             } else {
-                /* No carrier / noise: park at high-sensitivity listening baseline */
-                target_gain = 52u;
+                /* No verified carrier: stay at maximum receive gain. This also
+                 * allows the BW gearbox to enter BW20 while searching, so a
+                 * carrier that is only recoverable in the narrow mode can be acquired. */
+                target_gain = 62u;
             }
             break;
 
@@ -972,7 +1004,9 @@ static void analog_agc_task(void *arg)
             }
             /* Optimal target zone converged */
             else {
-                if (n_clip <= 2 && (q_phase >= 65 || target_gain >= 62u)) {
+                /* TRACK requires an actually coherent FM carrier. Reaching the
+                 * gain ceiling alone is never evidence of lock. */
+                if (n_clip <= 2 && q_phase >= 65) {
                     s_agc_state = AGC_STATE_TRACK;
                     drift_counter = 0;
                     lost_counter = 0;
@@ -1072,7 +1106,10 @@ apply_target:
             }
         }
 
-        /* 5. Automatic Frequency Control (AFC) Carrier Centering */
+        /* 5. Experimental AFC.
+         * Default is OFF: mean WBFM phase slope over a 6.4 us window includes
+         * video modulation and is NOT a calibrated absolute carrier offset.
+         * AUTO remains an explicit test mode only. */
         if (s_afc_mode == AFC_MODE_AUTO) {
             /* Only adjust if carrier is strongly locked (Q_phase >= 75%) and gain settled */
             if (q_phase >= 75 && p_median >= 18 && settle_ticks == 0) {
@@ -1198,7 +1235,7 @@ static void console_diag_task(void *arg)
                     printf("[AFC] -> OFF (Offset reset to 0 kHz)\n");
                 } else {
                     s_afc_mode = AFC_MODE_AUTO;
-                    printf("[AFC] -> AUTO CENTERING (Active tracking within +/- 1.5 MHz)\n");
+                    printf("[AFC] -> AUTO EXPERIMENTAL (uncalibrated WBFM bias estimator)\n");
                 }
             } else if (c == ',' || c == '<') {
                 rf_step_frequency_offset_khz(-50);
@@ -1249,7 +1286,7 @@ static void console_diag_task(void *arg)
                 printf(" Carrier Frequency Offset:   %+d kHz (VTX %s)\n",
                        s_cfo_khz, (s_cfo_khz > 20) ? "high" : (s_cfo_khz < -20) ? "low" : "centered");
                 printf(" AFC Mode:                   %s\n",
-                       (s_afc_mode == AFC_MODE_AUTO) ? "AUTO (Carrier Centering, +/-1.5 MHz safe bound)" :
+                       (s_afc_mode == AFC_MODE_AUTO) ? "AUTO EXPERIMENTAL (uncalibrated estimator)" :
                        (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (Offset Frozen)" : "OFF (0 kHz)");
                 printf(" Bandwidth Gear:             %s (Current: %s)\n",
                        (s_bw_gear_mode == BW_GEAR_AUTO) ? "AUTO (Dynamic Adaptation)" :
