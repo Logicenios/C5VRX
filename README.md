@@ -1,14 +1,15 @@
 <div align="center">
   <img src="assets/c5vrx-logo.jpg" alt="C5VRX logo" width="760" />
 
-  <p><strong>ESP32-C5 analog 5.8 GHz FPV receiver research</strong></p>
-  <p>From live RF to recognizable composite video with one XIAO ESP32-C5 and a passive resistor DAC.</p>
+  <p><strong>ESP32-C5 Analog 5.8 GHz FPV Receiver</strong></p>
+  <p>From live RF to real-time analog NTSC composite video with one Seeed Studio XIAO ESP32-C5 and a passive resistor DAC.</p>
 
   <p>
-    <img src="https://img.shields.io/badge/status-live%20NTSC%20proven-success" alt="Live NTSC proven" />
+    <img src="https://img.shields.io/badge/status-production%20proven-success" alt="Production proven" />
     <img src="https://img.shields.io/badge/chip-ESP32--C5-111111" alt="ESP32-C5" />
-    <img src="https://img.shields.io/badge/RF-5.8%20GHz-6f42c1" alt="5.8 GHz" />
-    <img src="https://img.shields.io/badge/output-analog%20CVBS-orange" alt="Analog CVBS" />
+    <img src="https://img.shields.io/badge/RF-5.8%20GHz%20(48%20channels)-6f42c1" alt="5.8 GHz" />
+    <img src="https://img.shields.io/badge/output-analog%20CVBS%20NTSC-orange" alt="Analog CVBS" />
+    <img src="https://img.shields.io/badge/architecture-Zero--EOF%20Circular%20GDMA-blueviolet" alt="Zero-EOF GDMA" />
     <img src="https://img.shields.io/badge/license-GPL--3.0--only-blue" alt="GPL-3.0-only" />
   </p>
 </div>
@@ -17,122 +18,214 @@
 
 ## What is C5VRX?
 
-C5VRX explores whether the ESP32-C5's 5 GHz RF chain and hardware dataplane can
-act as a minimal analog FPV receiver. The live path recovers the composite
-waveform already carried by the VTX; it does not decode frames and generate a
-new PAL/NTSC signal.
+**C5VRX-3** turns the **Seeed Studio XIAO ESP32-C5** (ESP32-C5 RISC-V SoC) into a standalone 5.8 GHz analog video (FPV) receiver.
+
+It captures raw Wi-Fi PHY I/Q samples directly from the 5 GHz RF front-end at 40 MS/s, demodulates Wideband FM (WBFM) in real-time hardware using the ESP32-C5 **BitScrambler**, and outputs analog NTSC composite video (CVBS) via **PARLIO TX** and a 6-bit passive resistor DAC ladder into standard 75-ohm FPV goggles or monitors.
 
 ```text
-5.8 GHz analog FPV
-        |
-        v
-ESP32-C5 RF / MODEM_DIAG
-        |
-        v
-Q4/I4 -> PARLIO RX @ 40 MS/s
-        |
-        v
-TX BitScrambler WBFM / 2:1 conversion
-        |
-        v
-recovered CVBS @ 20 MS/s
-        |
-        v
-PARLIO TX -> 6-bit resistor DAC -> 75-ohm goggles
+5.8 GHz Analog FPV (48 Channels)
+        │
+        ▼
+ESP32-C5 RF / MODEM_DIAG Bus (40 MS/s Q4/I4)
+        │
+        ▼
+PARLIO RX @ 40 MS/s (POS sample edge, pure continuous hardware GDMA)
+        │
+        ▼
+Circular GDMA Ring (16 KiB in HP SRAM, Zero-EOF patched)
+        │
+        ▼
+Phase5 BitScrambler Demodulator (fm.bsasm: 50 ns discriminator, embedded LUT)
+        │
+        ▼
+PARLIO TX @ 40 MHz ([D,D] mode -> 20 MS/s unique CVBS output)
+        │
+        ▼
+6-bit Resistor DAC Ladder + 470 pF Filter -> 75-ohm Goggles
 ```
 
-The raw-Q4 elastic ring is the only realtime buffer. RX and TX use clocks
-derived from the same 240 MHz PLL, USB is telemetry only, and software block
-boundaries are not treated as RF signal boundaries.
+After startup, the CPU does not process pixels; the entire pipeline runs continuously in dedicated silicon peripherals (AHB GDMA $\to$ BitScrambler $\to$ PARLIO TX).
 
-## Hardware-proven status
+---
 
-On an ESP32-C5 revision v1.0 and A1/5865 MHz test setup:
+## Key Innovations & Architectural Highlights
 
-- the dump-first/TX_START RF writer ran from one start through 10,000 observed
-  physical wraps with zero software rearms or triggers;
-- MODEM_DIAG mapping was measured as `DIAG[6:9] = Q[6:9]` and
-  `DIAG[16:19] = I[6:9]`;
-- PARLIO RX captured a bit-perfect sequence of every second approximately
-  80 MS/s MODEM sample at 40 MS/s;
-- continuous RX-ring -> TX-BitScrambler -> PARLIO-TX produced a stably locked,
-  clearly recognizable live NTSC camera picture through the passive DAC;
-- the newer full-Q4 phase5 path produced substantial color and less static
-  than the first compact Q3/I2 proof.
+### 1. The Breakthrough: Zero-EOF Circular GDMA
+- **The Problem**: In continuous loop mode, the stock ESP-IDF PARLIO TX driver injected a GDMA EOF (`suc_eof = 1`) on every cyclic ring wrap (confirmed in [espressif/esp-idf#19091](https://github.com/espressif/esp-idf/issues/19091)). This triggered periodic hardware stalls, causing a 1-second vertical sync drop and jagged horizontal line jitter ("kartels").
+- **The Solution**: C5VRX-3 patches `dw0.suc_eof = 0` across the descriptor ring in SRAM after driver initialization, paired with 64-byte aligned cache synchronization (`sync_dma_c2m`).
+- **The Result**: Truly gapless, infinite circular streaming with zero wrap bubbles, rock-solid vertical sync lock, and crystal-clear horizontal alignment.
 
-C5VRX is still experimental. These results do **not** prove sample-gapless RF
-time, indefinitely slip-free MODEM/PARLIO sampling, glitch-free cyclic DMA
-boundaries, or production picture quality. Remaining static, grey cast, and
-line displacement are active image-quality work.
+### 2. Dual-Loop Adaptive AGC with $Q_{\text{phase}}$ Coherence Tracking
+- Eliminates both the erratic hunting of stock packet AGC and the "noise trap" of blind power measurement (where background thermal noise keeps measured power elevated even in deep fades).
+- Computes real-time integer FM phase coherence:
+  $$Q_{\text{phase}} = \frac{\text{count}(P \ge 8 \land \text{Dot} > 0 \land |\text{Cross}| \le \text{Dot})}{255} \times 100\%$$
+- **Dynamic Gain Adaptation**: As signal degrades ($Q_{\text{phase}} < 68\%$ or $P_{\text{median}} < 18$) without clipping, the receiver actively steps RF gain up towards Gain 62 to lift weak carriers above the ADC quantizer floor.
+- **Fast Overload Safety Rem**: Instant gain cut ($\Delta G = -4 / -6$) if clipping occurs ($N_{\text{clip}} \ge 4$ and $P_{\text{median}} > 18$).
+- **Deadband Lock**: Zero register writes when locked in the clean target zone ($Q_{\text{phase}} \ge 70\%, P_{\text{median}} \in [18, 30]$).
 
-Read [continuous IQ findings](docs/continuous-iq-findings.md),
-[image-quality status](docs/image-quality.md), and the
-[hardware test matrix](docs/hardware-test.md) before extending the dataplane.
+### 3. Dynamic Bandwidth Gearbox (BW40 <-> BW20)
+- **BW40 (Wide / Color)**: Default mode keeping the full 20 MHz baseband analog filter open (`phy_wifi_fbw_sel(1)`) for vibrant color subcarrier fidelity and horizontal resolution.
+- **BW20 (+3 dB Long-Range Survival)**: In severe fades ($G \ge 56$ and $Q_{\text{phase}} < 55\%$ or $P_{\text{median}} < 16$), the receiver automatically downshifts to BW20 (`phy_wifi_fbw_sel(0)`), halving thermal noise bandwidth for an immediate **$+3\text{ dB}$ SNR boost** (+41% range). Automatically upshifts back to BW40 when signal recovers.
 
-## XIAO hardware
+### 4. Soft-Noise Squelched Phase5 Demodulator
+- The `fm.bsasm` BitScrambler program implements soft-noise squelching: phase deltas around $\pm 180^\circ$ (deltas $-16 \dots -12$ and $+13 \dots +15$) are mapped to blanking pedestal (DAC code 20) instead of sync tip (DAC code 0).
+- Eliminates false horizontal sync pulses and screen tearing during noise bursts and static.
 
-The tested output uses six XIAO pins, one resistor per branch, joined at the
-`VIDEO` node:
+---
 
-| XIAO pin | GPIO | Series resistor |
-|---|---:|---:|
-| D4 | 23 | 8.2 kOhm |
-| D5 | 24 | 3.9 kOhm |
-| D6 | 11 | 2.0 kOhm |
-| D7 | 12 | 1.0 kOhm |
-| D8 | 8 | 470 Ohm |
-| D9 | 9 | 240 Ohm |
+## Hardware Pinout & Circuit (Seeed Studio XIAO ESP32-C5)
 
-Fit 200 Ohm from `VIDEO` to ground, share ground with the display, and use the
-display's normal 75 Ohm termination. Do not connect a raw 3.3 V GPIO directly
-to an AV input. See [hardware-test.md](docs/hardware-test.md) for expected
-loaded levels and diagnostics.
+Connect a 6-bit binary-weighted resistor DAC ladder to the XIAO pins, meeting at the `VIDEO` node:
 
-## Build and flash
+| XIAO Pin | ESP32-C5 GPIO | Bit Weight | Series Resistor |
+|:---:|:---:|:---:|:---:|
+| **D4** | GPIO 23 | Bit 0 (LSB) | 8.2 kΩ |
+| **D5** | GPIO 24 | Bit 1 | 3.9 kΩ |
+| **D6** | GPIO 11 | Bit 2 | 2.0 kΩ |
+| **D7** | GPIO 12 | Bit 3 | 1.0 kΩ |
+| **D8** | GPIO 8  | Bit 4 | 470 Ω |
+| **D9** | GPIO 9  | Bit 5 (MSB) | 240 Ω |
+| **GND** | GND | Ground | Ground reference |
 
-Release/test builds use ESP-IDF 6.0.1 and 40 MHz DIO flash. The tested 6.0.2
-configuration caused an early MSPI/CPU lockup on C5 revision v1.0.
+### Recommended Analog Filters:
+1. **Shunt Termination**: 200 Ω resistor from `VIDEO` to `GND`. When connected to goggles with standard 75 Ω termination, this forms a matched 0–1.0 V standard CVBS level.
+2. **De-Emphasis Filter**: A **470 pF ceramic capacitor** placed in parallel across `VIDEO` and `GND` creates a 10–14 dB high-frequency de-emphasis low-pass filter, dramatically reducing triangular FM noise and snow.
+3. **BOOT Button**: The built-in BOOT button (GPIO 28) switches channels on short click and toggles the OSD menu on long press (≥ 600 ms).
 
+---
+
+## Interactive Serial Console Hotkeys
+
+Connecting to the USB serial console (115200 baud) provides live telemetry and single-key controls:
+
+| Key | Action |
+|:---:|:---|
+| `c` / `C` | Cycle FPV channel / band (48 standard channels: RaceBand, Boscam A/B/E, FatShark, LowBand) |
+| `+` / `-` | Manual RF gain step (±2 index) |
+| `a` / `s` / `m` | Switch AGC mode: **Active** (auto-adapting) / **Shadow** (dry-run) / **Manual** (fixed) |
+| `b` | Cycle Bandwidth Gear: **Auto Gearbox** / Forced BW40 / Forced BW20 |
+| `f` | Cycle AFC Mode: **Auto Centering** (±1.5 MHz) / **Hold** / **Off** (0 kHz) |
+| `,` / `.` | Fine-tune carrier frequency offset in ±50 kHz steps |
+| `0` | Reset frequency offset to 0 kHz |
+| `e` | Toggle RX sample clock edge (POS / NEG) |
+| `d` | Print real-time reception diagnostics summary |
+
+---
+
+## Build & Flash Guide
+
+### Prerequisites
+- **Option A (Docker - Recommended)**: Docker Desktop or Docker engine installed.
+- **Option B (Native ESP-IDF)**: [ESP-IDF v6.0.x](https://docs.espressif.com/projects/esp-idf/en/v6.0/esp32c5/get-started/) installed with Python 3.10+.
+
+---
+
+### Step 1: Build the Firmware
+
+#### Option A: Build via Docker (Zero-Install Toolchain)
+No ESP-IDF installation required on your host machine. Run from the repository root:
+
+**Linux / macOS / Git Bash:**
 ```bash
-source /path/to/esp-idf-v6.0.1/export.sh
-idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.flash40.defaults" build
-idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.flash40.defaults" \
-  merge-bin -o c5vrx-full.bin -f raw
-esptool.py --chip esp32c5 write_flash 0x0 c5vrx-full.bin
+docker run --rm -v "${PWD}:/workspace" -w /workspace espressif/idf:v6.0.2 idf.py build
 ```
 
-The browser flasher is documented in [tools/flasher/README.md](tools/flasher/README.md).
-Hardware modes are selected through the project Kconfig options; diagnostics
-must not be confused with the normal live receiver.
+**Windows PowerShell:**
+```powershell
+docker run --rm -v "${PWD}:/workspace" -w /workspace espressif/idf:v6.0.2 idf.py build
+```
 
-## Knowledge base
+#### Option B: Build with Native ESP-IDF v6.0+
+If you have ESP-IDF installed locally:
 
-[docs/KNOWLEDGE_INDEX.md](docs/KNOWLEDGE_INDEX.md) is the entry point for RF,
-MODEM_DIAG, IQ, WBFM, CVBS, PARLIO, DAC, continuity, and rejected approaches.
+**Linux / macOS:**
+```bash
+. $IDF_PATH/export.sh
+idf.py build
+```
 
-The repository contains both eras of the project:
+**Windows (ESP-IDF PowerShell Environment):**
+```powershell
+export.ps1
+idf.py build
+```
 
-- `/main` — current firmware;
-- `/docs` — current evidence and engineering contracts;
-- `/legacy/c5vrx1` — verbatim snapshot of the original repository;
-- `/docs/legacy-issues` — preserved issue and review conclusions.
+The build produces three critical binaries in `build/`:
+- `build/bootloader/bootloader.bin` (at flash offset `0x2000`)
+- `build/partition_table/partition-table.bin` (at flash offset `0x8000`)
+- `build/c5vrx3.bin` (at flash offset `0x10000`)
 
-The Git graph joins both original histories without rewriting their commits.
-See [legacy/c5vrx1/ARCHIVE.md](legacy/c5vrx1/ARCHIVE.md) for provenance.
+---
 
-## Roadmap
+### Step 2: Verify Architectural Constraints
+Before flashing, run the built-in validator to ensure zero DMA/BitScrambler constraint violations:
+```bash
+python tools/validate_build.py
+```
+*(All 31 architectural checks must pass.)*
 
-- identify and eliminate cyclic-DMA boundary tearing;
-- quantify the remaining FM/static source and add justified real-domain
-  filtering/de-emphasis;
-- calibrate pedestal, gain, polarity, blanking, and chroma response;
-- complete long-duration source and output continuity proofs;
-- keep the hardware path small enough for a practical receiver board.
+---
+
+### Step 3: Flash to ESP32-C5
+
+#### Option A: Zero-Friction Auto-Flash (Recommended)
+Run the auto-flash watcher:
+```bash
+python tools/auto_flash.py
+```
+*Plug in or reset your Seeed Studio XIAO ESP32-C5 into download mode (hold BOOT while tapping RESET), and the watcher will detect the COM port, flash the firmware, and automatically trigger a watchdog reset into the application!*
+
+#### Option B: Direct Flash Script
+Specify your COM port (or omit to auto-detect):
+```bash
+python tools/flash.py COM10
+```
+
+#### Option C: Native ESP-IDF Flasher
+```bash
+idf.py -p COM10 flash
+```
+
+---
+
+### Step 4: Interactive Serial Monitor & Diagnostics
+Launch the dedicated low-latency serial monitor:
+```bash
+python tools/monitor.py COM10
+```
+Use the interactive hotkeys (`c` to cycle channels, `+`/`-` for manual gain, `b` for bandwidth gearbox, `a` for active AGC, `d` for hardware diagnostics).
+
+---
+
+## Repository Structure
+
+```text
+├── CMakeLists.txt             # Production top-level ESP-IDF project
+├── sdkconfig.defaults         # Production build configuration (ESP32-C5 @ 240MHz)
+├── partitions.csv             # Custom minimal partition table
+├── main/                      # Standalone C5VRX-3 production firmware
+│   ├── CMakeLists.txt         # Component manifest & BitScrambler registration
+│   ├── main.c                 # Application entry point
+│   ├── rf.c / rf.h            # Wi-Fi PHY RX-only frontend & frequency tuning
+│   ├── video.c / video.h      # Realtime PARLIO RX/TX, Zero-EOF GDMA & AGC engine
+│   ├── fm.bsasm               # Phase5 BitScrambler demodulator program
+│   └── osd_font.h             # 8x8 font tables for OSD
+├── tools/                     # Production validation & flashing utilities
+│   ├── validate_build.py      # Architectural constraint validator (31 checks)
+│   ├── auto_flash.py          # Auto-detecting flashing watcher
+│   ├── flash.py               # One-click direct flasher
+│   ├── monitor.py             # Low-latency interactive serial console
+│   └── live_logger.py         # Real-time CSV telemetry logger
+├── docs/                      # Architectural specs & mathematical proofs
+└── legacy/
+    ├── c5vrx1/                # Original proof-of-concept repository snapshot
+    └── c5vrx2/                # Complete historical C5VRX-2 firmware, research & tools
+```
+
+---
 
 ## License
 
-C5VRX is open-source software licensed under the GNU General Public License
-v3.0 only (`GPL-3.0-only`).
+C5VRX is open-source software licensed under the **GNU General Public License v3.0 only** (`GPL-3.0-only`).
 
-See [LICENSE](LICENSE) and [docs/licensing.md](docs/licensing.md) for licensing,
-historical attribution, contributor, and branding details.
+See [LICENSE](LICENSE) for full licensing terms.

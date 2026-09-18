@@ -31,15 +31,6 @@
 #include "esp_rom_sys.h"
 #include "esp_private/wifi_os_adapter.h"
 
-/* Reserve the RF dump memory bank (0x4082ffc0..0x40850040) from the heap.
- * The modem dump engine continuously streams 40 MS/s IQ words into 0x40830000.
- * Reserving this region ensures FreeRTOS stacks, Wi-Fi buffers, and GDMA descriptors
- * are never allocated in this address space. */
-#define PRE_GUARD_ADDR  0x4082ffc0u
-#define POST_GUARD_ADDR 0x40850000u
-#define POST_GUARD_END  0x40850040u
-SOC_RESERVE_MEMORY_REGION(PRE_GUARD_ADDR, POST_GUARD_END, c5vrx3_rf_dump_ram);
-
 /* Fixed receiver configuration -- not configurable at runtime. */
 #define RF_CHANNEL_NUMBER   173u
 #define RF_BANDWIDTH        WIFI_BW40
@@ -386,24 +377,25 @@ esp_err_t rf_start(void)
     /* Un-gate modem ADC clock and force continuous sampling. */
     rf_enable_continuous_modem();
 
-    /* Freeze hardware AGC (Automatic Gain Control). In Wi-Fi mode, the hardware
-     * AGC searches for 802.11 preambles; when only analog FM is present, the AGC
-     * watchdog periodically steps gain / recalibrates every ~500ms, causing I/Q
-     * phase jumps that corrupt H/V-sync and make the monitor lose vertical lock. */
+    /* Keep the vendor Wi-Fi packet AGC out of the analog-FM receive path.
+     * C5VRX has its own slow analog-video gain controller below; leaving the
+     * packet AGC enabled lets the closed PHY hunt/recalibrate independently,
+     * which invalidates our gain model and can desensitize weak-signal receive. */
     extern void phy_disable_agc(void);
     extern void phy_rfagc_disable(void);
     phy_disable_agc();
     phy_rfagc_disable();
 
-    /* Select BW20 analog filter bandwidth while keeping 40 MS/s pipeline of BW40.
-     * Significantly eliminates jagged edges ("kartels") and high-frequency noise. */
+    /* Start wide for full colour/detail. The software gearbox will switch the
+     * analog front-end to BW20 during weak-signal acquisition/deep fades. */
     extern void phy_wifi_fbw_sel(uint32_t val);
-    phy_wifi_fbw_sel(0);
+    phy_wifi_fbw_sel(1);
 
-    /* Force clean, non-saturating receiver gain (index 24).
-     * High SNR sweet spot without ADC clipping. */
+    /* Force high-sensitivity sweet-spot gain (index 52).
+     * Provides sensitive reception of weak carriers out of the box while
+     * active AGC dynamically manages gain tracking and overload protection. */
     extern void phy_force_rx_gain(bool enable, uint8_t gain_idx);
-    phy_force_rx_gain(true, 24);
+    phy_force_rx_gain(true, 52);
 
     /* Disable PHY PLL / RXCAL tracking timer if compiled in, so it never
      * recalibrates RF / RX hardware during continuous analog video reception.
@@ -413,19 +405,276 @@ esp_err_t rf_start(void)
     phy_track_pll_deinit();
 #endif
 
-    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / agc=frozen / sta_disconnected_pm=0 / pll_track=disabled",
+    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / gain=forced(52) / sta_disconnected_pm=0 / pll_track=disabled",
                    RF_CHANNEL_NUMBER);
     return ESP_OK;
 }
 
+extern void phy_wifi_fbw_sel(uint32_t val);
 extern void phy_force_rx_gain(bool enable, uint8_t gain_idx);
+extern void phy_disable_agc(void);
+extern void phy_rfagc_disable(void);
+extern void phy_set_freq(uint16_t freq_mhz, int offset);
+extern void phy_chip_set_chan_offset(int offset_khz);
+
+static bool s_analog_bw40 = true;
+static uint8_t s_current_gain_val = 52u;
+
+/* Standard FPV Channel Table: 6 Bands x 8 Channels = 48 Channels
+ * RaceBand (R), Boscam A (A), Boscam B (B), Boscam E (E), FatShark (F), LowBand (L) */
+static const fpv_channel_t s_fpv_channels[FPV_BAND_COUNT][8] = {
+    [FPV_BAND_R] = { /* RaceBand (R1..R8) */
+        { "R1", 5658 }, { "R2", 5695 }, { "R3", 5732 }, { "R4", 5769 },
+        { "R5", 5806 }, { "R6", 5843 }, { "R7", 5880 }, { "R8", 5917 },
+    },
+    [FPV_BAND_A] = { /* Boscam A (A1..A8) - Default A1 is 5865 MHz */
+        { "A1", 5865 }, { "A2", 5845 }, { "A3", 5825 }, { "A4", 5805 },
+        { "A5", 5785 }, { "A6", 5765 }, { "A7", 5745 }, { "A8", 5725 },
+    },
+    [FPV_BAND_B] = { /* Boscam B (B1..B8) */
+        { "B1", 5733 }, { "B2", 5752 }, { "B3", 5771 }, { "B4", 5790 },
+        { "B5", 5809 }, { "B6", 5828 }, { "B7", 5847 }, { "B8", 5866 },
+    },
+    [FPV_BAND_E] = { /* Boscam E (E1..E8) */
+        { "E1", 5705 }, { "E2", 5685 }, { "E3", 5665 }, { "E4", 5645 },
+        { "E5", 5885 }, { "E6", 5905 }, { "E7", 5925 }, { "E8", 5945 },
+    },
+    [FPV_BAND_F] = { /* FatShark / Airwave (F1..F8) */
+        { "F1", 5740 }, { "F2", 5760 }, { "F3", 5780 }, { "F4", 5800 },
+        { "F5", 5820 }, { "F6", 5840 }, { "F7", 5860 }, { "F8", 5880 },
+    },
+    [FPV_BAND_L] = { /* LowBand / Band D (L1..L8) */
+        { "L1", 5362 }, { "L2", 5399 }, { "L3", 5436 }, { "L4", 5473 },
+        { "L5", 5510 }, { "L6", 5547 }, { "L7", 5584 }, { "L8", 5621 },
+    },
+};
+
+static const char *s_band_names[FPV_BAND_COUNT] = {
+    [FPV_BAND_R] = "RaceBand (R)",
+    [FPV_BAND_A] = "Boscam A (A)",
+    [FPV_BAND_B] = "Boscam B (B)",
+    [FPV_BAND_E] = "Boscam E (E)",
+    [FPV_BAND_F] = "FatShark (F)",
+    [FPV_BAND_L] = "LowBand (L)",
+};
+
+static fpv_band_t s_current_band = FPV_BAND_A;
+static uint8_t s_current_channel_idx = 0; /* 0..7 (Default A1: 5865 MHz) */
+static uint16_t s_current_freq_mhz = 5865u;
+static int s_current_offset_khz = 0;
+
+#define C5_WIFI5_MIN_MHZ 5180u
+#define C5_WIFI5_MAX_MHZ 5885u
+
+typedef struct {
+    uint8_t channel;
+    uint16_t mhz;
+} wifi5_center_t;
+
+/* Public ESP-IDF 5 GHz centers used as the supported RF bootstrap.
+ * Non-exact FPV centers are experimental and are retuned only after first
+ * placing the closed PHY on the nearest known-good public center. */
+static const wifi5_center_t s_wifi5_centers[] = {
+    {132, 5660}, {136, 5680}, {140, 5700}, {144, 5720},
+    {149, 5745}, {153, 5765}, {157, 5785}, {161, 5805},
+    {165, 5825}, {169, 5845}, {173, 5865}, {177, 5885},
+};
+
+static bool plan_wifi5_center(uint16_t freq_mhz, uint8_t *channel, uint16_t *center_mhz)
+{
+    if (freq_mhz < C5_WIFI5_MIN_MHZ || freq_mhz > C5_WIFI5_MAX_MHZ) {
+        return false;
+    }
+
+    unsigned best = 0;
+    int best_delta = 0x7fffffff;
+    for (unsigned i = 0; i < sizeof(s_wifi5_centers) / sizeof(s_wifi5_centers[0]); ++i) {
+        int d = (int)freq_mhz - (int)s_wifi5_centers[i].mhz;
+        if (d < 0) d = -d;
+        if (d < best_delta) {
+            best_delta = d;
+            best = i;
+        }
+    }
+
+    if (channel) *channel = s_wifi5_centers[best].channel;
+    if (center_mhz) *center_mhz = s_wifi5_centers[best].mhz;
+    return true;
+}
+
+void rf_set_analog_bandwidth(bool bw40)
+{
+    s_analog_bw40 = bw40;
+    phy_wifi_fbw_sel(bw40 ? 1u : 0u);
+}
+
+bool rf_get_analog_bandwidth(void)
+{
+    return s_analog_bw40;
+}
 
 void rf_set_rx_gain(bool force, uint8_t gain_idx)
 {
+    if (force) {
+        s_current_gain_val = gain_idx;
+    }
     phy_force_rx_gain(force, gain_idx);
 }
 
 uint32_t rf_get_rx_gain_reg(void)
 {
     return REG32(0x600a702cu);
+}
+
+const fpv_channel_t *rf_get_current_channel(void)
+{
+    return &s_fpv_channels[s_current_band][s_current_channel_idx];
+}
+
+size_t rf_get_channel_index(void)
+{
+    return (size_t)s_current_band * 8u + s_current_channel_idx;
+}
+
+size_t rf_get_channel_count(void)
+{
+    return FPV_BAND_COUNT * 8u;
+}
+
+fpv_band_t rf_get_current_band(void)
+{
+    return s_current_band;
+}
+
+const char *rf_get_band_name(fpv_band_t band)
+{
+    if (band >= FPV_BAND_COUNT) return "Unknown";
+    return s_band_names[band];
+}
+
+uint8_t rf_get_current_channel_number(void)
+{
+    return s_current_channel_idx + 1u;
+}
+
+uint16_t rf_get_frequency_mhz(void)
+{
+    return s_current_freq_mhz;
+}
+
+int rf_get_frequency_offset_khz(void)
+{
+    return s_current_offset_khz;
+}
+
+void rf_set_frequency_offset_khz(int offset_khz)
+{
+    /* Strict clamping: +/- 1500 kHz (+/- 1.5 MHz) maximum.
+     * Adjacent FPV channels are at least 19-20 MHz apart. Clamping strictly
+     * to +/- 1.5 MHz guarantees 100% that tuning is locked to the selected
+     * channel and can NEVER hop or switch to another channel. */
+    if (offset_khz < -1500) offset_khz = -1500;
+    if (offset_khz > 1500)  offset_khz = 1500;
+
+    s_current_offset_khz = offset_khz;
+    phy_chip_set_chan_offset(offset_khz);
+    phy_force_rx_gain(true, s_current_gain_val);
+}
+
+void rf_step_frequency_offset_khz(int delta_khz)
+{
+    rf_set_frequency_offset_khz(s_current_offset_khz + delta_khz);
+}
+
+esp_err_t rf_set_channel(size_t index)
+{
+    if (index >= FPV_BAND_COUNT * 8u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    fpv_band_t new_band = (fpv_band_t)(index / 8u);
+    uint8_t new_idx = (uint8_t)(index % 8u);
+    uint16_t requested_mhz = s_fpv_channels[new_band][new_idx].freq_mhz;
+
+    uint8_t wifi_channel = 0;
+    uint16_t wifi_center_mhz = 0;
+    if (!plan_wifi5_center(requested_mhz, &wifi_channel, &wifi_center_mhz)) {
+        printf("[RF:TUNE] Refusing %u MHz: outside ESP32-C5 5 GHz operating window %u-%u MHz\n",
+               requested_mhz, C5_WIFI5_MIN_MHZ, C5_WIFI5_MAX_MHZ);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    /* Always establish a supported/public RF center first. Exact-overlap FPV
+     * channels (e.g. A1/A2/...) need no undocumented frequency call at all. */
+    esp_err_t err = esp_wifi_set_channel(wifi_channel, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint8_t verify_primary = 0;
+    wifi_second_chan_t verify_secondary = WIFI_SECOND_CHAN_NONE;
+    err = esp_wifi_get_channel(&verify_primary, &verify_secondary);
+    if (err != ESP_OK || verify_primary != wifi_channel) {
+        return (err != ESP_OK) ? err : ESP_ERR_INVALID_STATE;
+    }
+
+    if (requested_mhz != wifi_center_mhz) {
+        /* EXPERIMENTAL: two-argument ABI is known, but arbitrary-frequency
+         * semantics still require RF hardware validation. Starting from the
+         * nearest public center minimizes the size of this undocumented step. */
+        phy_set_freq(requested_mhz, 0);
+    }
+
+    rf_enable_continuous_modem();
+
+    /* Public/undocumented retune paths can touch PHY receive state. Re-assert
+     * the analog-FM contract after every channel change. */
+    phy_disable_agc();
+    phy_rfagc_disable();
+    phy_wifi_fbw_sel(s_analog_bw40 ? 1u : 0u);
+    phy_force_rx_gain(true, s_current_gain_val);
+
+    /* Commit logical state only after the supported bootstrap succeeded. */
+    s_current_band = new_band;
+    s_current_channel_idx = new_idx;
+    s_current_freq_mhz = requested_mhz;
+    s_current_offset_khz = 0;
+
+    return ESP_OK;
+}
+
+esp_err_t rf_cycle_channel(void)
+{
+    size_t start = rf_get_channel_index();
+    for (size_t step = 1; step <= FPV_BAND_COUNT * 8u; ++step) {
+        size_t next = (start + step) % (FPV_BAND_COUNT * 8u);
+        esp_err_t err = rf_set_channel(next);
+        if (err == ESP_OK) return ESP_OK;
+        if (err != ESP_ERR_NOT_SUPPORTED) return err;
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+void rf_cycle_band(void)
+{
+    fpv_band_t start_band = s_current_band;
+    uint8_t channel_idx = s_current_channel_idx;
+    for (unsigned step = 1; step <= FPV_BAND_COUNT; ++step) {
+        fpv_band_t band = (fpv_band_t)((start_band + step) % FPV_BAND_COUNT);
+        esp_err_t err = rf_set_channel((size_t)band * 8u + channel_idx);
+        if (err == ESP_OK) return;
+        if (err != ESP_ERR_NOT_SUPPORTED) return;
+    }
+}
+
+void rf_cycle_channel_in_band(void)
+{
+    fpv_band_t band = s_current_band;
+    uint8_t start_idx = s_current_channel_idx;
+    for (unsigned step = 1; step <= 8u; ++step) {
+        uint8_t idx = (uint8_t)((start_idx + step) % 8u);
+        esp_err_t err = rf_set_channel((size_t)band * 8u + idx);
+        if (err == ESP_OK) return;
+        if (err != ESP_ERR_NOT_SUPPORTED) return;
+    }
 }

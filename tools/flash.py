@@ -46,7 +46,7 @@ def main():
         "-p", port,
         "-b", "460800",
         "--before", "usb-reset",
-        "--after", "hard-reset",
+        "--after", "watchdog-reset",
         "write-flash",
         "--flash-mode", "dio",
         "--flash-size", "8MB",
