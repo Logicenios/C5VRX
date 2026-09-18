@@ -56,11 +56,26 @@ except Exception as e:
     sys.exit(1)
 
 def reader():
+    is_in_status_line = False
     while True:
         try:
-            line = ser.readline()
-            if line:
-                sys.stdout.write(line.decode("utf-8", errors="replace"))
+            raw = ser.readline()
+            if not raw:
+                continue
+            text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if not text:
+                continue
+
+            # In-place status line for 1 Hz AGC telemetry (no endless scrolling!)
+            if text.startswith("[AGC:"):
+                sys.stdout.write(f"\r{text.ljust(95)}\r")
+                sys.stdout.flush()
+                is_in_status_line = True
+            else:
+                if is_in_status_line:
+                    sys.stdout.write("\n")
+                    is_in_status_line = False
+                sys.stdout.write(text + "\n")
                 sys.stdout.flush()
         except Exception:
             break
