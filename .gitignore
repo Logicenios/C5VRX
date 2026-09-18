@@ -11,3 +11,4 @@ __pycache__/
 *.bsbin
 scratch/
 *_log.txt
+packages/
