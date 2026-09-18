@@ -382,11 +382,11 @@ esp_err_t rf_start(void)
     extern void phy_wifi_fbw_sel(uint32_t val);
     phy_wifi_fbw_sel(1);
 
-    /* Force stable sweet-spot gain (index 32).
-     * Empirical hardware verification: Mode F (Forced Gain 32) eliminates Wi-Fi
-     * AGC hunting and near-field ADC overdrive while providing clean sensitivity. */
+    /* Force high-sensitivity sweet-spot gain (index 52).
+     * Provides sensitive reception of weak carriers out of the box while
+     * active AGC dynamically manages gain tracking and overload protection. */
     extern void phy_force_rx_gain(bool enable, uint8_t gain_idx);
-    phy_force_rx_gain(true, 32);
+    phy_force_rx_gain(true, 52);
 
     /* Disable PHY PLL / RXCAL tracking timer if compiled in, so it never
      * recalibrates RF / RX hardware during continuous analog video reception.
@@ -396,7 +396,7 @@ esp_err_t rf_start(void)
     phy_track_pll_deinit();
 #endif
 
-    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / gain=forced(32) / sta_disconnected_pm=0 / pll_track=disabled",
+    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / gain=forced(52) / sta_disconnected_pm=0 / pll_track=disabled",
                    RF_CHANNEL_NUMBER);
     return ESP_OK;
 }
@@ -407,7 +407,7 @@ extern void phy_set_freq(uint16_t freq_mhz, int offset);
 extern void phy_chip_set_chan_offset(int offset_khz);
 
 static bool s_analog_bw40 = true;
-static uint8_t s_current_gain_val = 32u;
+static uint8_t s_current_gain_val = 52u;
 
 /* Standard FPV Channel Table: 6 Bands x 8 Channels = 48 Channels
  * RaceBand (R), Boscam A (A), Boscam B (B), Boscam E (E), FatShark (F), LowBand (L) */

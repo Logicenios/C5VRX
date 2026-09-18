@@ -393,13 +393,13 @@ typedef enum {
     AFC_MODE_OFF  = 2, /* AFC Off: reset to 0 kHz offset */
 } afc_mode_t;
 
-static volatile analog_agc_mode_t s_agc_mode = ANALOG_AGC_SHADOW;
+static volatile analog_agc_mode_t s_agc_mode = ANALOG_AGC_ACTIVE;
 static volatile agc_state_t s_agc_state = AGC_STATE_SEARCH;
 static volatile bw_gear_mode_t s_bw_gear_mode = BW_GEAR_AUTO;
 static volatile afc_mode_t s_afc_mode = AFC_MODE_AUTO;
 static volatile bool s_current_bw40 = true;
-static volatile uint8_t s_current_gain = 32u;   /* Physical RF gain applied */
-static volatile uint8_t s_shadow_gain = 32u;    /* Controller recommended gain */
+static volatile uint8_t s_current_gain = 52u;   /* Physical RF gain applied */
+static volatile uint8_t s_shadow_gain = 52u;    /* Controller recommended gain */
 static volatile int s_last_p_median = 25;
 static volatile int s_last_q_phase = 0;
 static volatile int s_last_n_clip = 0;
@@ -751,7 +751,7 @@ static void analog_agc_task(void *arg)
     int strong_signal_ticks = 0;
     int afc_ticks = 0;
     int telemetry_ticks = 0;
-    uint8_t target_gain = 32u;
+    uint8_t target_gain = 52u;
     int btn_ticks = 0;
     bool btn_long_fired = false;
     bool was_locked = false;
@@ -896,14 +896,14 @@ static void analog_agc_task(void *arg)
         /* 3. State Machine */
         switch (s_agc_state) {
         case AGC_STATE_SEARCH:
-            /* Carrier detection threshold: phase coherence >= 55% or solid power */
-            if (q_phase >= 55 || (p_median >= 18 && n_origin < 40)) {
+            /* Sensitive carrier detection threshold: coherent phase, power, or origin departure */
+            if (q_phase >= 25 || p_median >= 8 || n_origin < 180) {
                 s_agc_state = AGC_STATE_LEARN;
                 drift_counter = 0;
                 lost_counter = 0;
             } else {
-                /* No carrier / noise: park at baseline sweet spot, do NOT hunt */
-                target_gain = 34u;
+                /* No carrier / noise: park at high-sensitivity listening baseline */
+                target_gain = 52u;
             }
             break;
 
@@ -913,10 +913,9 @@ static void analog_agc_task(void *arg)
                 target_gain = (target_gain > 3) ? (target_gain - 2) : 2;
                 settle_ticks = 1;
             } else if (p_median < 20) {
-                /* If carrier is coherent, climb up to 62.
-                 * If in pure noise (q_phase < 25%), cap gain at 40 to avoid noise confetti! */
-                int max_gain = (q_phase >= 30) ? 62 : 40;
-                int step = (p_median < 12 || n_origin > 60) ? 4 : 2;
+                /* Climb aggressively to target power up to maximum sensitivity 62 */
+                int max_gain = (q_phase >= 20) ? 62 : 54;
+                int step = (p_median < 14 || n_origin > 60) ? 4 : 2;
                 if ((int)target_gain + step <= max_gain) {
                     target_gain += step;
                 } else {
@@ -931,13 +930,19 @@ static void analog_agc_task(void *arg)
                     lost_counter = 0;
                 }
             }
+            /* Edge of range lock: if max gain reached with coherent carrier and low clip */
+            if (n_clip <= 2 && target_gain >= 60 && q_phase >= 25) {
+                s_agc_state = AGC_STATE_TRACK;
+                drift_counter = 0;
+                lost_counter = 0;
+            }
             break;
 
         case AGC_STATE_TRACK:
-            /* Check for carrier loss */
-            if (q_phase < 35 && p_median < 12) {
+            /* Check for carrier loss: 500 ms persistent loss below threshold */
+            if (q_phase < 20 && p_median < 8) {
                 lost_counter++;
-                if (lost_counter >= 8) { /* ~400 ms persistent loss */
+                if (lost_counter >= 10) { /* ~500 ms persistent loss */
                     s_agc_state = AGC_STATE_SEARCH;
                     lost_counter = 0;
                     break;
@@ -946,10 +951,11 @@ static void analog_agc_task(void *arg)
                 lost_counter = 0;
             }
 
-            /* Check for drift outside deadband [18, 32] */
-            if (p_median < 18 || p_median > 32) {
+            /* Check for drift outside deadband [18, 32].
+             * If at maximum gain (62), don't bounce out of track if p_median is low. */
+            if ((p_median < 18 && target_gain < 62) || p_median > 32) {
                 drift_counter++;
-                if (drift_counter >= 3) { /* Drift persisted for 150 ms */
+                if (drift_counter >= 4) { /* Drift persisted for 200 ms */
                     s_agc_state = AGC_STATE_LEARN;
                     drift_counter = 0;
                 }
