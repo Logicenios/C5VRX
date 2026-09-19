@@ -60,19 +60,6 @@ let localFileNameStr = '';
 // Known fallback releases if GitHub API rate-limits
 const FALLBACK_RELEASES = [
   {
-    tag_name: 'main',
-    name: 'C5VRX-3 (Latest main branch)',
-    published_at: '2026-09-19T10:41:19Z',
-    prerelease: false,
-    assets: [
-      { name: 'c5vrx3_merged.bin', size: 1152560, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/c5vrx3_merged.bin' },
-      { name: 'c5vrx3.bin', size: 1087024, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/c5vrx3.bin' },
-      { name: 'bootloader.bin', size: 23232, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/bootloader.bin' },
-      { name: 'partition-table.bin', size: 3072, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/partition-table.bin' },
-      { name: 'flasher_args.json', size: 909, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/flasher_args.json' },
-    ]
-  },
-  {
     tag_name: 'v3.0.0-rc1',
     name: 'C5VRX-3 v3.0.0-rc1: Seamless 16K Phase5 Production Receiver',
     published_at: '2026-09-18T17:01:49Z',
@@ -82,17 +69,10 @@ const FALLBACK_RELEASES = [
       { name: 'bootloader.bin', size: 23232, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/v3.0.0-rc1/bootloader.bin' },
       { name: 'partition-table.bin', size: 3072, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/v3.0.0-rc1/partition-table.bin' },
     ]
-  },
-  {
-    tag_name: 'legacy/v2-final',
-    name: 'C5VRX-2: Research Platform & Multi-Candidate Demodulator',
-    published_at: '2026-09-18T17:01:37Z',
-    prerelease: false,
-    assets: [
-      { name: 'c5vrx2.bin', size: 1205000, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/legacy%2Fv2-final/c5vrx2.bin' }
-    ]
   }
 ];
+
+const VERSION_TAG_PATTERN = /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 // Terminal output helper
 function log(msg, type = 'info') {
@@ -208,49 +188,46 @@ async function fetchReleases() {
     if (!res.ok) throw new Error(`GitHub API HTTP ${res.status}`);
     const data = await res.json();
     if (!Array.isArray(data) || data.length === 0) throw new Error('No releases found');
-    githubReleases = data;
-    log(`Successfully fetched ${githubReleases.length} releases from GitHub.`);
-  } catch (err) {
-    log(`Warning: Failed to fetch online releases (${err.message}). Using cached release index.`);
-    githubReleases = FALLBACK_RELEASES;
-  }
 
-  // Ensure 'main' release is always present and at the top of the list
-  const mainIndex = githubReleases.findIndex(r => (r.tag_name || '').toLowerCase() === 'main');
-  if (mainIndex > 0) {
-    // Move main release to the very front
-    const mainRel = githubReleases.splice(mainIndex, 1)[0];
-    githubReleases.unshift(mainRel);
-  } else if (mainIndex === -1 && FALLBACK_RELEASES.length > 0) {
-    // If not returned by online API, prepend fallback main release
-    githubReleases.unshift(FALLBACK_RELEASES[0]);
+    // Ignore the old mutable "main" release/tag and legacy naming. The web
+    // flasher only consumes immutable semantic-version releases.
+    githubReleases = data
+      .filter(rel => VERSION_TAG_PATTERN.test(rel.tag_name || ''))
+      .sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0));
+
+    if (githubReleases.length === 0) {
+      throw new Error('No semantic-version releases found');
+    }
+
+    log(`Successfully fetched ${githubReleases.length} versioned releases from GitHub.`);
+  } catch (err) {
+    log(`Warning: Failed to fetch versioned releases (${err.message}). Using cached release index.`);
+    githubReleases = FALLBACK_RELEASES;
   }
 
   populateReleaseDropdown();
 }
-
 function populateReleaseDropdown() {
   selectRelease.innerHTML = '';
   githubReleases.forEach((rel, index) => {
     const opt = document.createElement('option');
     opt.value = index;
     const tag = rel.tag_name || rel.name;
-    const isMain = tag.toLowerCase() === 'main';
-    if (isMain) {
-      opt.textContent = `${tag} (Latest main build - Recommended)`;
-    } else if (rel.prerelease) {
-      opt.textContent = `${tag} [Pre-release]`;
+    const isLatest = index === 0;
+
+    if (rel.prerelease) {
+      opt.textContent = `${tag} [Pre-release]${isLatest ? ' (Latest available)' : ''}`;
     } else {
-      opt.textContent = `${tag}`;
+      opt.textContent = `${tag}${isLatest ? ' (Latest - Recommended)' : ''}`;
     }
     selectRelease.appendChild(opt);
   });
+
   if (githubReleases.length > 0) {
     selectRelease.value = 0;
     onReleaseSelected(0);
   }
 }
-
 selectRelease.addEventListener('change', () => {
   const idx = parseInt(selectRelease.value, 10);
   onReleaseSelected(idx);
