@@ -1185,7 +1185,7 @@ static void menu_draw_channel_page(void)
 {
     const fpv_channel_t *ch = rf_get_current_channel();
     char buf[24];
-    menu_draw_page_title("CHANNEL", s_channel_scan_active ? "SCANNING" : "LONG: AUTO SEARCH");
+    menu_draw_page_title("CHANNEL", s_channel_scan_active ? "SCANNING" : "LONG: NEXT / HOLD: SCAN");
 
     menu_ui_rect(100, 22, 108, 23, UI_PANEL_2);
     menu_ui_vline(100, 22, 23, UI_WHITE);
@@ -1512,9 +1512,14 @@ static void handle_button_long_click(void)
             printf("[MENU: BAND] Switched to %s\n", rf_get_band_name(rf_get_current_band()));
             break;
         case 1: /* CHANNEL */
-            channel_auto_search();
-            s_menu_timeout_ticks = 0;
-            return;
+            rf_cycle_channel_in_band();
+            s_cfo_khz = 0;
+            s_agc_state = AGC_STATE_SEARCH;
+            video_standard_detector_reset();
+            settings_save();
+            printf("[MENU: CHANNEL] Switched to %s (%u MHz)\n",
+                   rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz);
+            break;
         case 2: /* RF BANDWIDTH */
             cycle_rf_bandwidth_mode();
             settings_save();
@@ -1571,6 +1576,7 @@ static void analog_agc_task(void *arg)
     uint8_t target_gain = 52u;
     int btn_ticks = 0;
     bool btn_long_fired = false;
+    bool btn_scan_fired = false;
     bool was_locked = false;
     static uint8_t sample_buf[CONTROL_SAMPLE_BYTES];
 
@@ -1603,6 +1609,7 @@ static void analog_agc_task(void *arg)
             boot_grace_ticks--;
             btn_ticks = 0;
             btn_long_fired = false;
+            btn_scan_fired = false;
         } else {
             int btn_level = gpio_get_level(BOOT_BTN_GPIO);
             if (btn_level == 0) {
@@ -1611,11 +1618,17 @@ static void analog_agc_task(void *arg)
                     btn_long_fired = true;
                     handle_button_long_click();
                 }
+                if (btn_ticks >= 40 && s_menu_active && s_menu_cursor == 1 && !btn_scan_fired) {
+                    btn_scan_fired = true;
+                    channel_auto_search();
+                    s_menu_timeout_ticks = 0;
+                }
             } else {
                 if (btn_ticks > 0) {
                     if (!btn_long_fired && btn_ticks >= 2) handle_button_short_click();
                     btn_ticks = 0;
                     btn_long_fired = false;
+                    btn_scan_fired = false;
                 }
             }
         }

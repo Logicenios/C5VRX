@@ -116,7 +116,7 @@ The compact 384x56x3 layout keeps the same modern status/sidebar/page structure
 while adding only about 7.2 KiB over the old menu raster.
 
 The scatter chain still uses one UI segment per displayed scanline, so the DMA
-node count does not grow with glyph complexity. Its capacity is 6,200 nodes to
+node count does not grow with glyph complexity. Its capacity is 6,592 nodes to
 cover the 3x PAL raster. Only `raster.ui` changes while
 the standalone menu is running; timing templates and descriptor links change
 only with TX stopped.

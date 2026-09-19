@@ -19,7 +19,7 @@
 #define MENU_PREFIX_BYTES 448u
 #define MENU_TAIL_BYTES (2560u - MENU_PREFIX_BYTES)
 #define MENU_PHASES 32u
-#define MENU_MAX_NODES 6200u
+#define MENU_MAX_NODES 6592u
 
 typedef enum { VIDEO_STD_NTSC, VIDEO_STD_PAL } video_standard_t;
 
