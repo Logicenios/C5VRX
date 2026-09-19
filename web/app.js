@@ -245,7 +245,7 @@ function onReleaseSelected(index) {
   infoReleaseName.textContent = rel.name || rel.tag_name;
   infoReleaseDate.textContent = rel.published_at ? new Date(rel.published_at).toLocaleDateString() : 'N/A';
   infoReleaseTag.textContent = rel.tag_name;
-  
+
   const assetNames = (rel.assets || []).map(a => a.name).join(', ') || 'No binary assets attached';
   infoReleaseAssets.textContent = assetNames;
 
@@ -262,6 +262,19 @@ function updateFlashButtonState() {
   } else {
     btnFlash.disabled = (localFileBinary === null);
   }
+}
+
+function findApplicationAsset(assets) {
+  // GitHub returns release assets in upload order. Never use the first .bin:
+  // bootloader.bin is commonly uploaded before the application image.
+  return assets.find(asset => /^c5vrx(?:3)?\.bin$/i.test(asset.name || '')) ||
+    assets.find(asset => {
+      const name = (asset.name || '').toLowerCase();
+      return name.endsWith('.bin') &&
+        !name.includes('bootloader') &&
+        !name.includes('partition') &&
+        !name.includes('merged');
+    });
 }
 
 // Connect / Disconnect Handler
@@ -391,27 +404,29 @@ btnFlash.addEventListener('click', async () => {
           // Standard 3-part layout
           const bootloader = assets.find(a => a.name.includes('bootloader'));
           const ptable = assets.find(a => a.name.includes('partition'));
-          const app = assets.find(a => a.name.includes('c5vrx') || a.name.endsWith('.bin'));
-
-          if (!app) throw new Error('Could not find application firmware binary in release assets');
-
-          if (bootloader) {
-            log(`Downloading bootloader (${bootloader.name})...`);
-            const bBuf = await fetchBinary(bootloader.browser_download_url);
-            fileArray.push({ data: new Uint8Array(bBuf), address: 0x2000 });
+          const app = findApplicationAsset(assets);
+          const missing = [
+            !bootloader && 'bootloader',
+            !ptable && 'partition table',
+            !app && 'application firmware',
+          ].filter(Boolean);
+          if (missing.length > 0) {
+            throw new Error(`Incomplete full firmware package: missing ${missing.join(', ')}`);
           }
-          if (ptable) {
-            log(`Downloading partition table (${ptable.name})...`);
-            const pBuf = await fetchBinary(ptable.browser_download_url);
-            fileArray.push({ data: new Uint8Array(pBuf), address: 0x8000 });
-          }
+
+          log(`Downloading bootloader (${bootloader.name})...`);
+          const bBuf = await fetchBinary(bootloader.browser_download_url);
+          fileArray.push({ data: new Uint8Array(bBuf), address: 0x2000 });
+          log(`Downloading partition table (${ptable.name})...`);
+          const pBuf = await fetchBinary(ptable.browser_download_url);
+          fileArray.push({ data: new Uint8Array(pBuf), address: 0x8000 });
           log(`Downloading app binary (${app.name})...`);
           const aBuf = await fetchBinary(app.browser_download_url);
           fileArray.push({ data: new Uint8Array(aBuf), address: 0x10000 });
         }
       } else {
         // App only
-        const app = assets.find(a => a.name.includes('c5vrx') || a.name.endsWith('.bin'));
+        const app = findApplicationAsset(assets);
         if (!app) throw new Error('Could not find application firmware binary in release assets');
         log(`Downloading app binary (${app.name})...`);
         const aBuf = await fetchBinary(app.browser_download_url);

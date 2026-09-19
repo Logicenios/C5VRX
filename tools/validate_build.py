@@ -113,6 +113,19 @@ check("lag events correlate against gain writes",
       "near_gain_event_count" in all_c and
       "s_last_gain_write_us = esp_timer_get_time();" in all_c)
 
+# ---- Web flasher / release safety ----
+web_app = read(ROOT / "web" / "app.js")
+workflow = read(ROOT / ".github" / "workflows" / "build.yml")
+check("web flasher selects the application image explicitly",
+      "findApplicationAsset(assets)" in web_app and
+      "!name.includes('bootloader')" in web_app and
+      "!name.includes('partition')" in web_app and
+      "!name.includes('merged')" in web_app)
+check("full firmware fallback rejects incomplete release assets",
+      "Incomplete full firmware package" in web_app)
+check("release build is gated by architectural validation",
+      "needs: [version, validate]" in workflow)
+
 check("gain transient classifier present",
       "gain_quality_drop_count" in all_c and
       "s_last_gain_drop_transition" in all_c)
