@@ -24,5 +24,6 @@ idf_component_register(
         esp_hw_support
 )
 
-# One BitScrambler program: the proven Phase5 FM demodulator.
+# Proven default plus opt-in experimental 4-bit@80 packer.
 target_bitscrambler_add_src("fm.bsasm")
+target_bitscrambler_add_src("fm4.bsasm")
