@@ -4,15 +4,15 @@
 
 /* Standalone CVBS menu raster at 40 MHz.
  *
- * The modern UI is 400 x 72 logical pixels. Each logical X pixel is expanded
- * to four consecutive DAC samples (100 ns) and each logical Y row is emitted
- * on two consecutive video lines. This gives a ~40 us wide, 144-line-tall UI
+ * The modern UI is 384 x 56 logical pixels. Each logical X pixel is expanded
+ * to three consecutive DAC samples (75 ns) and each logical Y row is emitted
+ * on two consecutive video lines. This gives a ~28.8 us wide, 112-line-tall UI
  * while keeping the DMA chain at one SRAM segment per UI scanline.
  */
 #define MENU_FONT_HEIGHT 8u
-#define MENU_UI_WIDTH 400u
-#define MENU_UI_LINES 72u
-#define MENU_UI_X_REPEAT 4u
+#define MENU_UI_WIDTH 384u
+#define MENU_UI_LINES 56u
+#define MENU_UI_X_REPEAT 3u
 #define MENU_UI_BYTES (MENU_UI_WIDTH * MENU_UI_X_REPEAT)
 
 #define MENU_PREFIX_BYTES 448u
