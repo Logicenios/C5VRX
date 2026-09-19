@@ -72,26 +72,49 @@ stateDiagram-v2
     TRACK --> TRACK: Deadband [18, 32]\nZERO Register Writes (Frozen)
 ```
 
-### 3.1 Fast Overload Safety Rem
-To avoid the "Noise Trap", Fast Attack only fires when:
-$$N_{\text{clip}} \ge 4 \quad \mathbf{AND} \quad P_{\text{median}} > 18$$
-* If $N_{\text{clip}} \ge 16$: instant drop $\Delta G = -6$.
-* If $N_{\text{clip}} \ge 4$: instant drop $\Delta G = -4$.
-* Settle timer: 100 ms debounce before next adjustment.
+### 3.1 Full-descriptor control window
 
-### 3.2 Deadband Lock in `TRACK`
-When $P_{\text{median}} \in [18, 32]$ and $N_{\text{clip}} \le 2$, the receiver is locked in `TRACK`:
-* Exact **zero register writes** to `phy_force_rx_gain()`.
-* Eliminates RF synthesizer phase glitches, AGC pumping, and video flutter.
+The production controller now evaluates one already-completed **4092-byte GDMA descriptor** every 50 ms instead of a 256-byte / 6.4 us peek.
 
-### 3.3 Zero-Stall Buffer Sampling
-* Instead of running cache sync loops at 100 Hz across the full ring, the controller inspects a single 256-byte window at 20 Hz (every 50 ms).
-* Invalidates only 4 cache lines (`esp_cache_msync((void *)s_raw_ring, 256, ESP_CACHE_MSYNC_FLAG_DIR_M2C)`), taking $< 100\text{ ns}$ of CPU time.
-* Eliminates AHB bus contention; `PARLIO TX FIFO empty (udf)` remains strictly **0**.
+At 40 MS/s this represents about **102.3 us of raw Q4/I4**, or roughly 1.6 analog-video lines. The larger coherent window makes `P_median`, phase coherence, clipping and near-origin occupancy far less dependent on one small piece of burst/sync/active video.
 
----
+The control task still touches only about 82 kB/s of ring data on average; the 40 MB/s RX -> BitScrambler -> TX path remains hardware paced.
 
-## 4. Live Empirical Walk-Around Validation
+### 3.2 Fast attack, slow release, quiet transitions
+
+Gain changes are now deliberately rare:
+
+* moderate clipping must persist across two complete descriptors before a normal `-2` gain move;
+* only severe rail occupation can trigger an immediate emergency cut, limited to `-4`;
+* weak-signal gain increases require five consecutive weak/coherence observations and move only `+2`;
+* after every physical gain write the controller holds decisions for 500 ms;
+* the gain-write path emits **no serial printf**, avoiding USB/CPU/bus activity at the exact moment the PHY is changing state;
+* `TRACK` continues to use a wide deadband and performs zero gain-register writes while the signal remains acceptable.
+
+This does not claim `phy_force_rx_gain()` itself is glitch-free. The purpose is to reduce how often C5VRX exposes the downstream CVBS decoder to a PHY gain transient.
+
+### 3.3 SEARCH no longer treats power alone as a carrier
+
+High-gain thermal noise can have significant raw power, so `P_median >= threshold` by itself is no longer sufficient to leave `SEARCH`. A candidate carrier must show meaningful phase coherence.
+
+When no carrier is verified, production does **not** park permanently at maximum gain. After one second without lock it alternates between the normal acquisition point (`G52`) and a max-sensitivity probe (`G62`). Because no usable sync is present during this state, sensitivity can still be probed without continuously amplifying noise at G62.
+
+The exact best acquisition and weak-signal gain indices remain a hardware-characterization task in Issue #27; these values are not claimed to be globally optimal RF/LNA stages.
+
+### 3.4 AUTO PAL / NTSC observation
+
+The same completed descriptor is also used, only when the carrier is clean and gain is settled, for an observation-only video-standard detector.
+
+The detector mirrors the production Phase5 state LUT and a compact mask of Phase5 transitions that produce sync-tip DAC codes. Valid H-sync runs are measured at the 20 MS/s logical CVBS cadence:
+
+* NTSC: about 1271 samples per line;
+* PAL: exactly 1280 samples per line.
+
+Multiple votes with a dead zone between the two periods are required before declaring a standard. The result is cached for menu entry; the realtime BitScrambler is not replaced or interrupted.
+
+## 4. Historical live walk-around baseline
+
+> The log below predates the 4092-byte / slow-transition controller above. It remains useful evidence that adaptive gain can recover weak and overloaded links, but it is **not** hardware validation of the new transition policy. The updated controller still requires a fixed-gain vs ACTIVE vs SHADOW A/B and gain-transition scope capture.
 
 Tested on live Seeed Studio XIAO ESP32-C5 (`COM10`) receiving a 200 mW 5.8 GHz VTX on channel 173 (5865 MHz) with NTSC CVBS output to an analog CRT/LCD monitor.
 
@@ -124,12 +147,18 @@ Tested on live Seeed Studio XIAO ESP32-C5 (`COM10`) receiving a 200 mW 5.8 GHz V
 
 ## 5. Fixed BW40 & Gain Ceiling
 
-### 5.1 Noise Physics & The Gain Ceiling
-Pumping RF gain to the maximum ($G = 62$) during total signal absence amplifies Johnson-Nyquist thermal noise power ($P_N = kTB$) into hard 4-bit ADC clipping ($\pm 7$). Hard clipping transforms smooth Gaussian noise into random square waves, manifesting on an analog video display as harsh black-and-white "confetti" bars and tearing raster lines. Furthermore, maximum gain can reduce robustness in the presence of strong out-of-band interferers.
+### 5.1 Noise physics and acquisition probing
 
-**Adaptive Gain Ceiling Rule:**
-* **Signal Absent / Pure Noise** ($Q_{\text{phase}} < 30\%$): Gain is capped at $G \le 40$, keeping thermal noise inside the useful ADC range.
-* **Carrier Present** ($Q_{\text{phase}} \ge 30\%$): Gain may climb to $G = 62$ for weak-signal reception.
+Pumping RF gain to the maximum during total signal absence can amplify thermal/interference noise into the limited Q4/I4 range, while a high raw amplitude does not prove useful carrier SNR.
+
+Current production therefore separates **carrier acquisition** from **locked gain optimization**:
+
+* `SEARCH` requires phase coherence rather than raw power alone;
+* with no carrier it holds the current state and only probes `G52`/`G62` at one-second intervals;
+* once a coherent carrier exists, `LEARN` moves in small steps;
+* once safely locked, `TRACK` freezes the physical gain until degradation persists.
+
+`G52` and `G62` are currently practical probe points, not a measured final RF gain map. Issue #27 remains responsible for identifying stage boundaries, plateaus, transient-heavy indices and the true weak-signal optimum in dB of input attenuation.
 
 ### 5.2 Why production is fixed to BW40
 A later experiment introduced a runtime BW40/BW20 "gearbox" based on the theoretical noise-power reduction from narrowing bandwidth. That control path is no longer part of production C5VRX.
