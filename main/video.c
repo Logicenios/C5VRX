@@ -637,22 +637,143 @@ static volatile int s_last_origin_permille = 0;
 static volatile uint32_t s_gain_transition_count = 0;
 static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in kHz */
 
-/* Menu text and timing are generated only by the AGC/control task. */
-static void menu_draw_string(int row, int margin, const char *str)
+/* Modern standalone menu renderer.
+ *
+ * This is a real 400x72 logical-pixel CVBS UI. One logical X pixel maps to
+ * four 40 MHz DAC samples and every logical Y row is emitted on two scanlines.
+ * Browser/CSS concepts are intentionally absent: every shade, icon and glyph
+ * below maps directly to the six-bit resistor DAC raster.
+ */
+enum {
+    UI_ROOT = 22,
+    UI_HEADER = 24,
+    UI_PANEL = 26,
+    UI_PANEL_2 = 29,
+    UI_DIVIDER = 33,
+    UI_MUTED = 39,
+    UI_SELECTED = 43,
+    UI_SELECTED_EDGE = 48,
+    UI_STRONG = 54,
+    UI_WHITE = 60,
+};
+
+static const uint8_t s_menu_icons[6][8] = {
+    {0x10,0x38,0x54,0x10,0x10,0x38,0x7c,0x00}, /* band / antenna */
+    {0x7e,0x42,0x5a,0x5a,0x5a,0x42,0x7e,0x00}, /* channel */
+    {0x00,0x40,0x50,0x54,0x55,0x55,0x55,0x00}, /* RF bars */
+    {0x10,0x10,0x54,0x38,0x54,0x10,0x10,0x00}, /* AFC crosshair */
+    {0x7e,0x42,0x42,0x42,0x7e,0x18,0x3c,0x00}, /* video */
+    {0x7c,0x44,0x04,0x1f,0x04,0x44,0x7c,0x00}, /* exit */
+};
+static const char *const s_menu_nav[6] = {
+    "BAND", "CHANNEL", "RF", "AFC", "VIDEO", "EXIT"
+};
+
+static inline void menu_ui_pixel(int x, int y, uint8_t code)
 {
-    (void)margin;
-    if (row < 0 || row >= (int)MENU_ROWS) return;
-    for (unsigned y = 0; y < MENU_FONT_HEIGHT; ++y) {
-        uint8_t *dst = s_menu_raster.text[row * MENU_FONT_HEIGHT + y];
-        memset(dst, 20, MENU_TEXT_BYTES);
-        for (unsigned ch = 0; ch < 31 && str[ch]; ++ch) {
-            unsigned index = (str[ch] >= 32 && str[ch] <= 126) ? str[ch] - 32 : 0;
-            uint8_t bits = s_font8x8[index][y];
-            for (unsigned bit = 0; bit < 8; ++bit) {
-                memset(dst + 32 + ch * 32 + bit * 4,
-                       bits & (0x80u >> bit) ? 60 : 20, 4);
+    if ((unsigned)x >= MENU_UI_WIDTH || (unsigned)y >= MENU_UI_LINES) return;
+    memset(&s_menu_raster.ui[y][x * MENU_UI_X_REPEAT], code, MENU_UI_X_REPEAT);
+}
+
+static void menu_ui_rect(int x, int y, int w, int h, uint8_t code)
+{
+    if (w <= 0 || h <= 0) return;
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = x + w > (int)MENU_UI_WIDTH ? (int)MENU_UI_WIDTH : x + w;
+    int y1 = y + h > (int)MENU_UI_LINES ? (int)MENU_UI_LINES : y + h;
+    if (x1 <= x0 || y1 <= y0) return;
+    for (int yy = y0; yy < y1; ++yy) {
+        memset(&s_menu_raster.ui[yy][x0 * MENU_UI_X_REPEAT],
+               code, (size_t)(x1 - x0) * MENU_UI_X_REPEAT);
+    }
+}
+
+static void menu_ui_hline(int x, int y, int w, uint8_t code)
+{
+    menu_ui_rect(x, y, w, 1, code);
+}
+
+static void menu_ui_vline(int x, int y, int h, uint8_t code)
+{
+    menu_ui_rect(x, y, 1, h, code);
+}
+
+static void menu_ui_glyph(char ch, int x, int y, uint8_t code, unsigned scale)
+{
+    unsigned index = (ch >= 32 && ch <= 126) ? (unsigned)ch - 32u : 0u;
+    if (scale == 0u) scale = 1u;
+    for (unsigned gy = 0; gy < 8u; ++gy) {
+        uint8_t bits = s_font8x8[index][gy];
+        for (unsigned gx = 0; gx < 8u; ++gx) {
+            if (bits & (0x80u >> gx)) {
+                menu_ui_rect(x + (int)(gx * scale), y + (int)(gy * scale),
+                             (int)scale, (int)scale, code);
             }
         }
+    }
+}
+
+static void menu_ui_text(const char *str, int x, int y, uint8_t code)
+{
+    if (!str) return;
+    for (; *str && x < (int)MENU_UI_WIDTH; ++str, x += 8) {
+        menu_ui_glyph(*str, x, y, code, 1u);
+    }
+}
+
+static void menu_ui_text_scaled(const char *str, int x, int y, uint8_t code, unsigned scale)
+{
+    if (!str || scale == 0u) return;
+    int advance = (int)(8u * scale);
+    for (; *str && x < (int)MENU_UI_WIDTH; ++str, x += advance) {
+        menu_ui_glyph(*str, x, y, code, scale);
+    }
+}
+
+static void menu_ui_text_right(const char *str, int right, int y, uint8_t code)
+{
+    size_t n = str ? strlen(str) : 0u;
+    menu_ui_text(str, right - (int)(n * 8u), y, code);
+}
+
+static void menu_ui_icon(unsigned icon, int x, int y, uint8_t code)
+{
+    if (icon >= 6u) return;
+    for (unsigned gy = 0; gy < 8u; ++gy) {
+        uint8_t bits = s_menu_icons[icon][gy];
+        for (unsigned gx = 0; gx < 8u; ++gx) {
+            if (bits & (0x80u >> gx)) menu_ui_pixel(x + (int)gx, y + (int)gy, code);
+        }
+    }
+}
+
+static void menu_ui_value_box(int x, int y, int w, const char *label, const char *value)
+{
+    menu_ui_rect(x, y, w, 12, UI_PANEL_2);
+    menu_ui_hline(x, y, w, UI_DIVIDER);
+    menu_ui_text(label, x + 3, y + 2, UI_MUTED);
+    menu_ui_text_right(value, x + w - 3, y + 2, UI_WHITE);
+}
+
+static void menu_ui_meter(int x, int y, int w, int value, int maximum)
+{
+    if (maximum <= 0) maximum = 1;
+    if (value < 0) value = 0;
+    if (value > maximum) value = maximum;
+    menu_ui_rect(x, y, w, 5, UI_ROOT);
+    menu_ui_rect(x + 1, y + 1, w - 2, 3, UI_PANEL_2);
+    int fill = (w - 2) * value / maximum;
+    if (fill > 0) menu_ui_rect(x + 1, y + 1, fill, 3, UI_STRONG);
+}
+
+static void menu_ui_signal_bars(int x, int y, int quality)
+{
+    int bars = quality <= 0 ? 0 : (quality >= 100 ? 5 : (quality + 19) / 20);
+    for (int i = 0; i < 5; ++i) {
+        int h = 2 + i;
+        menu_ui_rect(x + i * 3, y + 7 - h, 2, h,
+                     i < bars ? UI_WHITE : UI_DIVIDER);
     }
 }
 
@@ -697,50 +818,183 @@ static video_standard_t resolved_menu_standard(void)
     return s_detected_video_std_valid ? s_detected_video_std : s_video_std;
 }
 
-static void menu_render_menu(void)
+static const char *agc_state_name(void)
+{
+    return s_agc_state == AGC_STATE_TRACK ? "TRACK" :
+           s_agc_state == AGC_STATE_LEARN ? "LEARN" : "SEARCH";
+}
+
+static const char *agc_mode_name(void)
+{
+    return s_agc_mode == ANALOG_AGC_ACTIVE ? "AUTO" :
+           s_agc_mode == ANALOG_AGC_SHADOW ? "SHADOW" : "MANUAL";
+}
+
+static const char *afc_mode_name(void)
+{
+    return s_afc_mode == AFC_MODE_AUTO ? "AUTO" :
+           s_afc_mode == AFC_MODE_HOLD ? "HOLD" : "OFF";
+}
+
+static void menu_draw_shell(void)
+{
+    menu_ui_rect(0, 0, MENU_UI_WIDTH, MENU_UI_LINES, UI_PANEL);
+
+    /* Persistent top status bar. */
+    menu_ui_rect(0, 0, MENU_UI_WIDTH, 10, UI_HEADER);
+    menu_ui_hline(0, 9, MENU_UI_WIDTH, UI_DIVIDER);
+    menu_ui_rect(5, 2, 6, 6, UI_WHITE);
+    menu_ui_rect(7, 4, 2, 2, UI_HEADER);
+    menu_ui_text("C5VRX", 16, 1, UI_WHITE);
+
+    const fpv_channel_t *ch = rf_get_current_channel();
+    char buf[24];
+    menu_ui_text(ch->name, 104, 1, UI_WHITE);
+    snprintf(buf, sizeof(buf), "%uM", ch->freq_mhz);
+    menu_ui_text(buf, 136, 1, UI_MUTED);
+    snprintf(buf, sizeof(buf), "G%u", s_current_gain);
+    menu_ui_text(buf, 218, 1, UI_WHITE);
+    menu_ui_text(agc_state_name(), 254, 1, UI_MUTED);
+    menu_ui_signal_bars(337, 1, s_last_q_phase);
+    menu_ui_text(s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC", 357, 1, UI_WHITE);
+
+    /* HDZero-style left navigation rail. */
+    menu_ui_rect(0, 10, 100, MENU_UI_LINES - 10, UI_ROOT);
+    menu_ui_vline(99, 10, MENU_UI_LINES - 10, UI_DIVIDER);
+    for (unsigned i = 0; i < 6u; ++i) {
+        int y = 10 + (int)i * 10;
+        bool selected = (int)i == s_menu_cursor;
+        if (selected) {
+            menu_ui_rect(0, y, 99, 10, UI_SELECTED);
+            menu_ui_rect(0, y, 3, 10, UI_WHITE);
+            menu_ui_hline(3, y, 96, UI_SELECTED_EDGE);
+        }
+        uint8_t ink = selected ? UI_WHITE : UI_MUTED;
+        menu_ui_icon(i, 7, y + 1, ink);
+        menu_ui_text(s_menu_nav[i], 21, y + 1, ink);
+    }
+}
+
+static void menu_draw_page_title(const char *title, const char *tag)
+{
+    menu_ui_text(title, 110, 13, UI_WHITE);
+    if (tag && *tag) menu_ui_text_right(tag, 392, 13, UI_MUTED);
+    menu_ui_hline(110, 22, 282, UI_DIVIDER);
+}
+
+static void menu_draw_band_page(void)
+{
+    char value[24];
+    menu_draw_page_title("RF BAND", "48 CHANNELS");
+    snprintf(value, sizeof(value), "%s", rf_get_band_name(rf_get_current_band()));
+    menu_ui_value_box(110, 28, 132, "ACTIVE", value);
+    snprintf(value, sizeof(value), "%s", rf_get_current_channel()->name);
+    menu_ui_value_box(250, 28, 142, "CHANNEL", value);
+    menu_ui_text("LONG PRESS", 110, 48, UI_MUTED);
+    menu_ui_text("NEXT BAND", 206, 48, UI_WHITE);
+    menu_ui_text("SHORT PRESS MOVES CURSOR", 110, 60, UI_MUTED);
+}
+
+static void menu_draw_channel_page(void)
 {
     const fpv_channel_t *ch = rf_get_current_channel();
-    char buf[40];
+    char buf[24];
+    menu_draw_page_title("CHANNEL", "ANALOG 5.8G");
 
-    snprintf(buf, sizeof(buf), "=== C5VRX-3 MENU (%s) ===",
-             (s_video_std == VIDEO_STD_PAL) ? "PAL" : "NTSC");
-    menu_draw_string(0, 16, buf);
+    menu_ui_rect(110, 27, 112, 25, UI_PANEL_2);
+    menu_ui_vline(110, 27, 25, UI_WHITE);
+    menu_ui_text("ACTIVE", 118, 29, UI_MUTED);
+    menu_ui_text_scaled(ch->name, 118, 37, UI_WHITE, 2u);
 
-    snprintf(buf, sizeof(buf), "%c [1] BAND:   %s",
-             (s_menu_cursor == 0) ? '>' : ' ', rf_get_band_name(rf_get_current_band()));
-    menu_draw_string(1, 16, buf);
+    menu_ui_rect(230, 27, 162, 25, UI_ROOT);
+    menu_ui_text("CENTER", 238, 29, UI_MUTED);
+    snprintf(buf, sizeof(buf), "%u", ch->freq_mhz);
+    menu_ui_text_scaled(buf, 238, 37, UI_WHITE, 2u);
+    menu_ui_text("MHZ", 318, 42, UI_MUTED);
 
-    if (s_last_q_phase >= 40) {
-        snprintf(buf, sizeof(buf), "%c [2] CH:     %s (%uM) [CFO:%+dk]",
-                 (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz, s_cfo_khz);
+    menu_ui_text("SIGNAL", 110, 57, UI_MUTED);
+    menu_ui_meter(166, 58, 104, s_last_q_phase, 100);
+    snprintf(buf, sizeof(buf), "Q%u", (unsigned)(s_last_q_phase < 0 ? 0 : s_last_q_phase));
+    menu_ui_text(buf, 278, 57, UI_WHITE);
+    snprintf(buf, sizeof(buf), "G%u", s_current_gain);
+    menu_ui_text_right(buf, 392, 57, UI_WHITE);
+}
+
+static void menu_draw_rf_page(void)
+{
+    char buf[24];
+    menu_draw_page_title("RF FRONTEND", "FIXED BW40");
+    menu_ui_value_box(110, 28, 132, "BANDWIDTH", "BW40");
+    snprintf(buf, sizeof(buf), "G%u", s_current_gain);
+    menu_ui_value_box(250, 28, 142, "GAIN", buf);
+    menu_ui_value_box(110, 44, 132, "AGC", agc_mode_name());
+    menu_ui_value_box(250, 44, 142, "STATE", agc_state_name());
+    snprintf(buf, sizeof(buf), "P%d", s_last_p_median);
+    menu_ui_text(buf, 110, 61, UI_MUTED);
+    snprintf(buf, sizeof(buf), "Q%d%%", s_last_q_phase);
+    menu_ui_text(buf, 166, 61, UI_WHITE);
+    snprintf(buf, sizeof(buf), "CLIP %d.%d%%",
+             s_last_clip_permille / 10, s_last_clip_permille % 10);
+    menu_ui_text_right(buf, 392, 61, UI_MUTED);
+}
+
+static void menu_draw_afc_page(void)
+{
+    char buf[24];
+    menu_draw_page_title("AFC", "EXPERIMENTAL");
+    menu_ui_value_box(110, 28, 132, "MODE", afc_mode_name());
+    snprintf(buf, sizeof(buf), "%+dK", rf_get_frequency_offset_khz());
+    menu_ui_value_box(250, 28, 142, "OFFSET", buf);
+    snprintf(buf, sizeof(buf), "%+dK", s_cfo_khz);
+    menu_ui_value_box(110, 44, 282, "EST CFO", buf);
+    menu_ui_text("DEFAULT OFF FOR FLIGHT", 110, 61, UI_MUTED);
+}
+
+static void menu_draw_video_page(void)
+{
+    char detected[24];
+    const char *mode = s_video_std_mode == VIDEO_STD_MODE_AUTO ? "AUTO" :
+                       s_video_std_mode == VIDEO_STD_MODE_PAL ? "PAL" : "NTSC";
+    menu_draw_page_title("VIDEO", "CVBS OUTPUT");
+    menu_ui_value_box(110, 28, 132, "MODE", mode);
+    menu_ui_value_box(250, 28, 142, "OUTPUT",
+                      s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC");
+    if (s_detected_video_std_valid) {
+        snprintf(detected, sizeof(detected), "%s %u",
+                 s_detected_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC",
+                 s_last_line_period_20m);
     } else {
-        snprintf(buf, sizeof(buf), "%c [2] CH:     %s (%u MHz)",
-                 (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz);
+        snprintf(detected, sizeof(detected), "SEARCHING");
     }
-    menu_draw_string(2, 16, buf);
+    menu_ui_value_box(110, 44, 282, "DETECTED", detected);
+    menu_ui_text("AUTO PRESERVES LIVE STANDARD", 110, 61, UI_MUTED);
+}
 
-    snprintf(buf, sizeof(buf), "%c [3] RF BW:  BW40 (LOCKED)",
-             (s_menu_cursor == 2) ? '>' : ' ');
-    menu_draw_string(3, 16, buf);
+static void menu_draw_exit_page(void)
+{
+    menu_draw_page_title("SAVE AND EXIT", "");
+    menu_ui_rect(110, 30, 282, 24, UI_PANEL_2);
+    menu_ui_vline(110, 30, 24, UI_WHITE);
+    menu_ui_text("RETURN TO LIVE VIDEO", 126, 34, UI_WHITE);
+    menu_ui_text("LONG PRESS TO EXIT", 126, 44, UI_MUTED);
+    menu_ui_text("12S AUTO EXIT ENABLED", 110, 61, UI_MUTED);
+}
 
-    snprintf(buf, sizeof(buf), "%c [4] AFC:    %s",
-             (s_menu_cursor == 3) ? '>' : ' ',
-             (s_afc_mode == AFC_MODE_AUTO) ? "AUTO EXP (+/-1.5M)" :
-             (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
-    menu_draw_string(4, 16, buf);
+static void menu_render_menu(void)
+{
+    memset(s_menu_raster.ui, UI_ROOT, sizeof(s_menu_raster.ui));
+    menu_draw_shell();
 
-    const char *std_mode = s_video_std_mode == VIDEO_STD_MODE_AUTO ? "AUTO" :
-                           s_video_std_mode == VIDEO_STD_MODE_PAL ? "PAL" : "NTSC";
-    snprintf(buf, sizeof(buf), "%c [5] STD:    %s -> %s",
-             (s_menu_cursor == 4) ? '>' : ' ', std_mode,
-             (s_video_std == VIDEO_STD_PAL) ? "PAL" : "NTSC");
-    menu_draw_string(5, 16, buf);
+    switch (s_menu_cursor) {
+    case 0: menu_draw_band_page(); break;
+    case 1: menu_draw_channel_page(); break;
+    case 2: menu_draw_rf_page(); break;
+    case 3: menu_draw_afc_page(); break;
+    case 4: menu_draw_video_page(); break;
+    default: menu_draw_exit_page(); break;
+    }
 
-    snprintf(buf, sizeof(buf), "%c [6] SAVE & EXIT",
-             (s_menu_cursor == 5) ? '>' : ' ');
-    menu_draw_string(6, 16, buf);
-
-    sync_dma_c2m(s_menu_raster.text, sizeof(s_menu_raster.text));
+    sync_dma_c2m(s_menu_raster.ui, sizeof(s_menu_raster.ui));
 }
 
 static void quiet_tx_interrupts(void)
