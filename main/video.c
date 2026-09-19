@@ -942,16 +942,17 @@ enum {
     UI_WHITE = 60,
 };
 
-static const uint8_t s_menu_icons[6][8] = {
+static const uint8_t s_menu_icons[7][8] = {
     {0x10,0x38,0x54,0x10,0x10,0x38,0x7c,0x00}, /* band / antenna */
     {0x7e,0x42,0x5a,0x5a,0x5a,0x42,0x7e,0x00}, /* channel */
     {0x00,0x40,0x50,0x54,0x55,0x55,0x55,0x00}, /* RF bars */
+    {0x10,0x28,0x44,0x01,0x45,0x28,0x10,0x00}, /* scan */
     {0x10,0x10,0x54,0x38,0x54,0x10,0x10,0x00}, /* AFC crosshair */
     {0x7e,0x42,0x42,0x42,0x7e,0x18,0x3c,0x00}, /* video */
     {0x7c,0x44,0x04,0x1f,0x04,0x44,0x7c,0x00}, /* exit */
 };
-static const char *const s_menu_nav[6] = {
-    "BAND", "CHANNEL", "RF", "AFC", "VIDEO", "EXIT"
+static const char *const s_menu_nav[7] = {
+    "BAND", "CHAN", "SCAN", "RF", "AFC", "VIDEO", "EXIT"
 };
 
 static inline void menu_ui_pixel(int x, int y, uint8_t code)
@@ -1132,136 +1133,101 @@ static void menu_draw_shell(void)
 
     const fpv_channel_t *ch = rf_get_current_channel();
     char buf[24];
-    menu_ui_text(ch->name, 96, 0, UI_WHITE);
+    menu_ui_text(ch->name, 104, 0, UI_WHITE);
     snprintf(buf, sizeof(buf), "%uM", ch->freq_mhz);
-    menu_ui_text(buf, 128, 0, UI_MUTED);
+    menu_ui_text(buf, 136, 0, UI_MUTED);
     snprintf(buf, sizeof(buf), "G%u", s_current_gain);
-    menu_ui_text(buf, 208, 0, UI_WHITE);
-    menu_ui_text(agc_state_name(), 244, 0, UI_MUTED);
-    menu_ui_signal_bars(320, 0, s_signal_strength);
-    menu_ui_text(s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC", 344, 0, UI_WHITE);
+    menu_ui_text(buf, 216, 0, UI_WHITE);
+    menu_ui_text(agc_state_name(), 252, 0, UI_MUTED);
+    menu_ui_signal_bars(360, 0, s_signal_strength);
+    menu_ui_text(s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC", 388, 0, UI_WHITE);
 
-    menu_ui_rect(0, 8, 92, MENU_UI_LINES - 8, UI_ROOT);
-    menu_ui_vline(91, 8, MENU_UI_LINES - 8, UI_DIVIDER);
-    for (unsigned i = 0; i < 6u; ++i) {
-        int y = 8 + (int)i * 8;
+    menu_ui_rect(0, 24, MENU_UI_WIDTH, 8, UI_ROOT);
+    for (unsigned i = 0; i < 7u; ++i) {
+        int x = (int)i * 62;
         bool selected = (int)i == s_menu_cursor;
         if (selected) {
-            menu_ui_rect(0, y, 91, 8, UI_SELECTED);
-            menu_ui_rect(0, y, 3, 8, UI_WHITE);
-            menu_ui_hline(3, y, 88, UI_SELECTED_EDGE);
+            menu_ui_rect(x, 24, 62, 8, UI_SELECTED);
+            menu_ui_hline(x, 24, 62, UI_WHITE);
         }
         uint8_t ink = selected ? UI_WHITE : UI_MUTED;
-        menu_ui_icon(i, 5, y, ink);
-        menu_ui_text(s_menu_nav[i], 18, y, ink);
+        menu_ui_text(s_menu_nav[i], x + 3, 24, ink);
     }
 }
 
 static void menu_draw_page_title(const char *title, const char *tag)
 {
-    menu_ui_text(title, 100, 10, UI_WHITE);
-    if (tag && *tag) menu_ui_text_right(tag, 376, 10, UI_MUTED);
-    menu_ui_hline(100, 19, 276, UI_DIVIDER);
+    menu_ui_text(title, 4, 9, UI_WHITE);
+    if (tag && *tag) menu_ui_text_right(tag, 432, 9, UI_MUTED);
 }
 
 static void menu_draw_band_page(void)
 {
     char value[24];
-    menu_draw_page_title("RF BAND", "48 CHANNELS");
-
-    /* Band names are long enough to collide with the label when both are
-     * right/left aligned inside the old 130 px value box. Give the active band
-     * its own full-width row so every built-in band name remains readable. */
+    menu_draw_page_title("RF BAND", "LONG: NEXT BAND");
     snprintf(value, sizeof(value), "%s", rf_get_band_name(rf_get_current_band()));
-    menu_ui_value_box(100, 22, 276, "ACTIVE BAND", value);
-
-    snprintf(value, sizeof(value), "%s", rf_get_current_channel()->name);
-    menu_ui_value_box(100, 34, 130, "CHANNEL", value);
-    menu_ui_text("LONG: NEXT BAND", 238, 35, UI_WHITE);
-    menu_ui_text("SHORT PRESS MOVES CURSOR", 100, 47, UI_MUTED);
+    menu_ui_text("ACTIVE", 4, 17, UI_MUTED);
+    menu_ui_text(value, 76, 17, UI_WHITE);
 }
 
 static void menu_draw_channel_page(void)
 {
     const fpv_channel_t *ch = rf_get_current_channel();
     char buf[24];
-    menu_draw_page_title("CHANNEL", s_channel_scan_active ? "SCANNING" : "LONG: AUTO SEARCH");
-
-    menu_ui_rect(100, 22, 108, 23, UI_PANEL_2);
-    menu_ui_vline(100, 22, 23, UI_WHITE);
-    menu_ui_text("ACTIVE", 108, 23, UI_MUTED);
-    menu_ui_text_scaled(ch->name, 108, 29, UI_WHITE, 2u);
-
-    menu_ui_rect(216, 22, 160, 23, UI_ROOT);
-    menu_ui_text("CENTER", 224, 23, UI_MUTED);
+    menu_draw_page_title("CHANNEL", "LONG: NEXT CHANNEL");
+    menu_ui_text_scaled(ch->name, 4, 16, UI_WHITE, 1u);
     snprintf(buf, sizeof(buf), "%u", ch->freq_mhz);
-    menu_ui_text_scaled(buf, 224, 29, UI_WHITE, 2u);
-    menu_ui_text("MHZ", 304, 36, UI_MUTED);
+    menu_ui_text(buf, 52, 17, UI_WHITE);
+    menu_ui_text("MHZ", 92, 17, UI_MUTED);
+    menu_ui_meter(140, 18, 180, s_signal_strength, 100);
+    snprintf(buf, sizeof(buf), "SIGNAL %u", (unsigned)s_signal_strength);
+    menu_ui_text_right(buf, 432, 17, UI_WHITE);
+}
 
-    menu_ui_text("SIGNAL", 100, 47, UI_MUTED);
-    menu_ui_meter(156, 48, 100,
+static void menu_draw_scan_page(void)
+{
+    char buf[24];
+    menu_draw_page_title("AUTO SEARCH", s_channel_scan_active ? "SCANNING" : "LONG: START");
+    snprintf(buf, sizeof(buf), s_channel_scan_active ? "PROGRESS %u%%" : "SCAN ALL 48 CHANNELS",
+             s_channel_scan_progress);
+    menu_ui_text(buf, 4, 17, s_channel_scan_active ? UI_WHITE : UI_MUTED);
+    menu_ui_meter(252, 18, 180,
                   s_channel_scan_active ? (int)s_channel_scan_progress : s_signal_strength, 100);
-    snprintf(buf, sizeof(buf), s_channel_scan_active ? "%u%%" : "S%u",
-             s_channel_scan_active ? s_channel_scan_progress : (unsigned)s_signal_strength);
-    menu_ui_text(buf, 264, 47, UI_WHITE);
-    snprintf(buf, sizeof(buf), "G%u", s_current_gain);
-    menu_ui_text_right(buf, 376, 47, UI_WHITE);
 }
 
 static void menu_draw_rf_page(void)
 {
-    char buf[24];
-    menu_draw_page_title("RF FRONTEND",
-                         s_rf_bw_mode == RF_BW_MODE_AUTO ? "AUTO EXPERIMENTAL" : "BANDWIDTH");
-    menu_ui_value_box(100, 22, 130, "MODE", rf_bw_mode_name());
-    menu_ui_value_box(238, 22, 138, "ACTIVE", s_current_bw40 ? "BW40" : "BW20");
-    snprintf(buf, sizeof(buf), "G%u", s_current_gain);
-    menu_ui_value_box(100, 34, 130, "GAIN", buf);
-    menu_ui_value_box(238, 34, 138, "AGC", agc_mode_name());
-    snprintf(buf, sizeof(buf), "P%d  Q%d%%", s_last_p_median, s_last_q_phase);
-    menu_ui_text(buf, 100, 47, UI_MUTED);
-    menu_ui_text_right("LONG: NEXT BW MODE", 376, 47, UI_WHITE);
+    char buf[64];
+    menu_draw_page_title("RF FRONTEND", "LONG: NEXT BW");
+    snprintf(buf, sizeof(buf), "%s  ACTIVE %s  G%u  AGC %s  Q%d%%",
+             rf_bw_mode_name(), s_current_bw40 ? "BW40" : "BW20",
+             s_current_gain, agc_mode_name(), s_last_q_phase);
+    menu_ui_text(buf, 4, 17, UI_WHITE);
 }
 
 static void menu_draw_afc_page(void)
 {
     char buf[24];
-    menu_draw_page_title("AFC", "EXPERIMENTAL");
-    menu_ui_value_box(100, 22, 130, "MODE", afc_mode_name());
+    menu_draw_page_title("AFC", "LONG: NEXT MODE");
     snprintf(buf, sizeof(buf), "%+dK", rf_get_frequency_offset_khz());
-    menu_ui_value_box(238, 22, 138, "OFFSET", buf);
-    snprintf(buf, sizeof(buf), "%+dK", s_cfo_khz);
-    menu_ui_value_box(100, 34, 276, "EST CFO", buf);
-    menu_ui_text("DEFAULT OFF FOR FLIGHT", 100, 47, UI_MUTED);
+    menu_ui_text(afc_mode_name(), 4, 17, UI_WHITE);
+    menu_ui_text("OFFSET", 100, 17, UI_MUTED);
+    menu_ui_text(buf, 164, 17, UI_WHITE);
 }
 
 static void menu_draw_video_page(void)
 {
     char detected[24];
-    menu_draw_page_title("VIDEO OUTPUT",
-                         s_output_mode == VIDEO_OUTPUT_4BIT_80 ? "EXPERIMENTAL" : "DEFAULT");
-    menu_ui_value_box(100, 22, 130, "DAC", output_mode_name());
-    menu_ui_value_box(238, 22, 138, "STANDARD",
-                      s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC");
-    if (s_detected_video_std_valid) {
-        snprintf(detected, sizeof(detected), "%s %u",
-                 s_detected_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC",
-                 s_last_line_period_20m);
-    } else {
-        snprintf(detected, sizeof(detected), "SEARCHING");
-    }
-    menu_ui_value_box(100, 34, 276, "DETECTED", detected);
-    menu_ui_text("LONG: TOGGLE OUTPUT - APPLIES ON EXIT", 100, 47, UI_MUTED);
+    menu_draw_page_title("VIDEO OUTPUT", "LONG: TOGGLE OUTPUT");
+    snprintf(detected, sizeof(detected), "%s  %s",
+             output_mode_name(), s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC");
+    menu_ui_text(detected, 4, 17, UI_WHITE);
 }
 
 static void menu_draw_exit_page(void)
 {
     menu_draw_page_title("SAVE AND EXIT", "");
-    menu_ui_rect(100, 23, 276, 20, UI_PANEL_2);
-    menu_ui_vline(100, 23, 20, UI_WHITE);
-    menu_ui_text("RETURN TO LIVE VIDEO", 116, 25, UI_WHITE);
-    menu_ui_text("LONG PRESS TO EXIT", 116, 34, UI_MUTED);
-    menu_ui_text("12S AUTO EXIT ENABLED", 100, 47, UI_MUTED);
+    menu_ui_text("LONG PRESS TO SAVE AND RETURN TO LIVE VIDEO", 4, 17, UI_WHITE);
 }
 
 static void menu_render_menu(void)
@@ -1272,9 +1238,10 @@ static void menu_render_menu(void)
     switch (s_menu_cursor) {
     case 0: menu_draw_band_page(); break;
     case 1: menu_draw_channel_page(); break;
-    case 2: menu_draw_rf_page(); break;
-    case 3: menu_draw_afc_page(); break;
-    case 4: menu_draw_video_page(); break;
+    case 2: menu_draw_scan_page(); break;
+    case 3: menu_draw_rf_page(); break;
+    case 4: menu_draw_afc_page(); break;
+    case 5: menu_draw_video_page(); break;
     default: menu_draw_exit_page(); break;
     }
 
@@ -1470,7 +1437,7 @@ static void channel_auto_search(void)
 static void handle_button_short_click(void)
 {
     if (s_menu_active) {
-        s_menu_cursor = (s_menu_cursor + 1) % 6;
+        s_menu_cursor = (s_menu_cursor + 1) % 7;
         menu_render_menu();
         s_menu_timeout_ticks = 0;
         printf("[BTN: SHORT] Menu cursor -> %d\n", s_menu_cursor);
@@ -1512,16 +1479,25 @@ static void handle_button_long_click(void)
             printf("[MENU: BAND] Switched to %s\n", rf_get_band_name(rf_get_current_band()));
             break;
         case 1: /* CHANNEL */
+            rf_cycle_channel_in_band();
+            s_cfo_khz = 0;
+            s_agc_state = AGC_STATE_SEARCH;
+            video_standard_detector_reset();
+            settings_save();
+            printf("[MENU: CHANNEL] Switched to %s (%u MHz)\n",
+                   rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz);
+            break;
+        case 2: /* AUTO SEARCH */
             channel_auto_search();
             s_menu_timeout_ticks = 0;
             return;
-        case 2: /* RF BANDWIDTH */
+        case 3: /* RF BANDWIDTH */
             cycle_rf_bandwidth_mode();
             settings_save();
             printf("[MENU: RF BW] Mode -> %s (active %s)\n",
                    rf_bw_mode_name(), s_current_bw40 ? "BW40" : "BW20");
             break;
-        case 3: /* AFC MODE */
+        case 4: /* AFC MODE */
             if (s_afc_mode == AFC_MODE_AUTO) {
                 s_afc_mode = AFC_MODE_HOLD;
             } else if (s_afc_mode == AFC_MODE_HOLD) {
@@ -1533,14 +1509,14 @@ static void handle_button_long_click(void)
             printf("[MENU: AFC] Mode -> %d\n", s_afc_mode);
             settings_save();
             break;
-        case 4: /* VIDEO OUTPUT */
+        case 5: /* VIDEO OUTPUT */
             s_output_mode = s_output_mode == VIDEO_OUTPUT_6BIT_40 ?
                             VIDEO_OUTPUT_4BIT_80 : VIDEO_OUTPUT_6BIT_40;
             printf("[MENU: OUTPUT] -> %s%s\n", output_mode_name(),
                    s_output_mode == VIDEO_OUTPUT_4BIT_80 ? " (EXPERIMENTAL)" : "");
             settings_save();
             break;
-        case 5: /* SAVE & EXIT */
+        case 6: /* SAVE & EXIT */
             settings_save();
             video_set_menu_mode(false);
             printf("[BTN: LONG] Menu Closed -> Live Video!\n");
