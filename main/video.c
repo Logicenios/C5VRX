@@ -755,10 +755,10 @@ static void poll_transport_faults(void)
 
 /* Modern standalone menu renderer.
  *
- * This is a real 400x72 logical-pixel CVBS UI. One logical X pixel maps to
- * four 40 MHz DAC samples and every logical Y row is emitted on two scanlines.
- * Browser/CSS concepts are intentionally absent: every shade, icon and glyph
- * below maps directly to the six-bit resistor DAC raster.
+ * SRAM-safe production raster: 384x56 logical pixels. One logical X pixel
+ * maps to three 40 MHz DAC samples (75 ns), and every logical Y row is emitted
+ * on two scanlines. This preserves the modern HDZero-like layout without the
+ * oversized 400x72x4 backing store that exceeded ESP32-C5 DRAM.
  */
 enum {
     UI_ROOT = 22,
@@ -866,10 +866,10 @@ static void menu_ui_icon(unsigned icon, int x, int y, uint8_t code)
 
 static void menu_ui_value_box(int x, int y, int w, const char *label, const char *value)
 {
-    menu_ui_rect(x, y, w, 12, UI_PANEL_2);
+    menu_ui_rect(x, y, w, 10, UI_PANEL_2);
     menu_ui_hline(x, y, w, UI_DIVIDER);
-    menu_ui_text(label, x + 3, y + 2, UI_MUTED);
-    menu_ui_text_right(value, x + w - 3, y + 2, UI_WHITE);
+    menu_ui_text(label, x + 3, y + 1, UI_MUTED);
+    menu_ui_text_right(value, x + w - 3, y + 1, UI_WHITE);
 }
 
 static void menu_ui_meter(int x, int y, int w, int value, int maximum)
@@ -956,46 +956,43 @@ static void menu_draw_shell(void)
 {
     menu_ui_rect(0, 0, MENU_UI_WIDTH, MENU_UI_LINES, UI_PANEL);
 
-    /* Persistent top status bar. */
-    menu_ui_rect(0, 0, MENU_UI_WIDTH, 10, UI_HEADER);
-    menu_ui_hline(0, 9, MENU_UI_WIDTH, UI_DIVIDER);
-    menu_ui_rect(5, 2, 6, 6, UI_WHITE);
-    menu_ui_rect(7, 4, 2, 2, UI_HEADER);
-    menu_ui_text("C5VRX", 16, 1, UI_WHITE);
+    menu_ui_rect(0, 0, MENU_UI_WIDTH, 8, UI_HEADER);
+    menu_ui_rect(4, 1, 6, 6, UI_WHITE);
+    menu_ui_rect(6, 3, 2, 2, UI_HEADER);
+    menu_ui_text("C5VRX", 14, 0, UI_WHITE);
 
     const fpv_channel_t *ch = rf_get_current_channel();
     char buf[24];
-    menu_ui_text(ch->name, 104, 1, UI_WHITE);
+    menu_ui_text(ch->name, 96, 0, UI_WHITE);
     snprintf(buf, sizeof(buf), "%uM", ch->freq_mhz);
-    menu_ui_text(buf, 136, 1, UI_MUTED);
+    menu_ui_text(buf, 128, 0, UI_MUTED);
     snprintf(buf, sizeof(buf), "G%u", s_current_gain);
-    menu_ui_text(buf, 218, 1, UI_WHITE);
-    menu_ui_text(agc_state_name(), 254, 1, UI_MUTED);
-    menu_ui_signal_bars(337, 1, s_last_q_phase);
-    menu_ui_text(s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC", 357, 1, UI_WHITE);
+    menu_ui_text(buf, 208, 0, UI_WHITE);
+    menu_ui_text(agc_state_name(), 244, 0, UI_MUTED);
+    menu_ui_signal_bars(320, 0, s_last_q_phase);
+    menu_ui_text(s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC", 344, 0, UI_WHITE);
 
-    /* HDZero-style left navigation rail. */
-    menu_ui_rect(0, 10, 100, MENU_UI_LINES - 10, UI_ROOT);
-    menu_ui_vline(99, 10, MENU_UI_LINES - 10, UI_DIVIDER);
+    menu_ui_rect(0, 8, 92, MENU_UI_LINES - 8, UI_ROOT);
+    menu_ui_vline(91, 8, MENU_UI_LINES - 8, UI_DIVIDER);
     for (unsigned i = 0; i < 6u; ++i) {
-        int y = 10 + (int)i * 10;
+        int y = 8 + (int)i * 8;
         bool selected = (int)i == s_menu_cursor;
         if (selected) {
-            menu_ui_rect(0, y, 99, 10, UI_SELECTED);
-            menu_ui_rect(0, y, 3, 10, UI_WHITE);
-            menu_ui_hline(3, y, 96, UI_SELECTED_EDGE);
+            menu_ui_rect(0, y, 91, 8, UI_SELECTED);
+            menu_ui_rect(0, y, 3, 8, UI_WHITE);
+            menu_ui_hline(3, y, 88, UI_SELECTED_EDGE);
         }
         uint8_t ink = selected ? UI_WHITE : UI_MUTED;
-        menu_ui_icon(i, 7, y + 1, ink);
-        menu_ui_text(s_menu_nav[i], 21, y + 1, ink);
+        menu_ui_icon(i, 5, y, ink);
+        menu_ui_text(s_menu_nav[i], 18, y, ink);
     }
 }
 
 static void menu_draw_page_title(const char *title, const char *tag)
 {
-    menu_ui_text(title, 110, 13, UI_WHITE);
-    if (tag && *tag) menu_ui_text_right(tag, 392, 13, UI_MUTED);
-    menu_ui_hline(110, 22, 282, UI_DIVIDER);
+    menu_ui_text(title, 100, 10, UI_WHITE);
+    if (tag && *tag) menu_ui_text_right(tag, 376, 10, UI_MUTED);
+    menu_ui_hline(100, 19, 276, UI_DIVIDER);
 }
 
 static void menu_draw_band_page(void)
@@ -1003,12 +1000,12 @@ static void menu_draw_band_page(void)
     char value[24];
     menu_draw_page_title("RF BAND", "48 CHANNELS");
     snprintf(value, sizeof(value), "%s", rf_get_band_name(rf_get_current_band()));
-    menu_ui_value_box(110, 28, 132, "ACTIVE", value);
+    menu_ui_value_box(100, 23, 130, "ACTIVE", value);
     snprintf(value, sizeof(value), "%s", rf_get_current_channel()->name);
-    menu_ui_value_box(250, 28, 142, "CHANNEL", value);
-    menu_ui_text("LONG PRESS", 110, 48, UI_MUTED);
-    menu_ui_text("NEXT BAND", 206, 48, UI_WHITE);
-    menu_ui_text("SHORT PRESS MOVES CURSOR", 110, 60, UI_MUTED);
+    menu_ui_value_box(238, 23, 138, "CHANNEL", value);
+    menu_ui_text("LONG PRESS", 100, 37, UI_MUTED);
+    menu_ui_text("NEXT BAND", 188, 37, UI_WHITE);
+    menu_ui_text("SHORT PRESS MOVES CURSOR", 100, 47, UI_MUTED);
 }
 
 static void menu_draw_channel_page(void)
@@ -1017,53 +1014,53 @@ static void menu_draw_channel_page(void)
     char buf[24];
     menu_draw_page_title("CHANNEL", "ANALOG 5.8G");
 
-    menu_ui_rect(110, 27, 112, 25, UI_PANEL_2);
-    menu_ui_vline(110, 27, 25, UI_WHITE);
-    menu_ui_text("ACTIVE", 118, 29, UI_MUTED);
-    menu_ui_text_scaled(ch->name, 118, 37, UI_WHITE, 2u);
+    menu_ui_rect(100, 22, 108, 23, UI_PANEL_2);
+    menu_ui_vline(100, 22, 23, UI_WHITE);
+    menu_ui_text("ACTIVE", 108, 23, UI_MUTED);
+    menu_ui_text_scaled(ch->name, 108, 29, UI_WHITE, 2u);
 
-    menu_ui_rect(230, 27, 162, 25, UI_ROOT);
-    menu_ui_text("CENTER", 238, 29, UI_MUTED);
+    menu_ui_rect(216, 22, 160, 23, UI_ROOT);
+    menu_ui_text("CENTER", 224, 23, UI_MUTED);
     snprintf(buf, sizeof(buf), "%u", ch->freq_mhz);
-    menu_ui_text_scaled(buf, 238, 37, UI_WHITE, 2u);
-    menu_ui_text("MHZ", 318, 42, UI_MUTED);
+    menu_ui_text_scaled(buf, 224, 29, UI_WHITE, 2u);
+    menu_ui_text("MHZ", 304, 36, UI_MUTED);
 
-    menu_ui_text("SIGNAL", 110, 57, UI_MUTED);
-    menu_ui_meter(166, 58, 104, s_last_q_phase, 100);
+    menu_ui_text("SIGNAL", 100, 47, UI_MUTED);
+    menu_ui_meter(156, 48, 100, s_last_q_phase, 100);
     snprintf(buf, sizeof(buf), "Q%u", (unsigned)(s_last_q_phase < 0 ? 0 : s_last_q_phase));
-    menu_ui_text(buf, 278, 57, UI_WHITE);
+    menu_ui_text(buf, 264, 47, UI_WHITE);
     snprintf(buf, sizeof(buf), "G%u", s_current_gain);
-    menu_ui_text_right(buf, 392, 57, UI_WHITE);
+    menu_ui_text_right(buf, 376, 47, UI_WHITE);
 }
 
 static void menu_draw_rf_page(void)
 {
     char buf[24];
     menu_draw_page_title("RF FRONTEND", "FIXED BW40");
-    menu_ui_value_box(110, 28, 132, "BANDWIDTH", "BW40");
+    menu_ui_value_box(100, 22, 130, "BANDWIDTH", "BW40");
     snprintf(buf, sizeof(buf), "G%u", s_current_gain);
-    menu_ui_value_box(250, 28, 142, "GAIN", buf);
-    menu_ui_value_box(110, 44, 132, "AGC", agc_mode_name());
-    menu_ui_value_box(250, 44, 142, "STATE", agc_state_name());
+    menu_ui_value_box(238, 22, 138, "GAIN", buf);
+    menu_ui_value_box(100, 34, 130, "AGC", agc_mode_name());
+    menu_ui_value_box(238, 34, 138, "STATE", agc_state_name());
     snprintf(buf, sizeof(buf), "P%d", s_last_p_median);
-    menu_ui_text(buf, 110, 61, UI_MUTED);
+    menu_ui_text(buf, 100, 47, UI_MUTED);
     snprintf(buf, sizeof(buf), "Q%d%%", s_last_q_phase);
-    menu_ui_text(buf, 166, 61, UI_WHITE);
+    menu_ui_text(buf, 156, 47, UI_WHITE);
     snprintf(buf, sizeof(buf), "CLIP %d.%d%%",
              s_last_clip_permille / 10, s_last_clip_permille % 10);
-    menu_ui_text_right(buf, 392, 61, UI_MUTED);
+    menu_ui_text_right(buf, 376, 47, UI_MUTED);
 }
 
 static void menu_draw_afc_page(void)
 {
     char buf[24];
     menu_draw_page_title("AFC", "EXPERIMENTAL");
-    menu_ui_value_box(110, 28, 132, "MODE", afc_mode_name());
+    menu_ui_value_box(100, 22, 130, "MODE", afc_mode_name());
     snprintf(buf, sizeof(buf), "%+dK", rf_get_frequency_offset_khz());
-    menu_ui_value_box(250, 28, 142, "OFFSET", buf);
+    menu_ui_value_box(238, 22, 138, "OFFSET", buf);
     snprintf(buf, sizeof(buf), "%+dK", s_cfo_khz);
-    menu_ui_value_box(110, 44, 282, "EST CFO", buf);
-    menu_ui_text("DEFAULT OFF FOR FLIGHT", 110, 61, UI_MUTED);
+    menu_ui_value_box(100, 34, 276, "EST CFO", buf);
+    menu_ui_text("DEFAULT OFF FOR FLIGHT", 100, 47, UI_MUTED);
 }
 
 static void menu_draw_video_page(void)
@@ -1072,8 +1069,8 @@ static void menu_draw_video_page(void)
     const char *mode = s_video_std_mode == VIDEO_STD_MODE_AUTO ? "AUTO" :
                        s_video_std_mode == VIDEO_STD_MODE_PAL ? "PAL" : "NTSC";
     menu_draw_page_title("VIDEO", "CVBS OUTPUT");
-    menu_ui_value_box(110, 28, 132, "MODE", mode);
-    menu_ui_value_box(250, 28, 142, "OUTPUT",
+    menu_ui_value_box(100, 22, 130, "MODE", mode);
+    menu_ui_value_box(238, 22, 138, "OUTPUT",
                       s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC");
     if (s_detected_video_std_valid) {
         snprintf(detected, sizeof(detected), "%s %u",
@@ -1082,18 +1079,18 @@ static void menu_draw_video_page(void)
     } else {
         snprintf(detected, sizeof(detected), "SEARCHING");
     }
-    menu_ui_value_box(110, 44, 282, "DETECTED", detected);
-    menu_ui_text("AUTO PRESERVES LIVE STANDARD", 110, 61, UI_MUTED);
+    menu_ui_value_box(100, 34, 276, "DETECTED", detected);
+    menu_ui_text("AUTO PRESERVES LIVE STANDARD", 100, 47, UI_MUTED);
 }
 
 static void menu_draw_exit_page(void)
 {
     menu_draw_page_title("SAVE AND EXIT", "");
-    menu_ui_rect(110, 30, 282, 24, UI_PANEL_2);
-    menu_ui_vline(110, 30, 24, UI_WHITE);
-    menu_ui_text("RETURN TO LIVE VIDEO", 126, 34, UI_WHITE);
-    menu_ui_text("LONG PRESS TO EXIT", 126, 44, UI_MUTED);
-    menu_ui_text("12S AUTO EXIT ENABLED", 110, 61, UI_MUTED);
+    menu_ui_rect(100, 23, 276, 20, UI_PANEL_2);
+    menu_ui_vline(100, 23, 20, UI_WHITE);
+    menu_ui_text("RETURN TO LIVE VIDEO", 116, 25, UI_WHITE);
+    menu_ui_text("LONG PRESS TO EXIT", 116, 34, UI_MUTED);
+    menu_ui_text("12S AUTO EXIT ENABLED", 100, 47, UI_MUTED);
 }
 
 static void menu_render_menu(void)
