@@ -23,14 +23,25 @@ Flash your Seeed Studio XIAO ESP32-C5 directly from your browser (Google Chrome,
 
 https://c5vrx.com/
 
-- **Automatic Latest Firmware**: Automatically selects the latest continuous build from the `main` branch.
+- **Automatic Latest Firmware**: Automatically selects the newest immutable semantic-version release.
 - **One-Click Flashing**: Flashes the universal merged production image (`bootloader + partitions + app` at `0x0`) over Web Serial.
-- **Selectable Releases**: Easily choose between latest `main` or previous releases.
+- **Selectable Releases**: Choose between versioned releases such as `v3.0.0`, `v3.0.1`, and newer.
 - **Offline / Local Execution**: You can also run the web flasher locally:
   ```bash
   python tools/open_webflasher.py
   ```
   *(Starts a local HTTP server at `http://localhost:8080/web/index.html` and opens your browser.)*
+
+### Automatic releases and versioning
+
+Every push or merged PR to `main` builds the production firmware and publishes a new immutable GitHub release with a semantic version tag.
+
+- `BREAKING CHANGE` or a conventional-commit `!` creates a **major** bump.
+- `feat:` / `feat(scope):` creates a **minor** bump.
+- `fix:`, `chore:`, `docs:`, and other changes create a **patch** bump.
+- If no stable release exists yet, the current `v3.0.0-rc1` line is promoted to `v3.0.0`.
+- The resolved version is written to `version.txt` before the ESP-IDF build, so the firmware metadata and GitHub release use the same version.
+- Release assets remain attached to their immutable version tag; the old mutable `main` release/tag is retired automatically after the first versioned release succeeds.
 
 ---
 
