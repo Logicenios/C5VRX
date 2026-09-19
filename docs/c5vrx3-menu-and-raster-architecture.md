@@ -43,6 +43,34 @@ already-running RX cannot establish separation. The delay calculation now uses
 204 us, truncated from 204.8 us, plus driver latency; exact physical separation
 still needs measurement.
 
+### Automatic live-standard matching
+
+The menu standard now defaults to `AUTO` instead of blindly starting NTSC.
+
+While live video is healthy and RF gain is settled, the control task observes
+one already-completed 4092-byte RX descriptor. It mirrors the production
+Phase5 state mapping and recognizes only Phase5 transitions that the real
+`fm.bsasm` LUT would emit near sync tip. Valid H-sync runs are then classified
+by their 20 MS/s line period:
+
+- NTSC: approximately 1271 samples per line;
+- PAL: 1280 samples per line.
+
+A single interval cannot switch standards. PAL and NTSC maintain competing
+scores, with a dead zone between their timing windows, and a standard is only
+declared after repeated consistent votes. Gain-settling periods and weak/noisy
+carriers are excluded from voting.
+
+On menu entry, AUTO resolves to the last confidently detected live standard
+before the independent menu raster starts. This avoids deliberately asking the
+goggles/decoder to re-lock PAL -> NTSC or NTSC -> PAL merely because the menu
+opened. Manual NTSC and PAL modes remain available as debug/compatibility
+overrides.
+
+The detector is observation-only; it does not insert a framebuffer, restart
+Phase5, alter the RF bandwidth, or add work to the hardware-paced live sample
+path.
+
 ### Raster timing and memory
 
 Timing reference: [ITU-R BT.470](https://www.itu.int/rec/R-REC-BT.470/en), including
