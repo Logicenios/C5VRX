@@ -116,6 +116,8 @@ check("lag events correlate against gain writes",
 # ---- Web flasher / release safety ----
 web_app = read(ROOT / "web" / "app.js")
 workflow = read(ROOT / ".github" / "workflows" / "build.yml")
+web_workflow = read(ROOT / ".github" / "workflows" / "deploy-web.yml")
+readme = read(ROOT / "README.md")
 check("web flasher selects the application image explicitly",
       "findApplicationAsset(assets)" in web_app and
       "!name.includes('bootloader')" in web_app and
@@ -125,6 +127,17 @@ check("full firmware fallback rejects incomplete release assets",
       "Incomplete full firmware package" in web_app)
 check("release build is gated by architectural validation",
       "needs: [version, validate]" in workflow)
+check("firmware CI does not create Pages deployments",
+      "actions/deploy-pages" not in workflow and
+      "Deploy Web Flasher to GitHub Pages" not in workflow)
+check("web deployment is isolated and path-filtered",
+      'paths:' in web_workflow and
+      '"web/**"' in web_workflow and
+      "workflow_dispatch:" in web_workflow and
+      "actions/deploy-pages@v4" in web_workflow)
+check("README uses canonical production flasher URL",
+      readme.count("https://c5vrx.com/") >= 3 and
+      "GitHub Pages mirror" in readme)
 
 check("gain transient classifier present",
       "gain_quality_drop_count" in all_c and

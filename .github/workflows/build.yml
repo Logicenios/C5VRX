@@ -231,30 +231,3 @@ jobs:
           if gh release view main --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release delete main --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag
           fi
-
-  deploy-pages:
-    name: Deploy Web Flasher to GitHub Pages
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload Pages Artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: web/
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4

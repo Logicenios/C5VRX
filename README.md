@@ -5,7 +5,7 @@
   <p>From live RF to real-time analog NTSC composite video with one Seeed Studio XIAO ESP32-C5 and a passive resistor DAC.</p>
 
   <p>
-    <a href="https://twotoz.github.io/C5VRX/"><img src="https://img.shields.io/badge/Web%20Flasher-Online-1f6feb?style=flat" alt="Web Flasher" /></a>
+    <a href="https://c5vrx.com/"><img src="https://img.shields.io/badge/Web%20Flasher-Online-1f6feb?style=flat" alt="Web Flasher" /></a>
     <img src="https://img.shields.io/badge/status-production%20proven-success" alt="Production proven" />
     <img src="https://img.shields.io/badge/chip-ESP32--C5-111111" alt="ESP32-C5" />
     <img src="https://img.shields.io/badge/RF-5.8%20GHz%20(48%20channels)-6f42c1" alt="5.8 GHz" />
@@ -21,7 +21,11 @@
 
 Flash your Seeed Studio XIAO ESP32-C5 directly from your browser (Google Chrome, Microsoft Edge, Brave, Opera) with zero installation required:
 
-https://c5vrx.com/
+**[Open the C5VRX Web Flasher](https://c5vrx.com/)**
+
+`c5vrx.com` is the canonical production flasher. A static
+[GitHub Pages mirror](https://twotoz.github.io/C5VRX/) is available as a
+fallback.
 
 - **Automatic Latest Firmware**: Automatically selects the newest immutable semantic-version release.
 - **One-Click Flashing**: Flashes the universal merged production image (`bootloader + partitions + app` at `0x0`) over Web Serial.
@@ -42,6 +46,17 @@ Every push or merged PR to `main` builds the production firmware and publishes a
 - If no stable release exists yet, the current `v3.0.0-rc1` line is promoted to `v3.0.0`.
 - The resolved version is written to `version.txt` before the ESP-IDF build, so the firmware metadata and GitHub release use the same version.
 - Release assets remain attached to their immutable version tag; the old mutable `main` release/tag is retired automatically after the first versioned release succeeds.
+
+### Website deployment
+
+Firmware releases and website deployment are intentionally separate:
+
+- `.github/workflows/build.yml` validates and builds firmware, then publishes a versioned release after a successful push to `main`.
+- `.github/workflows/deploy-web.yml` deploys only the static `web/` directory to the GitHub Pages mirror, and runs only when the web flasher itself changes (or when started manually).
+- Normal firmware and documentation commits therefore do not create unnecessary website deployments. The flasher discovers new versioned firmware releases dynamically through the GitHub API.
+
+Production hosting for `c5vrx.com` is managed separately; the GitHub Actions
+deployment controls only the `twotoz.github.io/C5VRX` mirror.
 
 ---
 
@@ -191,7 +206,7 @@ Before flashing, run the built-in validator to ensure zero DMA/BitScrambler cons
 ```bash
 python tools/validate_build.py
 ```
-*(All 31 architectural checks must pass.)*
+*(All architectural checks must pass.)*
 
 ---
 
@@ -199,7 +214,9 @@ python tools/validate_build.py
 
 #### Option A: Web Flasher (Zero-Install In-Browser Flasher)
 Launch the web flasher directly in your browser (Google Chrome, Microsoft Edge, Brave):
-**[Open C5VRX Web Flasher](https://twotoz.github.io/C5VRX/)**
+**[Open C5VRX Web Flasher](https://c5vrx.com/)**
+
+[GitHub Pages mirror](https://twotoz.github.io/C5VRX/)
 
 #### Option B: Zero-Friction Auto-Flash (Python Watcher)
 Run the auto-flash watcher:
@@ -226,7 +243,7 @@ Launch the dedicated low-latency serial monitor:
 ```bash
 python tools/monitor.py COM10
 ```
-Use the interactive hotkeys (`c` to cycle channels, `+`/`-` for manual gain, `b` for bandwidth gearbox, `a` for active AGC, `d` for hardware diagnostics).
+Use the interactive hotkeys (`c` to cycle channels, `+`/`-` for manual gain, `a` for active AGC, `d` for hardware diagnostics).
 
 ---
 
