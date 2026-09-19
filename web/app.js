@@ -60,6 +60,19 @@ let localFileNameStr = '';
 // Known fallback releases if GitHub API rate-limits
 const FALLBACK_RELEASES = [
   {
+    tag_name: 'main',
+    name: 'C5VRX-3 (Latest main branch)',
+    published_at: '2026-09-19T10:41:19Z',
+    prerelease: false,
+    assets: [
+      { name: 'c5vrx3_merged.bin', size: 1152560, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/c5vrx3_merged.bin' },
+      { name: 'c5vrx3.bin', size: 1087024, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/c5vrx3.bin' },
+      { name: 'bootloader.bin', size: 23232, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/bootloader.bin' },
+      { name: 'partition-table.bin', size: 3072, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/partition-table.bin' },
+      { name: 'flasher_args.json', size: 909, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/flasher_args.json' },
+    ]
+  },
+  {
     tag_name: 'v3.0.0-rc1',
     name: 'C5VRX-3 v3.0.0-rc1: Seamless 16K Phase5 Production Receiver',
     published_at: '2026-09-18T17:01:49Z',
@@ -213,6 +226,18 @@ async function fetchReleases() {
     log(`Warning: Failed to fetch online releases (${err.message}). Using cached release index.`);
     githubReleases = FALLBACK_RELEASES;
   }
+
+  // Ensure 'main' release is always present and at the top of the list
+  const mainIndex = githubReleases.findIndex(r => (r.tag_name || '').toLowerCase() === 'main');
+  if (mainIndex > 0) {
+    // Move main release to the very front
+    const mainRel = githubReleases.splice(mainIndex, 1)[0];
+    githubReleases.unshift(mainRel);
+  } else if (mainIndex === -1 && FALLBACK_RELEASES.length > 0) {
+    // If not returned by online API, prepend fallback main release
+    githubReleases.unshift(FALLBACK_RELEASES[0]);
+  }
+
   populateReleaseDropdown();
 }
 
@@ -221,12 +246,19 @@ function populateReleaseDropdown() {
   githubReleases.forEach((rel, index) => {
     const opt = document.createElement('option');
     opt.value = index;
-    const isLatest = index === 0;
     const tag = rel.tag_name || rel.name;
-    opt.textContent = `${tag}${rel.prerelease ? ' [Pre-release]' : ''}${isLatest ? ' (Latest)' : ''}`;
+    const isMain = tag.toLowerCase() === 'main';
+    if (isMain) {
+      opt.textContent = `${tag} (Latest main build - Recommended)`;
+    } else if (rel.prerelease) {
+      opt.textContent = `${tag} [Pre-release]`;
+    } else {
+      opt.textContent = `${tag}`;
+    }
     selectRelease.appendChild(opt);
   });
   if (githubReleases.length > 0) {
+    selectRelease.value = 0;
     onReleaseSelected(0);
   }
 }
