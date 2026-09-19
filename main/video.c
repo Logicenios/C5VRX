@@ -870,9 +870,8 @@ static void analog_agc_task(void *arg)
                 drift_counter = 0;
                 lost_counter = 0;
             } else {
-                /* No verified carrier: stay at maximum receive gain. This also
-                 * allows the BW gearbox to enter BW20 while searching, so a
-                 * carrier that is only recoverable in the narrow mode can be acquired. */
+                /* No verified carrier: stay at maximum receive gain while
+                 * keeping the RF bandwidth fixed at BW40. */
                 target_gain = 62u;
             }
             break;
