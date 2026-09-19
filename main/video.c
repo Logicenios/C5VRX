@@ -1009,8 +1009,7 @@ static void menu_draw_band_page(void)
 
     snprintf(value, sizeof(value), "%s", rf_get_current_channel()->name);
     menu_ui_value_box(100, 34, 130, "CHANNEL", value);
-    menu_ui_text("LONG PRESS", 238, 35, UI_MUTED);
-    menu_ui_text("NEXT BAND", 238, 43, UI_WHITE);
+    menu_ui_text("LONG: NEXT BAND", 238, 35, UI_WHITE);
     menu_ui_text("SHORT PRESS MOVES CURSOR", 100, 47, UI_MUTED);
 }
 
