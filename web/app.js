@@ -127,18 +127,6 @@ function checkSerialSupport() {
   return true;
 }
 
-// Convert ArrayBuffer to binary string required by esptool-js
-function bufferToBinaryString(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  const len = bytes.byteLength;
-  const chunkSize = 8192;
-  for (let i = 0; i < len; i += chunkSize) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunkSize, len)));
-  }
-  return binary;
-}
-
 // Tab Switching
 tabGithub.addEventListener('click', () => {
   activeSource = 'github';
@@ -421,7 +409,7 @@ btnFlash.addEventListener('click', async () => {
         if (mergedAsset) {
           log(`Downloading ${mergedAsset.name}...`);
           const buf = await fetchBinary(mergedAsset.browser_download_url);
-          fileArray.push({ data: bufferToBinaryString(buf), address: 0x0 });
+          fileArray.push({ data: new Uint8Array(buf), address: 0x0 });
         } else {
           // Standard 3-part layout
           const bootloader = assets.find(a => a.name.includes('bootloader'));
@@ -433,16 +421,16 @@ btnFlash.addEventListener('click', async () => {
           if (bootloader) {
             log(`Downloading bootloader (${bootloader.name})...`);
             const bBuf = await fetchBinary(bootloader.browser_download_url);
-            fileArray.push({ data: bufferToBinaryString(bBuf), address: 0x2000 });
+            fileArray.push({ data: new Uint8Array(bBuf), address: 0x2000 });
           }
           if (ptable) {
             log(`Downloading partition table (${ptable.name})...`);
             const pBuf = await fetchBinary(ptable.browser_download_url);
-            fileArray.push({ data: bufferToBinaryString(pBuf), address: 0x8000 });
+            fileArray.push({ data: new Uint8Array(pBuf), address: 0x8000 });
           }
           log(`Downloading app binary (${app.name})...`);
           const aBuf = await fetchBinary(app.browser_download_url);
-          fileArray.push({ data: bufferToBinaryString(aBuf), address: 0x10000 });
+          fileArray.push({ data: new Uint8Array(aBuf), address: 0x10000 });
         }
       } else {
         // App only
@@ -450,7 +438,7 @@ btnFlash.addEventListener('click', async () => {
         if (!app) throw new Error('Could not find application firmware binary in release assets');
         log(`Downloading app binary (${app.name})...`);
         const aBuf = await fetchBinary(app.browser_download_url);
-        fileArray.push({ data: bufferToBinaryString(aBuf), address: 0x10000 });
+        fileArray.push({ data: new Uint8Array(aBuf), address: 0x10000 });
       }
     } else {
       // Local File
@@ -458,7 +446,7 @@ btnFlash.addEventListener('click', async () => {
       let offset = parseInt(inputFlashOffset.value.trim(), 16);
       if (isNaN(offset)) offset = 0x0;
       fileArray.push({
-        data: bufferToBinaryString(localFileBinary),
+        data: new Uint8Array(localFileBinary),
         address: offset
       });
     }
@@ -476,7 +464,8 @@ btnFlash.addEventListener('click', async () => {
       flashMode: 'dio',
       flashFreq: '80m',
       eraseAll: chkEraseAll.checked,
-      compress: true,
+      // ESP32-C5 native USB-Serial/JTAG can fail mid-write in the compressed path (status 201,0).
+      compress: false,
       reportProgress: (fileIndex, written, total) => {
         const percent = Math.floor((written / total) * 100);
         progressBar.style.width = `${percent}%`;
