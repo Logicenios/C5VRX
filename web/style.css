@@ -4,14 +4,15 @@
   --bg-card-header: #1f242e;
   --bg-input: #0d1015;
   --border-color: #2a303c;
-  --border-focus: #ffb400;
+  --border-focus: #388bfd;
   
   --text-main: #e6edf3;
   --text-muted: #8b949e;
   --text-highlight: #ffffff;
   
-  --accent-gold: #ffb400;
-  --accent-gold-hover: #e5a100;
+  --accent-blue: #1f6feb;
+  --accent-blue-hover: #388bfd;
+  --accent-blue-light: #58a6ff;
   --accent-danger: #cf222e;
   --accent-success: #2da44e;
   
@@ -96,13 +97,14 @@ body {
 }
 
 .btn-primary {
-  background-color: var(--accent-gold);
-  color: #11141a;
-  border: 1px solid #d99b00;
+  background-color: var(--accent-blue);
+  color: #ffffff;
+  border: 1px solid #1158c7;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background-color: var(--accent-gold-hover);
+  background-color: var(--accent-blue-hover);
+  border-color: #388bfd;
 }
 
 .btn-secondary {
@@ -161,9 +163,9 @@ body {
   font-weight: 600;
   padding: 2px 6px;
   border-radius: 3px;
-  background-color: #21262d;
-  color: var(--accent-gold);
-  border: 1px solid var(--border-color);
+  background-color: #162032;
+  color: var(--accent-blue-light);
+  border: 1px solid #1f3a60;
 }
 
 .badge-secondary {
@@ -350,7 +352,7 @@ body {
 }
 
 .dropzone:hover, .dropzone.dragover {
-  border-color: var(--accent-gold);
+  border-color: var(--accent-blue-light);
 }
 
 .file-input {
@@ -410,14 +412,14 @@ body {
 /* Guide Box */
 .guide-box {
   background-color: #14171d;
-  border-left: 3px solid var(--accent-gold);
+  border-left: 3px solid var(--accent-blue);
   border-radius: 0 3px 3px 0;
   padding: 8px 12px;
   font-size: 0.8rem;
 }
 
 .guide-box h4 {
-  color: var(--accent-gold);
+  color: var(--accent-blue-light);
   margin-bottom: 4px;
   font-size: 0.8125rem;
 }
@@ -455,7 +457,7 @@ body {
 
 .progress-bar {
   height: 100%;
-  background-color: var(--accent-gold);
+  background-color: var(--accent-blue);
   transition: width 0.1s ease;
 }
 
