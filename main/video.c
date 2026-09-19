@@ -582,23 +582,24 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
 }
 
 /* =========================================================================
- * Receiver Modes, Dual-Loop AGC, Fixed BW40, and AFC State
+ * Receiver Modes, Slow-Transition AGC, Fixed BW40, and AFC State
  *
- * Direct Q4/I4 vector power: P[n] = I[n]^2 + Q[n]^2
- * Target: P_median in [20, 30] (effective radius ~4.5 - 5.5, phase sigma ~3.3 deg)
+ * Control metrics come from one complete 4092-byte finished RX descriptor
+ * (~102.3 us of Q4/I4) every 50 ms.  TRACK performs zero gain writes.
  *
- * Fast Overload Rem: Instant drop (-4 or -6) when n_clip >= 4 AND P_median > 18.
- * FM Phase Coherence: Q_phase = count(P >= 8 && dot > 0 && |cross| <= dot) * 100 / 255.
+ * SEARCH requires phase coherence; power alone is not accepted as a carrier.
+ * With no lock it slowly probes G52/G62 instead of parking at maximum gain.
+ * LEARN uses +2/-2 normal steps with persistence.  Only severe clipping may
+ * issue a bounded -4 emergency cut.  Every physical gain write is followed by
+ * a 500 ms decision hold and deliberately emits no serial output.
  *
- * 3-State Machine:
- *   - SEARCH: No carrier / lost carrier (q_phase < 40%, P_med < 14). Default G=32.
- *   - LEARN:  Probing & centering toward P_median in [20, 30].
- *   - TRACK:  Carrier locked! Hysteresis deadband [18, 32]. ZERO register writes.
+ * The same settled descriptor can vote PAL/NTSC line period for AUTO menu
+ * matching; this observation never replaces or stalls the live Phase5 path.
  *
  * Modes:
- *   - ANALOG_AGC_SHADOW: Realtime state machine & Q_phase active, physical gain frozen.
- *   - ANALOG_AGC_ACTIVE: Default! Actively updates physical RF gain registers.
- *   - ANALOG_AGC_MANUAL: Fixed gain controlled by user (+ / - keys).
+ *   - ANALOG_AGC_SHADOW: realtime state machine, physical gain frozen.
+ *   - ANALOG_AGC_ACTIVE: default production controller.
+ *   - ANALOG_AGC_MANUAL: fixed gain controlled by user (+ / - keys).
  * ========================================================================= */
 
 typedef enum {
