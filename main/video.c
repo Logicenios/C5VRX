@@ -1000,12 +1000,17 @@ static void menu_draw_band_page(void)
 {
     char value[24];
     menu_draw_page_title("RF BAND", "48 CHANNELS");
+
+    /* Band names are long enough to collide with the label when both are
+     * right/left aligned inside the old 130 px value box. Give the active band
+     * its own full-width row so every built-in band name remains readable. */
     snprintf(value, sizeof(value), "%s", rf_get_band_name(rf_get_current_band()));
-    menu_ui_value_box(100, 23, 130, "ACTIVE", value);
+    menu_ui_value_box(100, 22, 276, "ACTIVE BAND", value);
+
     snprintf(value, sizeof(value), "%s", rf_get_current_channel()->name);
-    menu_ui_value_box(238, 23, 138, "CHANNEL", value);
-    menu_ui_text("LONG PRESS", 100, 37, UI_MUTED);
-    menu_ui_text("NEXT BAND", 188, 37, UI_WHITE);
+    menu_ui_value_box(100, 34, 130, "CHANNEL", value);
+    menu_ui_text("LONG PRESS", 238, 35, UI_MUTED);
+    menu_ui_text("NEXT BAND", 238, 43, UI_WHITE);
     menu_ui_text("SHORT PRESS MOVES CURSOR", 100, 47, UI_MUTED);
 }
 
