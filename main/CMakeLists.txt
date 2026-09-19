@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "rf.c"
         "video.c"
+        "menu_raster.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_wifi
@@ -12,6 +13,8 @@ idf_component_register(
         esp_driver_parlio
         esp_driver_gpio
         esp_driver_bitscrambler
+        esp_driver_usb_serial_jtag
+        vfs
         esp_rom
         esp_mm
         esp_timer

@@ -24,19 +24,24 @@
  *   BS EOF:         downstream (PARLIO TX loop never generates downstream EOF)
  *   BS tail:        0 bytes
  *
- * After video_start() the CPU has nothing to do. No periodic tasks or timers.
+ * DMA owns sample pacing; tasks handle AGC, buttons and console commands.
  */
 
 #include "video.h"
 #include "rf.h"
-#include "osd_font.h"
+#include "menu_font.h"
+#include "menu_raster.h"
+#include "hal/parlio_ll.h"
+#include "hal/usb_serial_jtag_ll.h"
 
 #include <stdint.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
+#include "driver/usb_serial_jtag_vfs.h"
 #include "driver/bitscrambler.h"
 #include "driver/gpio.h"
-#include "driver/parlio_bitscrambler.h"
 #include "driver/parlio_rx.h"
 #include "driver/parlio_tx.h"
 #include "esp_attr.h"
@@ -45,6 +50,7 @@
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "soc/parl_io_struct.h"
 #include "soc/bitscrambler_struct.h"
@@ -73,57 +79,13 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 #define IQ_RATE_HZ       40000000u   /* MODEM_DIAG / PARLIO RX clock */
 #define DAC_RATE_HZ      40000000u   /* PARLIO TX clock ([D,D] = 20 MS/s unique) */
 #define RAW_RING_BYTES   16384u      /* 16384 byte cyclic ring (16 KiB Seamless Golden) */
-#define DAC_IDLE_CODE    20u         /* Pedestal 20 (sync tip level) */
+#define DAC_IDLE_CODE    20u         /* Black/blanking pedestal; sync is 0 */
 #define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
-#define OSD_BOOT_BTN_ENABLE_DEFAULT  0 /* 0 = Disabled by default (Safe Flight Mode) */
 
-/* NTSC 240p Composite Video Synthesized OSD Engine (60.012 Hz, 1272 words/line) */
-#define NTSC_LINE_WORDS   1272u
-#define NTSC_LINE_BYTES   (NTSC_LINE_WORDS * 2u) /* 2544 bytes @ 40 MS/s DAC clock */
-#define NTSC_TOTAL_LINES  262u
-#define OSD_MENU_ROWS     7u
-#define OSD_FONT_HEIGHT   8u
-#define OSD_ACTIVE_LINES  (OSD_MENU_ROWS * OSD_FONT_HEIGHT) /* 56 scanlines */
 
-/* Synthesized IQ cycles for the embedded Phase5 LUT.
- *
- * Phase5 has 32 uniform polar phase bins (0..31) and a 50 ns discriminator.
- * For any 4-sample repeating pattern, the sum of phase deltas mod 32 must be 0
- * to guarantee zero phase drift across pixels, scanlines, and DMA frames:
- *
- *   BLACK: Phase delta 0  (P0 -> P0 -> P0 -> P0 -> P0)
- *          Byte 0x50 repeated: exact DAC [20, 20, 20, 20] (0.33V Pedestal/Blanking)
- *   SYNC:  Phase delta -8 (P0 -> P24 -> P16 -> P8 -> P0)
- *          Bytes {0x08, 0x80, 0x05, 0x50}: exact DAC [0, 0, 0, 0] (0.0V Sync Tip)
- *   WHITE: Phase delta +8 (P0 -> P8 -> P16 -> P24 -> P0)
- *          Bytes {0x05, 0x80, 0x08, 0x50}: exact DAC [63, 63, 63, 63] (1.0V Peak White)
- *
- * Every segment and font pixel is an exact multiple of 4 words, guaranteeing
- * that all transitions close on Phase 0 without transient glitch spikes.
- */
-static const uint8_t s_black_iq[4] = {0x50u, 0x50u, 0x50u, 0x50u};
-static const uint8_t s_sync_iq[4]  = {0x08u, 0x80u, 0x05u, 0x50u};
-static const uint8_t s_white_iq[4] = {0x05u, 0x80u, 0x08u, 0x50u};
-
-static inline uint16_t iq_word(uint8_t b)
-{
-    return (uint16_t)(((uint16_t)b << 8) | b);
-}
-
-static inline uint16_t get_black_word(int idx)
-{
-    return iq_word(s_black_iq[idx & 3]);
-}
-
-static inline uint16_t get_sync_word(int idx)
-{
-    return iq_word(s_sync_iq[idx & 3]);
-}
-
-static inline uint16_t get_white_word(int idx)
-{
-    return iq_word(s_white_iq[idx & 3]);
-}
+static volatile video_standard_t s_video_std = VIDEO_STD_NTSC;
+static QueueHandle_t s_menu_commands;
+static bitscrambler_handle_t s_flight_bs;
 
 /* Cache synchronization helpers for DMA buffers and descriptors on ESP32-C5.
  * Aligns address down and size up to 64-byte cache line boundaries so esp_cache_msync
@@ -146,18 +108,15 @@ static inline void sync_dma_m2c(const void *addr, size_t size)
                           ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 }
 
-/* Static NTSC CVBS scanline buffers & 262-node DMA descriptor chain in HP SRAM */
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_blank_line[NTSC_LINE_BYTES];
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_vsync_line[NTSC_LINE_BYTES];
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_eq_line[NTSC_LINE_BYTES];
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_osd_lines[OSD_ACTIVE_LINES][NTSC_LINE_BYTES];
-static DMA_ATTR __attribute__((aligned(64))) dma_descriptor_t s_osd_dma_nodes[NTSC_TOTAL_LINES];
-
-/* OSD State */
-static volatile bool s_menu_active = false;
-static volatile bool s_osd_boot_btn_enabled = (OSD_BOOT_BTN_ENABLE_DEFAULT != 0);
-static volatile int s_menu_cursor = 0;
-static int s_menu_timeout_ticks = 0;
+/* Timing and descriptors are immutable while running; only text pixels change.
+ * This raster is never linked to the RF ring. */
+static DMA_ATTR __attribute__((aligned(64))) menu_raster_t s_menu_raster;
+static DMA_ATTR __attribute__((aligned(64))) dma_descriptor_t s_menu_nodes[MENU_MAX_NODES];
+static unsigned s_menu_node_count;
+static volatile bool s_menu_active;
+static volatile bool s_menu_boot_btn_enabled = true;
+static volatile int s_menu_cursor;
+static int s_menu_timeout_ticks;
 
 /* TX GPIO mapping: 6-bit resistor DAC.
  * Order: DAC bit 0 (LSB) .. DAC bit 5 (MSB) on data_gpio_nums[0..5].
@@ -232,7 +191,7 @@ static esp_err_t prepare_tx(void)
 {
     /* Proven PARLIO TX config from Seamless Golden 16K reference.
      * 8-bit data width, 40 MHz output, NEG shift edge, LSB packing.
-     * BitScrambler decorated on the TX unit (not RX -- C5 has one BS). */
+     * The explicitly owned BitScrambler attaches to TX (C5 has one BS). */
     const parlio_tx_unit_config_t cfg = {
         .clk_src              = PARLIO_CLK_SRC_DEFAULT,
         .clk_in_gpio_num      = -1,
@@ -256,8 +215,13 @@ static esp_err_t prepare_tx(void)
     esp_err_t err = parlio_new_tx_unit(&cfg, &s_tx);
     if (err != ESP_OK) return err;
 
-    /* Decorate TX with BitScrambler (TX-only; C5 has one shared BS core). */
-    err = parlio_tx_unit_decorate_bitscrambler(s_tx);
+    /* Own the demodulator explicitly: the IDF TX disable path does not
+     * disable a decorated BitScrambler on an interrupted infinite loop. */
+    const bitscrambler_config_t bs_cfg = {
+        .dir = BITSCRAMBLER_DIR_TX,
+        .attach_to = SOC_BITSCRAMBLER_ATTACH_PARL_IO,
+    };
+    err = bitscrambler_new(&bs_cfg, &s_flight_bs);
     if (err != ESP_OK) return err;
 
     return parlio_tx_unit_enable(s_tx);
@@ -288,7 +252,7 @@ static esp_err_t start_tx(void)
      * a separately preloaded LUT is NOT retained by the active PARLIO TX run. */
     const parlio_transmit_config_t cfg = {
         .idle_value          = DAC_IDLE_CODE,
-        .bitscrambler_program = s_fm_program,
+        .bitscrambler_program = NULL, /* s_flight_bs is controlled explicitly */
         .flags.loop_transmission = true,  /* Infinite -- never generates downstream EOF */
     };
     /* TX reads sizeof(s_raw_ring) * 8 bits, then loops.
@@ -337,15 +301,15 @@ typedef struct {
     dma_descriptor_t *dscr;
     uint8_t *buffer;
     uint32_t length;
-} osd_dscr_node_t;
+} ring_dscr_node_t;
 
-static osd_dscr_node_t s_rx_dscr_nodes[MAX_RING_DESCRIPTORS];
+static ring_dscr_node_t s_rx_dscr_nodes[MAX_RING_DESCRIPTORS];
 static int s_rx_dscr_count = 0;
 
-static osd_dscr_node_t s_tx_dscr_nodes[MAX_RING_DESCRIPTORS];
+static ring_dscr_node_t s_tx_dscr_nodes[MAX_RING_DESCRIPTORS];
 static int s_tx_dscr_count = 0;
 
-static inline int find_dscr_index(const osd_dscr_node_t *nodes, int count, uint32_t addr)
+static inline int find_dscr_index(const ring_dscr_node_t *nodes, int count, uint32_t addr)
 {
     for (int i = 0; i < count; i++) {
         if ((uintptr_t)nodes[i].dscr == addr) return i;
@@ -477,260 +441,173 @@ static volatile int s_last_n_clip = 0;
 static volatile int s_last_n_origin = 0;
 static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in kHz */
 
-/* =========================================================================
- * Synthesized IQ Local NTSC 240p OSD Menu Engine & Controller
- *
- * Architecture:
- * 1. FLIGHT MODE (Live Video):
- *    Zero CPU interference. The RX GDMA -> raw ring -> Phase5 BS -> TX GDMA
- *    hardware pipeline runs 100% untouched.
- * 2. OSD MENU MODE (Hold BOOT >= 600 ms):
- *    PARLIO TX GDMA switches to a pre-built 262-node circular DMA descriptor
- *    chain streaming clean synthesized IQ samples into the Phase5 BitScrambler.
- *    The BitScrambler demodulates these into textbook NTSC 240p composite video:
- *    - H-Sync tip:  Exact DAC code 0  (0.0V sync tip)
- *    - Blanking:    Exact DAC code 20 (0.33V pedestal)
- *    - White text:  Exact DAC code 63 (1.0V peak white)
- *    - 60.012 Hz field rate with phase-coherent scanline boundaries.
- * 3. EXIT (Hold BOOT on SAVE & EXIT or 12s inactivity timeout):
- *    Instantly re-establishes 8192-byte RX/TX separation and restores live video.
- * ========================================================================= */
-
-static void osd_draw_string(int row_idx, int col_words, const char *str)
+/* Menu text and timing are generated only by the AGC/control task. */
+static void menu_draw_string(int row, int margin, const char *str)
 {
-    if (row_idx < 0 || row_idx >= (int)OSD_MENU_ROWS) return;
-    int base_line = row_idx * (int)OSD_FONT_HEIGHT;
-    int start_col = 192 + col_words;
-
-    int char_idx = 0;
-    while (*str && (start_col + char_idx * 32 + 32) < 1240) {
-        char ch = *str++;
-        int font_idx = (ch >= 32 && ch <= 126) ? (ch - 32) : 0;
-
-        for (int r = 0; r < 8; r++) {
-            uint8_t bits = s_font8x8[font_idx][r];
-            uint16_t *line_ptr = (uint16_t *)s_osd_lines[base_line + r];
-            int p = start_col + char_idx * 32;
-
-            for (int b = 7; b >= 0; b--) {
-                if (bits & (1 << b)) {
-                    /* White pixel: 4 words of white cycle -> exact 4-sample integer cycle ending at Phase 0 */
-                    line_ptr[p]     = get_white_word(0);
-                    line_ptr[p + 1] = get_white_word(1);
-                    line_ptr[p + 2] = get_white_word(2);
-                    line_ptr[p + 3] = get_white_word(3);
-                } else {
-                    /* Black pixel: exact DAC 20 cycle, closing on P0 */
-                    line_ptr[p]     = get_black_word(0);
-                    line_ptr[p + 1] = get_black_word(1);
-                    line_ptr[p + 2] = get_black_word(2);
-                    line_ptr[p + 3] = get_black_word(3);
-                }
-                p += 4;
+    (void)margin;
+    if (row < 0 || row >= (int)MENU_ROWS) return;
+    for (unsigned y = 0; y < MENU_FONT_HEIGHT; ++y) {
+        uint8_t *dst = s_menu_raster.text[row * MENU_FONT_HEIGHT + y];
+        memset(dst, 20, MENU_TEXT_BYTES);
+        for (unsigned ch = 0; ch < 31 && str[ch]; ++ch) {
+            unsigned index = (str[ch] >= 32 && str[ch] <= 126) ? str[ch] - 32 : 0;
+            uint8_t bits = s_font8x8[index][y];
+            for (unsigned bit = 0; bit < 8; ++bit) {
+                memset(dst + 32 + ch * 32 + bit * 4,
+                       bits & (0x80u >> bit) ? 60 : 20, 4);
             }
         }
-        char_idx++;
-    }
-
-    /* Pad remaining columns in this row up to 34 chars with black pixels */
-    while (char_idx < 34 && (start_col + char_idx * 32 + 32) < 1240) {
-        for (int r = 0; r < 8; r++) {
-            uint16_t *line_ptr = (uint16_t *)s_osd_lines[base_line + r];
-            int p = start_col + char_idx * 32;
-            for (int b = 0; b < 32; b++) {
-                line_ptr[p + b] = get_black_word(b);
-            }
-        }
-        char_idx++;
     }
 }
 
-static void osd_render_menu(void);
-
-static void osd_init_buffers(void)
+static bool menu_append_segment(void *ctx, const uint8_t *data, unsigned length)
 {
-    /* Pre- and post-equalizing pulse line:
-     * EIA RS-170 standard: 2 half-line equalizing pulses per line.
-     * Each half-line (636 words = 31.8 µs):
-     * - 48 words (2.4 µs) of sync tip (DAC code 0)
-     * - 588 words (29.4 µs) of pedestal / blanking (DAC code 20)
-     * 48 + 588 + 48 + 588 = 1272 words (63.6 µs = 2544 bytes).
-     * All segments are multiples of 4 -> exact Phase 0 closure! */
-    uint16_t *eq_words = (uint16_t *)s_eq_line;
-    int eq_pos = 0;
-    for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
-    for (int i = 0; i < 588; i++) eq_words[eq_pos++] = get_black_word(i);
-    for (int i = 0; i < 48; i++)  eq_words[eq_pos++] = get_sync_word(i);
-    for (int i = 0; i < 588; i++) eq_words[eq_pos++] = get_black_word(i);
-
-    /* V-Sync broad pulse serration line:
-     * EIA RS-170 standard: 2 half-line broad pulses per line.
-     * Each half-line (636 words = 31.8 µs):
-     * - 540 words (27.0 µs) of sync tip (DAC code 0)
-     * - 96 words (4.8 µs) of serration / blanking (DAC code 20)
-     * 540 + 96 + 540 + 96 = 1272 words (63.6 µs = 2544 bytes).
-     * All segments are multiples of 4 -> exact Phase 0 closure! */
-    uint16_t *vsync_words = (uint16_t *)s_vsync_line;
-    int vsync_pos = 0;
-    for (int i = 0; i < 540; i++) vsync_words[vsync_pos++] = get_sync_word(i);
-    for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
-    for (int i = 0; i < 540; i++) vsync_words[vsync_pos++] = get_sync_word(i);
-    for (int i = 0; i < 96; i++)  vsync_words[vsync_pos++] = get_black_word(i);
-
-    /* Standard horizontal blank line:
-     * Words 0..95 (96 words = 4.8 µs): H-Sync tip (DAC code 0)
-     * Words 96..1271 (1176 words = 58.8 µs): Blanking / black pedestal (DAC code 20)
-     * 96 + 1176 = 1272 words (63.6 µs = 2544 bytes). */
-    uint16_t *blank_words = (uint16_t *)s_blank_line;
-    for (int i = 0; i < 96; i++) {
-        blank_words[i] = get_sync_word(i);
-    }
-    for (int i = 96; i < (int)NTSC_LINE_WORDS; i++) {
-        blank_words[i] = get_black_word(i - 96);
-    }
-
-    /* Initialize all 56 active text scanlines to blank line */
-    for (int l = 0; l < (int)OSD_ACTIVE_LINES; l++) {
-        memcpy(s_osd_lines[l], s_blank_line, NTSC_LINE_BYTES);
-    }
-
-    /* Full EIA RS-170 NTSC 240p standard 262-node circular DMA descriptor chain:
-     * - Lines 0..2 (3 lines): Pre-equalizing pulses (s_eq_line)
-     * - Lines 3..5 (3 lines): Vertical sync broad pulses (s_vsync_line)
-     * - Lines 6..8 (3 lines): Post-equalizing pulses (s_eq_line)
-     * - Lines 9..69 (61 lines): Top blank border & VBI (s_blank_line)
-     * - Lines 70..181 (112 lines): Active menu text (s_osd_lines, 56 scanlines doubled)
-     * - Lines 182..261 (80 lines): Bottom blank border (s_blank_line)
-     * Total = 3 + 3 + 3 + 61 + 112 + 80 = 262 scanlines @ 60.012 Hz! */
-    for (int i = 0; i < (int)NTSC_TOTAL_LINES; i++) {
-        dma_descriptor_t *node = &s_osd_dma_nodes[i];
-        node->dw0.size = NTSC_LINE_BYTES;
-        node->dw0.length = NTSC_LINE_BYTES;
-        node->dw0.owner = 1;
-        node->dw0.suc_eof = 0;
-
-        if (i < 3) {
-            /* Lines 0..2: Pre-equalizing pulses (RS-170 standard) */
-            node->buffer = s_eq_line;
-        } else if (i < 6) {
-            /* Lines 3..5: Vertical sync serrations (3 lines of broad pulses) */
-            node->buffer = s_vsync_line;
-        } else if (i < 9) {
-            /* Lines 6..8: Post-equalizing pulses (RS-170 standard) */
-            node->buffer = s_eq_line;
-        } else if (i >= 70 && i < (int)(70 + OSD_ACTIVE_LINES * 2)) {
-            /* Lines 70..181 (112 scanlines centered vertically):
-             * Active menu text, each font row repeated twice for double-height readability! */
-            int font_line = (i - 70) / 2;
-            node->buffer = s_osd_lines[font_line];
-        } else {
-            /* Lines 9..69 and 182..261: Blank black lines with standard H-sync */
-            node->buffer = s_blank_line;
-        }
-
-        node->next = (i < (int)NTSC_TOTAL_LINES - 1) ? &s_osd_dma_nodes[i + 1] : &s_osd_dma_nodes[0];
-    }
-
-    __asm__ __volatile__("fence rw, rw" ::: "memory");
-
-    /* Pre-render initial menu text */
-    osd_render_menu();
-
-    /* Flush all NTSC line buffers and entire 262-node DMA descriptor chain to physical SRAM */
-    sync_dma_c2m(s_eq_line, sizeof(s_eq_line));
-    sync_dma_c2m(s_vsync_line, sizeof(s_vsync_line));
-    sync_dma_c2m(s_blank_line, sizeof(s_blank_line));
-    sync_dma_c2m(s_osd_lines, sizeof(s_osd_lines));
-    sync_dma_c2m(s_osd_dma_nodes, sizeof(s_osd_dma_nodes));
+    (void)ctx;
+    if (s_menu_node_count >= MENU_MAX_NODES || length > 4092 ||
+        ((uintptr_t)data & 3) || (length & 3)) return false;
+    dma_descriptor_t *node = &s_menu_nodes[s_menu_node_count++];
+    memset(node, 0, sizeof(*node));
+    node->dw0.size = length;
+    node->dw0.length = length;
+    node->dw0.owner = 1;
+    node->buffer = (void *)data;
+    node->next = &s_menu_nodes[s_menu_node_count];
+    return true;
 }
 
-static void osd_render_menu(void)
+static void menu_render_menu(void);
+
+static void menu_init_buffers(void)
+{
+    menu_raster_init(&s_menu_raster, s_video_std);
+    s_menu_node_count = 0;
+    ESP_ERROR_CHECK(menu_raster_emit(&s_menu_raster, s_video_std,
+                                   menu_append_segment, NULL) ? ESP_OK : ESP_ERR_INVALID_SIZE);
+    s_menu_nodes[s_menu_node_count - 1].next = s_menu_nodes;
+    menu_render_menu();
+    sync_dma_c2m(&s_menu_raster, sizeof(s_menu_raster));
+    sync_dma_c2m(s_menu_nodes, s_menu_node_count * sizeof(*s_menu_nodes));
+}
+
+static void menu_render_menu(void)
 {
     const fpv_channel_t *ch = rf_get_current_channel();
     char buf[40];
 
-    osd_draw_string(0, 32, "=== C5VRX-3 RECEIVER MENU ===");
+    snprintf(buf, sizeof(buf), "=== C5VRX-3 MENU (%s) ===",
+             (s_video_std == VIDEO_STD_PAL) ? "PAL 625i" : "NTSC 525i");
+    menu_draw_string(0, 16, buf);
 
     snprintf(buf, sizeof(buf), "%c [1] BAND:   %s",
              (s_menu_cursor == 0) ? '>' : ' ', rf_get_band_name(rf_get_current_band()));
-    osd_draw_string(1, 32, buf);
-
-    snprintf(buf, sizeof(buf), "%c [2] CH:     %s (%u MHz)",
-             (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz);
-    osd_draw_string(2, 32, buf);
+    menu_draw_string(1, 16, buf);
 
     if (s_last_q_phase >= 40) {
-        snprintf(buf, sizeof(buf), "%c [3] VTX CFO: %+4d kHz [LCK %d%%]",
-             (s_menu_cursor == 2) ? '>' : ' ', s_cfo_khz, s_last_q_phase);
+        snprintf(buf, sizeof(buf), "%c [2] CH:     %s (%uM) [CFO:%+dk]",
+                 (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz, s_cfo_khz);
     } else {
-        snprintf(buf, sizeof(buf), "%c [3] VTX CFO: NO SIGNAL",
-                 (s_menu_cursor == 2) ? '>' : ' ');
+        snprintf(buf, sizeof(buf), "%c [2] CH:     %s (%u MHz)",
+                 (s_menu_cursor == 1) ? '>' : ' ', ch->name, ch->freq_mhz);
     }
-    osd_draw_string(3, 32, buf);
+    menu_draw_string(2, 16, buf);
 
-    snprintf(buf, sizeof(buf), "%c [4] GEAR:   %s",
-             (s_menu_cursor == 3) ? '>' : ' ', s_current_bw40 ? "BW40 (COLOR)" : "BW20 (+3dB)");
-    osd_draw_string(4, 32, buf);
+    snprintf(buf, sizeof(buf), "%c [3] GEAR:   %s",
+             (s_menu_cursor == 2) ? '>' : ' ', s_current_bw40 ? "BW40 (COLOR)" : "BW20 (+3dB)");
+    menu_draw_string(3, 16, buf);
 
-    snprintf(buf, sizeof(buf), "%c [5] AFC:    %s",
-             (s_menu_cursor == 4) ? '>' : ' ',
+    snprintf(buf, sizeof(buf), "%c [4] AFC:    %s",
+             (s_menu_cursor == 3) ? '>' : ' ',
              (s_afc_mode == AFC_MODE_AUTO) ? "AUTO EXP (+/-1.5M)" :
              (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (FROZEN)" : "OFF (0 kHz)");
-    osd_draw_string(5, 32, buf);
+    menu_draw_string(4, 16, buf);
+
+    snprintf(buf, sizeof(buf), "%c [5] STD:    %s",
+             (s_menu_cursor == 4) ? '>' : ' ',
+             (s_video_std == VIDEO_STD_PAL) ? "PAL 625i (50Hz)" : "NTSC 525i (60Hz)");
+    menu_draw_string(5, 16, buf);
 
     snprintf(buf, sizeof(buf), "%c [6] SAVE & EXIT",
              (s_menu_cursor == 5) ? '>' : ' ');
-    osd_draw_string(6, 32, buf);
+    menu_draw_string(6, 16, buf);
 
-    sync_dma_c2m(s_osd_lines, sizeof(s_osd_lines));
+    sync_dma_c2m(s_menu_raster.text, sizeof(s_menu_raster.text));
+}
+
+static void quiet_tx_interrupts(void)
+{
+    AHB_DMA.out_intr[s_tx_dma_ch].ena.val = 0;
+    AHB_DMA.out_intr[s_tx_dma_ch].clr.val = UINT32_MAX;
+    PARL_IO.int_ena.val = 0;
+}
+
+static void start_flight_demodulator(void)
+{
+    ESP_ERROR_CHECK(bitscrambler_enable(s_flight_bs));
+    ESP_ERROR_CHECK(bitscrambler_load_program(s_flight_bs, s_fm_program));
+    ESP_ERROR_CHECK(bitscrambler_reset(s_flight_bs));
+    ESP_ERROR_CHECK(bitscrambler_start(s_flight_bs));
+}
+
+static void start_menu_tx(void)
+{
+    /* IDF owns the channel allocation and stop/reset lifecycle. While its TX
+     * transaction queue is empty, start our SRAM scatter chain directly.
+     * No driver-private structure access and no active descriptor rewiring. */
+    ESP_ERROR_CHECK(parlio_tx_unit_enable(s_tx));
+    quiet_tx_interrupts();
+    parlio_ll_tx_enable_clock(&PARL_IO, false);
+    parlio_ll_tx_reset_clock(&PARL_IO);
+    parlio_ll_tx_reset_fifo(&PARL_IO);
+    parlio_ll_tx_set_idle_data_value(&PARL_IO, DAC_IDLE_CODE);
+    parlio_ll_tx_set_eof_condition(&PARL_IO, PARLIO_LL_TX_EOF_COND_DATA_LEN);
+    parlio_ll_tx_set_trans_bit_len(&PARL_IO, 1);
+    __asm__ __volatile__("fence rw, rw" ::: "memory");
+    AHB_DMA.out_link_addr[s_tx_dma_ch].val = (uint32_t)s_menu_nodes;
+    AHB_DMA.channel[s_tx_dma_ch].out.out_link.outlink_start_chn = 1;
+    int64_t deadline = esp_timer_get_time() + 1000;
+    while (!parlio_ll_tx_is_ready(&PARL_IO)) {
+        ESP_ERROR_CHECK(esp_timer_get_time() < deadline ? ESP_OK : ESP_ERR_TIMEOUT);
+    }
+    parlio_ll_tx_start(&PARL_IO, true);
+    parlio_ll_tx_enable_clock(&PARL_IO, true);
 }
 
 static void video_set_menu_mode(bool active)
 {
     if (s_menu_active == active) return;
-    s_menu_active = active;
-
-    if (s_tx_dscr_count <= 0 || !s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr) {
-        printf("[OSD] ERROR: s_tx_dscr_nodes not initialized\n");
-        return;
-    }
-
+    ESP_ERROR_CHECK(parlio_tx_unit_disable(s_tx));
+    ESP_ERROR_CHECK(bitscrambler_disable(s_flight_bs));
     if (active) {
-        /* Pre-render fresh menu state */
-        osd_render_menu();
-
-        /* Ensure all OSD descriptors are firmly synced to physical SRAM */
-        s_osd_dma_nodes[NTSC_TOTAL_LINES - 1].next = &s_osd_dma_nodes[0];
-        sync_dma_c2m(s_osd_dma_nodes, sizeof(s_osd_dma_nodes));
-
-        /* Splice OSD menu into GDMA without stopping hardware!
-         * Tail of raw ring -> Head of OSD menu chain.
-         * Tail of OSD menu chain -> Head of OSD menu chain (circular).
-         * GDMA naturally and seamlessly steps into the NTSC 240p menu at the next ring boundary! */
-        s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = &s_osd_dma_nodes[0];
-        sync_dma_c2m(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t));
-        __asm__ __volatile__("fence rw, rw" ::: "memory");
-
-        printf("[OSD] Spliced TX GDMA -> Local NTSC 240p Menu Chain (Seamless)\n");
+        menu_init_buffers();
+        start_menu_tx();
     } else {
-        /* Find current RX descriptor to guarantee safe separation upon return */
-        uint32_t rx_now = (s_rx_dma_ch >= 0 && s_rx_dma_ch < 3)
-                          ? AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val : 0;
-        int rx_idx = find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count, rx_now);
-        int safe_tx_idx = 0;
-        if (rx_idx >= 0 && s_tx_dscr_count > 0) {
-            safe_tx_idx = (rx_idx + (s_tx_dscr_count / 2)) % s_tx_dscr_count;
-        }
+        /* Restart the producer at ring zero; delaying an already running RX
+         * would leave TX's offset arbitrary. Load Phase5 before timing RX. */
+        start_flight_demodulator();
+        ESP_ERROR_CHECK(parlio_rx_unit_disable(s_rx));
+        ESP_ERROR_CHECK(parlio_rx_unit_enable(s_rx, false));
+        ESP_ERROR_CHECK(parlio_tx_unit_enable(s_tx));
+        quiet_tx_interrupts();
+        ESP_ERROR_CHECK(start_rx());
+        AHB_DMA.in_intr[s_rx_dma_ch].ena.val = 0;
+        PARL_IO.rx_genrl_cfg.rx_eof_gen_sel = 1;
+        esp_rom_delay_us(8192ULL * 1000000ULL / IQ_RATE_HZ);
+        ESP_ERROR_CHECK(start_tx());
+        quiet_tx_interrupts();
+        patch_descriptors_clear_eof(s_rx_dma_ch, true);
+        patch_descriptors_clear_eof(s_tx_dma_ch, false);
+    }
+    s_menu_timeout_ticks = 0;
+    s_menu_active = active;
+}
 
-        /* Splice back to raw ring at the end of the current NTSC frame */
-        s_osd_dma_nodes[NTSC_TOTAL_LINES - 1].next = s_tx_dscr_nodes[safe_tx_idx].dscr;
-        sync_dma_c2m(&s_osd_dma_nodes[NTSC_TOTAL_LINES - 1], sizeof(dma_descriptor_t));
-
-        s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr->next = s_tx_dscr_nodes[0].dscr;
-        sync_dma_c2m(s_tx_dscr_nodes[s_tx_dscr_count - 1].dscr, sizeof(dma_descriptor_t));
-        __asm__ __volatile__("fence rw, rw" ::: "memory");
-
-        printf("[OSD] Spliced Menu -> Live Video Ring (Target TX node %d)\n", safe_tx_idx);
+static void menu_toggle_standard(void)
+{
+    if (s_menu_active) ESP_ERROR_CHECK(parlio_tx_unit_disable(s_tx));
+    s_video_std = s_video_std == VIDEO_STD_PAL ? VIDEO_STD_NTSC : VIDEO_STD_PAL;
+    if (s_menu_active) {
+        menu_init_buffers();
+        start_menu_tx();
     }
 }
 
@@ -750,7 +627,7 @@ static void handle_button_short_click(void)
 {
     if (s_menu_active) {
         s_menu_cursor = (s_menu_cursor + 1) % 6;
-        osd_render_menu();
+        menu_render_menu();
         s_menu_timeout_ticks = 0;
         printf("[BTN: SHORT] Menu cursor -> %d\n", s_menu_cursor);
     } else {
@@ -766,14 +643,14 @@ static void handle_button_short_click(void)
 static void handle_button_long_click(void)
 {
     if (!s_menu_active) {
-        if (!s_osd_boot_btn_enabled) {
-            printf("[BTN: LONG] OSD menu via BOOT button is DISABLED (Safe Flight Mode)\n");
+        if (!s_menu_boot_btn_enabled) {
+            printf("[BTN: LONG] Menu menu via BOOT button is DISABLED (Safe Flight Mode)\n");
             return;
         }
         s_menu_cursor = 0;
         s_menu_timeout_ticks = 0;
         video_set_menu_mode(true);
-        printf("[BTN: LONG] OSD Menu Opened!\n");
+        printf("[BTN: LONG] Menu Opened!\n");
     } else {
         switch (s_menu_cursor) {
         case 0: /* BAND */
@@ -789,18 +666,12 @@ static void handle_button_long_click(void)
             printf("[MENU: CHANNEL] Switched to %s (%u MHz)\n",
                    rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz);
             break;
-        case 2: /* VTX CFO AUTO-ZERO TUNE */
-            if (s_last_q_phase >= 40 && s_cfo_khz != 0) {
-                rf_step_frequency_offset_khz(-s_cfo_khz);
-                printf("[MENU: VTX CFO] Auto-tuned offset by %d kHz to match VTX!\n", -s_cfo_khz);
-            }
-            break;
-        case 3: /* GEAR (BW40 / BW20) */
+        case 2: /* GEAR (BW40 / BW20) */
             s_current_bw40 = !s_current_bw40;
             rf_set_analog_bandwidth(s_current_bw40);
             printf("[MENU: GEAR] Bandwidth set to %s\n", s_current_bw40 ? "BW40" : "BW20");
             break;
-        case 4: /* AFC MODE */
+        case 3: /* AFC MODE */
             if (s_afc_mode == AFC_MODE_AUTO) {
                 s_afc_mode = AFC_MODE_HOLD;
             } else if (s_afc_mode == AFC_MODE_HOLD) {
@@ -811,14 +682,18 @@ static void handle_button_long_click(void)
             }
             printf("[MENU: AFC] Mode -> %d\n", s_afc_mode);
             break;
+        case 4: /* VIDEO STANDARD (NTSC / PAL) */
+            menu_toggle_standard();
+            printf("[MENU: STD] Switched standard -> %s\n", (s_video_std == VIDEO_STD_PAL) ? "PAL 625i (50Hz)" : "NTSC 525i (60Hz)");
+            break;
         case 5: /* SAVE & EXIT */
             video_set_menu_mode(false);
-            printf("[BTN: LONG] OSD Menu Closed -> Live Video!\n");
+            printf("[BTN: LONG] Menu Closed -> Live Video!\n");
             return;
         default:
             break;
         }
-        osd_render_menu();
+        menu_render_menu();
         s_menu_timeout_ticks = 0;
     }
 }
@@ -844,6 +719,27 @@ static void analog_agc_task(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(50)); /* 20 Hz evaluation (every 50 ms) */
 
+        /* Poll hardware sticky status registers for truthful PARLIO TX starvation detection */
+        if (PARL_IO.int_raw.tx_fifo_rempty_int_raw) {
+            s_hw_counters.parl_tx_rempty_count++;
+            PARL_IO.int_clr.tx_fifo_rempty_int_clr = 1;
+        }
+        if (PARL_IO.int_raw.rx_fifo_wovf_int_raw) {
+            s_hw_counters.parl_rx_wovf_count++;
+            PARL_IO.int_clr.rx_fifo_wovf_int_clr = 1;
+        }
+
+        int command;
+        for (unsigned commands = 0; commands < 16 &&
+             xQueueReceive(s_menu_commands, &command, 0) == pdTRUE; ++commands) {
+            if (command == 'o') video_set_menu_mode(!s_menu_active);
+            else if (command == 'v' || command == 'V') menu_toggle_standard();
+            else if (command == 'O') s_menu_boot_btn_enabled = !s_menu_boot_btn_enabled;
+            else if (s_menu_active && (command == ' ' || command == 'n' || command == '\t'))
+                handle_button_short_click();
+            else if (s_menu_active) handle_button_long_click();
+        }
+
         /* 1. BOOT Button Sampling & Debounce (GPIO 28, active LOW) */
         if (boot_grace_ticks > 0) {
             boot_grace_ticks--;
@@ -868,7 +764,9 @@ static void analog_agc_task(void *arg)
             }
         }
 
-        /* 2. OSD Inactivity Timeout (12.0s auto-exit) */
+        /* 2. Menu Inactivity Timeout (12.0s auto-exit).
+         * Zero console I/O or fflush calls inside this loop to guarantee
+         * non-blocking execution regardless of USB host connection state! */
         if (s_menu_active) {
             s_menu_timeout_ticks++;
             if (s_menu_timeout_ticks >= 240) { /* 12.0s inactivity auto-exit */
@@ -993,26 +891,25 @@ static void analog_agc_task(void *arg)
 
         case AGC_STATE_LEARN:
             /* Signal too hot or clipping: step gain down */
-            if (p_median > 30 || n_clip >= 3) {
-                int drop = (n_clip >= 8) ? 4 : 2;
+            if (p_median > 34 || n_clip >= 6) {
+                int drop = (n_clip >= 12) ? 6 : 4;
                 target_gain = (target_gain > drop + 2) ? (target_gain - drop) : 2;
-                settle_ticks = 1;
+                settle_ticks = 6; /* 300 ms settle between adjustments */
             }
             /* Signal weak or picture degrading: actively step gain UP towards 62 */
-            else if ((p_median < 20 || q_phase < 70) && target_gain < 62u && n_clip <= 2) {
-                int step = (q_phase < 45 || p_median < 14) ? 4 : 2;
+            else if ((p_median < 16 || q_phase < 55) && target_gain < 62u && n_clip <= 2) {
+                int step = (q_phase < 40 || p_median < 12) ? 4 : 2;
                 if ((int)target_gain + step <= 62) {
                     target_gain += step;
                 } else {
                     target_gain = 62u;
                 }
-                settle_ticks = 1;
+                settle_ticks = 6; /* 300 ms settle between adjustments */
             }
             /* Optimal target zone converged */
             else {
-                /* TRACK requires an actually coherent FM carrier. Reaching the
-                 * gain ceiling alone is never evidence of lock. */
-                if (n_clip <= 2 && q_phase >= 65) {
+                /* TRACK requires an actually coherent FM carrier */
+                if (n_clip <= 3 && q_phase >= 55) {
                     s_agc_state = AGC_STATE_TRACK;
                     drift_counter = 0;
                     lost_counter = 0;
@@ -1022,7 +919,7 @@ static void analog_agc_task(void *arg)
 
         case AGC_STATE_TRACK:
             /* Check for total carrier loss: 500 ms persistent loss */
-            if (q_phase < 28 && p_median < 14) {
+            if (q_phase < 25 && p_median < 12) {
                 lost_counter++;
                 if (lost_counter >= 10) { /* ~500 ms persistent loss */
                     s_agc_state = AGC_STATE_SEARCH;
@@ -1033,22 +930,22 @@ static void analog_agc_task(void *arg)
                 lost_counter = 0;
             }
 
-            /* Check for signal quality degradation or overload:
-             * 1. Needs boost: picture is getting noisy (Q_phase < 68% or P_median < 18)
-             *    while not at maximum gain and not clipping.
-             * 2. Needs cut: signal too hot (P_median > 30 or clipping). */
-            bool needs_gain_boost = (q_phase < 68 || p_median < 18) && (target_gain < 62u) && (n_clip <= 2);
-            bool needs_gain_cut   = (p_median > 30) || (n_clip >= 3);
+            /* Rock-solid hysteresis deadband:
+             * 1. Needs boost: signal has genuinely degraded persistently
+             *    (Q_phase < 45% or P_median < 14) while not at maximum gain.
+             * 2. Needs cut: signal is hard clipping (P_median > 36 or n_clip >= 8). */
+            bool needs_gain_boost = (q_phase < 45 || p_median < 14) && (target_gain < 62u) && (n_clip <= 2);
+            bool needs_gain_cut   = (p_median > 36) || (n_clip >= 8);
 
             if (needs_gain_boost || needs_gain_cut) {
                 drift_counter++;
-                if (drift_counter >= 3) { /* Persistent for 150 ms */
+                if (drift_counter >= 15) { /* Must persist for 750 ms continuously! */
                     s_agc_state = AGC_STATE_LEARN;
                     drift_counter = 0;
                 }
             } else {
                 drift_counter = 0;
-                /* Inside deadband: 100% frozen, ZERO register writes */
+                /* Inside wide deadband: 100% frozen, ZERO register writes */
             }
             break;
         }
@@ -1060,6 +957,7 @@ apply_target:
                 uint8_t old_g = s_current_gain;
                 s_current_gain = target_gain;
                 rf_set_rx_gain(true, s_current_gain);
+                settle_ticks = 10; /* 500 ms settle delay after RF gain write to prevent rapid staircasing */
                 printf("[AGC:GAIN] %u -> %u (P_med=%d, Q_phase=%d%%, Clip=%d, State=%s)\n",
                        old_g, s_current_gain, p_median, q_phase, n_clip,
                        (s_agc_state == AGC_STATE_TRACK) ? "TRACK" :
@@ -1172,7 +1070,6 @@ update_telemetry:
                    s_cfo_khz,
                    s_current_gain,
                    s_last_p_median, s_last_q_phase, s_last_n_clip);
-            fflush(stdout);
         }
     }
 }
@@ -1180,166 +1077,171 @@ update_telemetry:
 static void console_diag_task(void *arg)
 {
     (void)arg;
-    for (;;) {
-        int c = getchar();
-        if (c != EOF && c > 0) {
-            if (c == '+' || c == 'k') {
-                s_agc_mode = ANALOG_AGC_MANUAL;
-                if (s_current_gain < 62u) s_current_gain += 2u;
-                rf_set_rx_gain(true, s_current_gain);
-                printf("[MANUAL GAIN] = %u (reg=0x%08lx)\n", s_current_gain, (unsigned long)rf_get_rx_gain_reg());
-            } else if (c == '-' || c == 'j') {
-                s_agc_mode = ANALOG_AGC_MANUAL;
-                if (s_current_gain >= 2u) s_current_gain -= 2u;
-                rf_set_rx_gain(true, s_current_gain);
-                printf("[MANUAL GAIN] = %u (reg=0x%08lx)\n", s_current_gain, (unsigned long)rf_get_rx_gain_reg());
-            } else if (c == 'a') {
-                s_agc_mode = ANALOG_AGC_ACTIVE;
-                printf("[AGC MODE] -> ACTIVE (Self-Calibrating Adaptive Gain Controller ACTIVE)\n");
-            } else if (c == 's') {
-                s_agc_mode = ANALOG_AGC_SHADOW;
-                printf("[AGC MODE] -> SHADOW (Dry-run: RF gain frozen at %u, computing recommendations)\n", s_current_gain);
-            } else if (c == 'm') {
-                s_agc_mode = ANALOG_AGC_MANUAL;
-                printf("[AGC MODE] -> MANUAL (Fixed gain=%u)\n", s_current_gain);
-            } else if (c == 'b') {
-                if (s_bw_gear_mode == BW_GEAR_AUTO) {
-                    s_bw_gear_mode = BW_GEAR_BW40;
-                    s_current_bw40 = true;
-                    rf_set_analog_bandwidth(true);
-                    printf("[BW GEAR] -> FORCED BW40 (Full color / 20 MHz baseband)\n");
-                } else if (s_bw_gear_mode == BW_GEAR_BW40) {
-                    s_bw_gear_mode = BW_GEAR_BW20;
-                    s_current_bw40 = false;
-                    rf_set_analog_bandwidth(false);
-                    printf("[BW GEAR] -> FORCED BW20 (+3 dB SNR Long-Range Survival mode)\n");
-                } else {
-                    s_bw_gear_mode = BW_GEAR_AUTO;
-                    printf("[BW GEAR] -> AUTO GEARBOX (Dynamic Bandwidth Adaptation)\n");
-                }
-            } else if (c == 'c') {
-                rf_cycle_channel_in_band();
-                const fpv_channel_t *ch = rf_get_current_channel();
-                s_cfo_khz = 0;
-                s_agc_state = AGC_STATE_SEARCH;
-                printf("[CHANNEL] Switched to %s (%u MHz) in %s\n",
-                       ch->name, ch->freq_mhz, rf_get_band_name(rf_get_current_band()));
-            } else if (c == 'C') {
-                rf_cycle_band();
-                const fpv_channel_t *ch = rf_get_current_channel();
-                s_cfo_khz = 0;
-                s_agc_state = AGC_STATE_SEARCH;
-                printf("[BAND] Switched to %s - Channel %s (%u MHz)\n",
-                       rf_get_band_name(rf_get_current_band()), ch->name, ch->freq_mhz);
-            } else if (c == 'f') {
-                if (s_afc_mode == AFC_MODE_AUTO) {
-                    s_afc_mode = AFC_MODE_HOLD;
-                    printf("[AFC] -> HOLD (Current offset %+d kHz frozen)\n", rf_get_frequency_offset_khz());
-                } else if (s_afc_mode == AFC_MODE_HOLD) {
-                    s_afc_mode = AFC_MODE_OFF;
-                    rf_set_frequency_offset_khz(0);
-                    printf("[AFC] -> OFF (Offset reset to 0 kHz)\n");
-                } else {
-                    s_afc_mode = AFC_MODE_AUTO;
-                    printf("[AFC] -> AUTO EXPERIMENTAL (uncalibrated WBFM bias estimator)\n");
-                }
-            } else if (c == ',' || c == '<') {
-                rf_step_frequency_offset_khz(-50);
-                int off = rf_get_frequency_offset_khz();
-                int tot = (int)rf_get_current_channel()->freq_mhz * 1000 + off;
-                printf("[FINE TUNE] Offset = %+d kHz (Tuned: %d.%03d MHz)\n",
-                       off, tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)));
-            } else if (c == '.' || c == '>') {
-                rf_step_frequency_offset_khz(+50);
-                int off = rf_get_frequency_offset_khz();
-                int tot = (int)rf_get_current_channel()->freq_mhz * 1000 + off;
-                printf("[FINE TUNE] Offset = %+d kHz (Tuned: %d.%03d MHz)\n",
-                       off, tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)));
-            } else if (c == '0') {
-                rf_set_frequency_offset_khz(0);
-                printf("[FINE TUNE] Offset reset to +0 kHz\n");
-            } else if (c == 'e') {
-                PARL_IO.rx_clk_cfg.rx_clk_i_inv = !PARL_IO.rx_clk_cfg.rx_clk_i_inv;
-                printf("[EDGE] RX SAMPLE EDGE TOGGLED -> %s (rx_clk_i_inv=%d)\n",
-                       PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
-                       (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
-            } else if (c == 'o') {
-                video_set_menu_mode(!s_menu_active);
-                printf("[OSD] Menu %s via console\n", s_menu_active ? "OPENED" : "CLOSED");
-            } else if (c == 'O') {
-                s_osd_boot_btn_enabled = !s_osd_boot_btn_enabled;
-                printf("[OSD] BOOT button menu trigger -> %s\n",
-                       s_osd_boot_btn_enabled ? "ENABLED (Long-press BOOT enters menu)" : "DISABLED (Safe Flight Mode)");
-            } else if (s_menu_active && (c == ' ' || c == 'n')) {
-                s_menu_cursor = (s_menu_cursor + 1) % 6;
-                osd_render_menu();
-                s_menu_timeout_ticks = 0;
-                printf("[MENU] Cursor -> %d\n", s_menu_cursor);
-            } else if (s_menu_active && (c == '\r' || c == '\n' || c == 'x')) {
-                handle_button_long_click();
-            } else {
-                uint32_t rx_dscr = 0, tx_dscr = 0;
-                uint32_t rx_off = get_rx_dma_offset(&rx_dscr);
-                uint32_t tx_off = get_tx_dma_offset(&tx_dscr);
-                uint32_t dist = (rx_off >= tx_off) ? (rx_off - tx_off) : (sizeof(s_raw_ring) - tx_off + rx_off);
-                int rx_nodes = patch_descriptors_clear_eof(s_rx_dma_ch, true);
-                int tx_nodes = patch_descriptors_clear_eof(s_tx_dma_ch, false);
-                const fpv_channel_t *ch = rf_get_current_channel();
-                int off = rf_get_frequency_offset_khz();
-                int tot = (int)ch->freq_mhz * 1000 + off;
 
-                printf("\n=======================================================\n");
-                printf(" C5VRX-3 REALTIME RECEPTION & FREQUENCY DIAGNOSTICS\n");
-                printf(" Receiver Channel:           %s (%u MHz)\n", ch->name, ch->freq_mhz);
-                printf(" Tuned Frequency:            %d.%03d MHz (Offset: %+d kHz)\n",
-                       tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)), off);
-                printf(" Carrier Frequency Offset:   %+d kHz (VTX %s)\n",
-                       s_cfo_khz, (s_cfo_khz > 20) ? "high" : (s_cfo_khz < -20) ? "low" : "centered");
-                printf(" AFC Mode:                   %s\n",
-                       (s_afc_mode == AFC_MODE_AUTO) ? "AUTO EXPERIMENTAL (uncalibrated estimator)" :
-                       (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (Offset Frozen)" : "OFF (0 kHz)");
-                printf(" Bandwidth Gear:             %s (Current: %s)\n",
-                       (s_bw_gear_mode == BW_GEAR_AUTO) ? "AUTO (Dynamic Adaptation)" :
-                       (s_bw_gear_mode == BW_GEAR_BW40) ? "FORCED BW40" : "FORCED BW20",
-                       s_current_bw40 ? "BW40 (Wide / Color)" : "BW20 (Narrow / +3 dB Survival)");
-                printf(" Adaptive AGC Mode:          %s (State=%s)\n",
-                       (s_agc_mode == ANALOG_AGC_ACTIVE) ? "ACTIVE" :
-                       (s_agc_mode == ANALOG_AGC_SHADOW) ? "SHADOW (Safe Dry-Run)" : "MANUAL",
-                       (s_agc_state == AGC_STATE_TRACK) ? "TRACK" :
-                       (s_agc_state == AGC_STATE_LEARN) ? "LEARN" : "SEARCH");
-                printf(" Gain Settings:              G_actual=%u, G_shadow_rec=%u (reg=0x%08lx)\n",
-                       s_current_gain, s_shadow_gain, (unsigned long)rf_get_rx_gain_reg());
-                printf(" FM Vector Metrics:          P_median=%d, Q_phase=%d%%, Clip=%d, Origin=%d\n",
-                       s_last_p_median, s_last_q_phase, s_last_n_clip, s_last_n_origin);
-                printf(" GDMA Ring:                  dist=%lu (rx_off=%lu, tx_off=%lu)\n",
-                       (unsigned long)dist, (unsigned long)rx_off, (unsigned long)tx_off);
-                printf(" Zero-EOF Status:            RX patched=%d nodes, TX patched=%d nodes\n",
-                       rx_nodes, tx_nodes);
-                printf(" PARLIO TX Underflows:       %lu (Zero underflows)\n",
-                       (unsigned long)s_hw_counters.parl_tx_rempty_count);
-                printf(" RX Sample Edge:             %s (rx_clk_i_inv=%d)\n",
-                       PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
-                       (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
-                printf(" OSD Menu Status:            %s (BOOT button trigger: %s)\n",
-                       s_menu_active ? "OPEN" : "CLOSED",
-                       s_osd_boot_btn_enabled ? "ENABLED" : "DISABLED (Safe Flight Mode)");
-                printf(" Keys:\n");
-                printf("  'a'/'s'/'m': AGC mode (active / shadow / manual)\n");
-                printf("  '+' / '-':   Manual gain step (+/-2)\n");
-                printf("  'b':         Bandwidth gear (auto / forced bw40 / forced bw20)\n");
-                printf("  'c':         Cycle FPV channel (A1..A8, R1..R8, B1..B8, F1..F8)\n");
-                printf("  'f':         AFC mode (auto-centering / hold / off)\n");
-                printf("  ',' / '.':   Fine-tune offset (-50 / +50 kHz)\n");
-                printf("  '0':         Reset offset to 0 kHz\n");
-                printf("  'e':         Toggle RX sample edge (POS/NEG)\n");
-                printf("  'o':         Toggle OSD Menu via console\n");
-                printf("  'O':         Toggle BOOT button menu trigger (Safe Flight Mode)\n");
-                printf("  'd':         Print this diagnostic summary\n");
-                printf("=======================================================\n\n");
+    for (;;) {
+        /* IDF 6.0's O_NONBLOCK VFS read consults the installed driver's
+         * available-byte count even in no-driver mode. Poll the FIFO here;
+         * this task is its sole reader. Bound each batch so paste cannot
+         * monopolize the task. No host line-ending or DTR assumption. */
+        for (unsigned received = 0; received < 64; ++received) {
+            uint8_t byte;
+            if (usb_serial_jtag_ll_read_rxfifo(&byte, 1) == 0) break;
+            int c = byte;
+            if (c != EOF && c > 0) {
+                if (c == '+' || c == 'k') {
+                    s_agc_mode = ANALOG_AGC_MANUAL;
+                    if (s_current_gain < 62u) s_current_gain += 2u;
+                    rf_set_rx_gain(true, s_current_gain);
+                    printf("[MANUAL GAIN] = %u (reg=0x%08lx)\n", s_current_gain, (unsigned long)rf_get_rx_gain_reg());
+                } else if (c == '-' || c == 'j') {
+                    s_agc_mode = ANALOG_AGC_MANUAL;
+                    if (s_current_gain >= 2u) s_current_gain -= 2u;
+                    rf_set_rx_gain(true, s_current_gain);
+                    printf("[MANUAL GAIN] = %u (reg=0x%08lx)\n", s_current_gain, (unsigned long)rf_get_rx_gain_reg());
+                } else if (c == 'a') {
+                    s_agc_mode = ANALOG_AGC_ACTIVE;
+                    printf("[AGC MODE] -> ACTIVE (Self-Calibrating Adaptive Gain Controller ACTIVE)\n");
+                } else if (c == 's') {
+                    s_agc_mode = ANALOG_AGC_SHADOW;
+                    printf("[AGC MODE] -> SHADOW (Dry-run: RF gain frozen at %u, computing recommendations)\n", s_current_gain);
+                } else if (c == 'm') {
+                    s_agc_mode = ANALOG_AGC_MANUAL;
+                    printf("[AGC MODE] -> MANUAL (Fixed gain=%u)\n", s_current_gain);
+                } else if (c == 'b') {
+                    if (s_bw_gear_mode == BW_GEAR_AUTO) {
+                        s_bw_gear_mode = BW_GEAR_BW40;
+                        s_current_bw40 = true;
+                        rf_set_analog_bandwidth(true);
+                        printf("[BW GEAR] -> FORCED BW40 (Full color / 20 MHz baseband)\n");
+                    } else if (s_bw_gear_mode == BW_GEAR_BW40) {
+                        s_bw_gear_mode = BW_GEAR_BW20;
+                        s_current_bw40 = false;
+                        rf_set_analog_bandwidth(false);
+                        printf("[BW GEAR] -> FORCED BW20 (+3 dB SNR Long-Range Survival mode)\n");
+                    } else {
+                        s_bw_gear_mode = BW_GEAR_AUTO;
+                        printf("[BW GEAR] -> AUTO GEARBOX (Dynamic Bandwidth Adaptation)\n");
+                    }
+                } else if (c == 'c') {
+                    rf_cycle_channel_in_band();
+                    const fpv_channel_t *ch = rf_get_current_channel();
+                    s_cfo_khz = 0;
+                    s_agc_state = AGC_STATE_SEARCH;
+                    printf("[CHANNEL] Switched to %s (%u MHz) in %s\n",
+                           ch->name, ch->freq_mhz, rf_get_band_name(rf_get_current_band()));
+                } else if (c == 'C') {
+                    rf_cycle_band();
+                    const fpv_channel_t *ch = rf_get_current_channel();
+                    s_cfo_khz = 0;
+                    s_agc_state = AGC_STATE_SEARCH;
+                    printf("[BAND] Switched to %s - Channel %s (%u MHz)\n",
+                           rf_get_band_name(rf_get_current_band()), ch->name, ch->freq_mhz);
+                } else if (c == 'f') {
+                    if (s_afc_mode == AFC_MODE_AUTO) {
+                        s_afc_mode = AFC_MODE_HOLD;
+                        printf("[AFC] -> HOLD (Current offset %+d kHz frozen)\n", rf_get_frequency_offset_khz());
+                    } else if (s_afc_mode == AFC_MODE_HOLD) {
+                        s_afc_mode = AFC_MODE_OFF;
+                        rf_set_frequency_offset_khz(0);
+                        printf("[AFC] -> OFF (Offset reset to 0 kHz)\n");
+                    } else {
+                        s_afc_mode = AFC_MODE_AUTO;
+                        printf("[AFC] -> AUTO EXPERIMENTAL (uncalibrated WBFM bias estimator)\n");
+                    }
+                } else if (c == ',' || c == '<') {
+                    rf_step_frequency_offset_khz(-50);
+                    int off = rf_get_frequency_offset_khz();
+                    int tot = (int)rf_get_current_channel()->freq_mhz * 1000 + off;
+                    printf("[FINE TUNE] Offset = %+d kHz (Tuned: %d.%03d MHz)\n",
+                           off, tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)));
+                } else if (c == '.' || c == '>') {
+                    rf_step_frequency_offset_khz(+50);
+                    int off = rf_get_frequency_offset_khz();
+                    int tot = (int)rf_get_current_channel()->freq_mhz * 1000 + off;
+                    printf("[FINE TUNE] Offset = %+d kHz (Tuned: %d.%03d MHz)\n",
+                           off, tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)));
+                } else if (c == '0') {
+                    rf_set_frequency_offset_khz(0);
+                    printf("[FINE TUNE] Offset reset to +0 kHz\n");
+                } else if (c == 'e') {
+                    PARL_IO.rx_clk_cfg.rx_clk_i_inv = !PARL_IO.rx_clk_cfg.rx_clk_i_inv;
+                    printf("[EDGE] RX SAMPLE EDGE TOGGLED -> %s (rx_clk_i_inv=%d)\n",
+                           PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
+                           (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
+                } else if (c == 'o' || c == 'v' || c == 'V' || c == 'O' ||
+                           c == ' ' || c == 'n' || c == '\t' ||
+                           c == '\r' || c == '\n' || c == 'x') {
+                    /* The control task exclusively owns mode changes and rendering. */
+                    if (xQueueSend(s_menu_commands, &c, 0) != pdTRUE) {
+                        printf("[MENU] Command queue full\n");
+                    }
+                } else {
+                    uint32_t rx_dscr = 0, tx_dscr = 0;
+                    uint32_t rx_off = get_rx_dma_offset(&rx_dscr);
+                    uint32_t tx_off = get_tx_dma_offset(&tx_dscr);
+                    uint32_t dist = (rx_off >= tx_off) ? (rx_off - tx_off) : (sizeof(s_raw_ring) - tx_off + rx_off);
+                    int rx_nodes = s_rx_dscr_count;
+                    int tx_nodes = s_menu_active ? 0 : s_tx_dscr_count;
+                    const fpv_channel_t *ch = rf_get_current_channel();
+                    int off = rf_get_frequency_offset_khz();
+                    int tot = (int)ch->freq_mhz * 1000 + off;
+
+                    printf("\n=======================================================\n");
+                    printf(" C5VRX-3 REALTIME RECEPTION & FREQUENCY DIAGNOSTICS\n");
+                    printf(" Receiver Channel:           %s (%u MHz)\n", ch->name, ch->freq_mhz);
+                    printf(" Tuned Frequency:            %d.%03d MHz (Offset: %+d kHz)\n",
+                           tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)), off);
+                    printf(" Carrier Frequency Offset:   %+d kHz (VTX %s)\n",
+                           s_cfo_khz, (s_cfo_khz > 20) ? "high" : (s_cfo_khz < -20) ? "low" : "centered");
+                    printf(" AFC Mode:                   %s\n",
+                           (s_afc_mode == AFC_MODE_AUTO) ? "AUTO EXPERIMENTAL (uncalibrated estimator)" :
+                           (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (Offset Frozen)" : "OFF (0 kHz)");
+                    printf(" Bandwidth Gear:             %s (Current: %s)\n",
+                           (s_bw_gear_mode == BW_GEAR_AUTO) ? "AUTO (Dynamic Adaptation)" :
+                           (s_bw_gear_mode == BW_GEAR_BW40) ? "FORCED BW40" : "FORCED BW20",
+                           s_current_bw40 ? "BW40 (Wide / Color)" : "BW20 (Narrow / +3 dB Survival)");
+                    printf(" Adaptive AGC Mode:          %s (State=%s)\n",
+                           (s_agc_mode == ANALOG_AGC_ACTIVE) ? "ACTIVE" :
+                           (s_agc_mode == ANALOG_AGC_SHADOW) ? "SHADOW (Safe Dry-Run)" : "MANUAL",
+                           (s_agc_state == AGC_STATE_TRACK) ? "TRACK" :
+                           (s_agc_state == AGC_STATE_LEARN) ? "LEARN" : "SEARCH");
+                    printf(" Gain Settings:              G_actual=%u, G_shadow_rec=%u (reg=0x%08lx)\n",
+                           s_current_gain, s_shadow_gain, (unsigned long)rf_get_rx_gain_reg());
+                    printf(" FM Vector Metrics:          P_median=%d, Q_phase=%d%%, Clip=%d, Origin=%d\n",
+                           s_last_p_median, s_last_q_phase, s_last_n_clip, s_last_n_origin);
+                    printf(" GDMA Ring:                  dist=%lu (rx_off=%lu, tx_off=%lu)\n",
+                           (unsigned long)dist, (unsigned long)rx_off, (unsigned long)tx_off);
+                    printf(" Zero-EOF Status:            RX patched=%d nodes, TX patched=%d nodes\n",
+                           rx_nodes, tx_nodes);
+                    printf(" PARLIO TX Underflows:       %lu (Zero underflows)\n",
+                           (unsigned long)s_hw_counters.parl_tx_rempty_count);
+                    printf(" RX Sample Edge:             %s (rx_clk_i_inv=%d)\n",
+                           PARL_IO.rx_clk_cfg.rx_clk_i_inv ? "NEG" : "POS",
+                           (int)PARL_IO.rx_clk_cfg.rx_clk_i_inv);
+                    printf(" Menu Standard:              %s (%s)\n",
+                           (s_video_std == VIDEO_STD_PAL) ? "PAL 625i" : "NTSC 525i",
+                           (s_video_std == VIDEO_STD_PAL) ? "50Hz, 625 lines/frame" : "59.94Hz, 525 lines/frame");
+                    printf(" Menu Status:                %s (BOOT button trigger: %s)\n",
+                           s_menu_active ? "OPEN" : "CLOSED",
+                           s_menu_boot_btn_enabled ? "ENABLED" : "DISABLED (Safe Flight Mode)");
+                    printf(" Keys:\n");
+                    printf("  'a'/'s'/'m': AGC mode (active / shadow / manual)\n");
+                    printf("  '+' / '-':   Manual gain step (+/-2)\n");
+                    printf("  'b':         Bandwidth gear (auto / forced bw40 / forced bw20)\n");
+                    printf("  'c':         Cycle FPV channel (A1..A8, R1..R8, B1..B8, F1..F8)\n");
+                    printf("  'f':         AFC mode (auto-centering / hold / off)\n");
+                    printf("  ',' / '.':   Fine-tune offset (-50 / +50 kHz)\n");
+                    printf("  '0':         Reset offset to 0 kHz\n");
+                    printf("  'e':         Toggle RX sample edge (POS/NEG)\n");
+                    printf("  'v':         Toggle Video Standard (NTSC 525i / PAL 625i)\n");
+                    printf("  'o':         Toggle menu via console\n");
+                    printf("  'O':         Toggle BOOT button menu trigger (Safe Flight Mode)\n");
+                    printf("  'd':         Print this diagnostic summary\n");
+                    printf("=======================================================\n\n");
+                }
             }
-            fflush(stdout);
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -1348,11 +1250,22 @@ static void console_diag_task(void *arg)
 
 esp_err_t video_start(void)
 {
+    /* Keep output unbuffered on the no-driver USB VFS. Input is drained directly
+     * by console_diag_task; USB is never involved in DMA sample pacing. */
+    setvbuf(stdin, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IONBF, 0);
+    int flags = fcntl(fileno(stdin), F_GETFL, 0);
+    fcntl(fileno(stdin), F_SETFL, flags | O_NONBLOCK);
+    flags = fcntl(fileno(stdout), F_GETFL, 0);
+    fcntl(fileno(stdout), F_SETFL, flags | O_NONBLOCK);
+    usb_serial_jtag_vfs_use_nonblocking();
+
     /* Initialize BOOT button on GPIO 28 */
     init_boot_button();
 
-    /* Initialize NTSC 240p OSD buffers and 262-node DMA descriptor chain */
-    osd_init_buffers();
+    /* Menu control is serialized with BOOT handling in the AGC task. */
+    s_menu_commands = xQueueCreate(16, sizeof(int));
+    if (!s_menu_commands) return ESP_ERR_NO_MEM;
 
     /* Zero the ring before starting. Flush to DMA-visible SRAM. */
     memset(s_raw_ring, 0, sizeof(s_raw_ring));
@@ -1362,6 +1275,8 @@ esp_err_t video_start(void)
 
     if ((err = prepare_rx()) != ESP_OK) return err;
     if ((err = prepare_tx()) != ESP_OK) return err;
+
+    start_flight_demodulator();
 
     /* Start RX cyclic ring. GDMA begins writing at s_raw_ring[0]. */
     if ((err = start_rx()) != ESP_OK) return err;
@@ -1377,13 +1292,9 @@ esp_err_t video_start(void)
     AHB_DMA.in_intr[2].ena.val = 0;
     PARL_IO.rx_genrl_cfg.rx_eof_gen_sel = 1;
 
-    /* Establish producer/consumer separation before starting TX.
-     * In 16 KiB ring (16384 bytes, 4 full 4092-byte descriptors D0..D3 + 16-byte tail D4):
-     * Delay by exactly 8192 bytes (2 full descriptors = 204.8 µs).
-     * This places TX at D0 while RX is at D2, leaving D1 sitting safely between them.
-     * RX has demonstrably finished D1 (>100 µs ago), and TX has not yet reached D1 (>100 µs away).
-     * D1 is 100% safe for OSD overlay! */
-    esp_rom_delay_us(8192u * 1000000u / IQ_RATE_HZ);
+    /* Request half-ring producer/consumer separation before starting TX.
+     * The integer-microsecond delay and driver latency need hardware validation. */
+    esp_rom_delay_us(8192ULL * 1000000ULL / IQ_RATE_HZ);
 
     if ((err = start_tx()) != ESP_OK) return err;
 
@@ -1396,6 +1307,14 @@ esp_err_t video_start(void)
             s_tx_dma_ch = i;
         }
     }
+
+    /* Put PARLIO TX into pure continuous hardware mode:
+     * Disable all GDMA TX channel interrupts and PARL_IO core interrupts.
+     * Prevents PARLIO_LL_EVENT_TX_FIFO_EMPTY and EOF interrupts from stealing CPU cycles! */
+    AHB_DMA.out_intr[0].ena.val = 0;
+    AHB_DMA.out_intr[1].ena.val = 0;
+    AHB_DMA.out_intr[2].ena.val = 0;
+    PARL_IO.int_ena.val = 0;
 
     /* Clear suc_eof on ALL GDMA descriptors for both RX and TX to eliminate
      * hardware wrap EOF bubbles completely! The buffer becomes a truly infinite ring. */

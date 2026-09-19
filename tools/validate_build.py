@@ -50,11 +50,15 @@ c_files = list(MAIN.glob("*.c"))
 all_c = "\n".join(read(f) for f in c_files)
 c_names = [f.name for f in c_files]
 
-check("exactly 3 production .c files", len(c_files) == 3,
+check("production receiver and dedicated menu raster modules", set(c_names) == {"main.c", "rf.c", "video.c", "menu_raster.c"},
       f"found: {c_names}")
 check("main.c present", "main.c" in c_names)
 check("rf.c present", "rf.c" in c_names)
 check("video.c present", "video.c" in c_names)
+check("menu bypasses the demodulator", "bitscrambler_disable(s_flight_bs)" in all_c)
+check("no synthetic menu IQ", "s_black_iq" not in all_c and "get_white_word" not in all_c)
+check("no live ring splice", not re.search(r"s_tx_dscr_nodes\[.*?->next\s*=", all_c))
+check("serialized menu commands", "xQueueSend(s_menu_commands" in all_c and "xQueueReceive(s_menu_commands" in all_c)
 
 check("no continuous_iq in production", "continuous_iq" not in all_c,
       "RF dump engine must not be present")
