@@ -97,6 +97,21 @@ check("video standard defaults to AUTO detector",
 check("menu resolves detected PAL/NTSC before raster start",
       "s_video_std = resolved_menu_standard();" in all_c)
 
+check("modern menu raster is 400x72 logical pixels",
+      "MENU_UI_WIDTH 400u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_LINES 72u" in read(MAIN / "menu_raster.h") and
+      "s_menu_raster.ui" in all_c)
+check("legacy seven-line text menu removed",
+      "MENU_TEXT_BYTES" not in all_c and "MENU_ROWS" not in all_c)
+check("lag diagnostics poll PARLIO GDMA and BitScrambler",
+      "poll_transport_faults" in all_c and
+      "GDMA_IN_FAULT_MASK" in all_c and
+      "GDMA_OUT_FAULT_MASK" in all_c and
+      "LAG_EVT_BS_EOF_OVERLOAD" in all_c)
+check("lag events correlate against gain writes",
+      "near_gain_event_count" in all_c and
+      "s_last_gain_write_us = esp_timer_get_time();" in all_c)
+
 # RX POS edge (not NEG)
 check("PARLIO_SAMPLE_EDGE_POS in video.c",
       "PARLIO_SAMPLE_EDGE_POS" in all_c)
