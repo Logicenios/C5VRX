@@ -112,6 +112,13 @@ check("lag events correlate against gain writes",
       "near_gain_event_count" in all_c and
       "s_last_gain_write_us = esp_timer_get_time();" in all_c)
 
+check("gain transient classifier present",
+      "gain_quality_drop_count" in all_c and
+      "s_last_gain_drop_transition" in all_c)
+check("visible lag marker present",
+      "[LAG MARK]" in all_c and
+      "user_lag_mark_count" in all_c)
+
 # RX POS edge (not NEG)
 check("PARLIO_SAMPLE_EDGE_POS in video.c",
       "PARLIO_SAMPLE_EDGE_POS" in all_c)
