@@ -4,22 +4,19 @@
 
 /* Standalone CVBS menu raster at 40 MHz.
  *
- * The modern UI is 384 x 56 logical pixels. Horizontal coordinates are scaled
- * by 5.7 to 2188 DAC samples; vertical coordinates use 18/5 lines per row.
- * This gives a ~54.7 us wide, 202-line-tall UI.
+ * The modern UI is 384 x 56 logical pixels. Each logical X pixel is expanded
+ * to three consecutive DAC samples (75 ns) and each logical Y row is emitted
+ * on three consecutive video lines. This gives a ~28.8 us wide, 168-line-tall UI
+ * while keeping the DMA chain at one SRAM segment per UI scanline.
  */
 #define MENU_FONT_HEIGHT 8u
 #define MENU_UI_WIDTH 384u
 #define MENU_UI_LINES 56u
-#define MENU_UI_STORAGE_LINES 28u
-#define MENU_UI_X_SCALE_NUM 57u
-#define MENU_UI_X_SCALE_DEN 10u
-#define MENU_UI_Y_SCALE_NUM 18u
-#define MENU_UI_Y_SCALE_DEN 5u
-#define MENU_UI_BYTES 2188u
-#define MENU_UI_PHYSICAL_LINES 202u
+#define MENU_UI_X_REPEAT 3u
+#define MENU_UI_Y_REPEAT 3u
+#define MENU_UI_BYTES (MENU_UI_WIDTH * MENU_UI_X_REPEAT)
 
-#define MENU_PREFIX_BYTES 352u
+#define MENU_PREFIX_BYTES 448u
 #define MENU_TAIL_BYTES (2560u - MENU_PREFIX_BYTES)
 #define MENU_PHASES 32u
 #define MENU_MAX_NODES 6200u
@@ -32,7 +29,7 @@ typedef struct {
     uint8_t equalizing[1280];
     uint8_t broad[1280];
     uint8_t blank[MENU_TAIL_BYTES];
-    uint8_t ui[MENU_UI_STORAGE_LINES][MENU_UI_BYTES];
+    uint8_t ui[MENU_UI_LINES][MENU_UI_BYTES];
 } menu_raster_t;
 
 typedef bool (*menu_segment_fn)(void *ctx, const uint8_t *data, unsigned length);
