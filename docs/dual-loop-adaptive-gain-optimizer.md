@@ -122,27 +122,28 @@ Tested on live Seeed Studio XIAO ESP32-C5 (`COM10`) receiving a 200 mW 5.8 GHz V
 
 ---
 
-## 5. Dynamic Bandwidth Gearbox & Gain Ceiling
+## 5. Fixed BW40 & Gain Ceiling
 
 ### 5.1 Noise Physics & The Gain Ceiling
-Pumping RF gain to the maximum ($G = 62$) during total signal absence amplifies Johnson-Nyquist thermal noise power ($P_N = kTB$) into hard 4-bit ADC clipping ($\pm 7$). Hard clipping transforms smooth Gaussian noise into random square waves, manifesting on an analog video display as harsh black-and-white "confetti" bars and tearing raster lines. Furthermore, maximum gain desensitizes the LNA when high-power out-of-band 5 GHz Wi-Fi routers are nearby.
+Pumping RF gain to the maximum ($G = 62$) during total signal absence amplifies Johnson-Nyquist thermal noise power ($P_N = kTB$) into hard 4-bit ADC clipping ($\pm 7$). Hard clipping transforms smooth Gaussian noise into random square waves, manifesting on an analog video display as harsh black-and-white "confetti" bars and tearing raster lines. Furthermore, maximum gain can reduce robustness in the presence of strong out-of-band interferers.
 
 **Adaptive Gain Ceiling Rule:**
-* **Signal Absent / Pure Noise** ($Q_{\text{phase}} < 30\%$): Gain is strictly capped at $G \le 40$, keeping thermal noise within the linear dynamic range ($\pm 2 \dots \pm 3$) and producing gentle, soft static ("snow") rather than destructive clipping.
-* **Carrier Present** ($Q_{\text{phase}} \ge 30\%$): Gain is permitted to climb all the way to $G = 62$ for maximum link-budget penetration behind walls.
+* **Signal Absent / Pure Noise** ($Q_{\text{phase}} < 30\%$): Gain is capped at $G \le 40$, keeping thermal noise inside the useful ADC range.
+* **Carrier Present** ($Q_{\text{phase}} \ge 30\%$): Gain may climb to $G = 62$ for weak-signal reception.
 
-### 5.2 Dynamic Bandwidth Adaptation (DBA Gearbox)
-Espressif specifies receiver sensitivity for the ESP32-C5:
-* **20 MHz Bandwidth (BW20)**: $\approx -94\text{ dBm}$ (10 MHz baseband channel filter)
-* **40 MHz Bandwidth (BW40)**: $\approx -91.5\text{ dBm}$ (20 MHz baseband channel filter)
+### 5.2 Why production is fixed to BW40
+A later experiment introduced a runtime BW40/BW20 "gearbox" based on the theoretical noise-power reduction from narrowing bandwidth. That control path is no longer part of production C5VRX.
 
-Halving the filter bandwidth cuts integrated thermal noise power by $3\text{ dB}$ ($10 \log_{10}(20/10) = 3.01\text{ dB}$).
-However, BW20 attenuates the higher-order sidebands of the 3.58 MHz NTSC color subcarrier ($\approx 11.16\text{ MHz}$), causing chroma phase distortion.
+The earlier physical A/B test in `docs/fix-cvbs-jitter-and-static.md` showed that the narrower setting attenuated part of the required wideband-FM video spectrum. On live hardware this reduced horizontal detail and destabilized chroma. The nominal Wi-Fi sensitivity difference between channel widths is also not direct proof that the undocumented `phy_wifi_fbw_sel()` toggle gives the same link-budget improvement in the raw MODEM_DIAG analog-FM path.
 
-**Two-Speed Dynamic Gearbox:**
-* **High Gear (BW40)**: Active during normal and strong reception. Provides full 20 MHz baseband bandwidth for pristine color saturation and sharp detail.
-* **Survival Low Gear (BW20)**: When the receiver enters a severe deep fade ($G \ge 58$ and $P_{\text{median}} < 12$ or $Q_{\text{phase}} < 45\%$ for 200 ms), the controller automatically shifts to BW20 (`phy_wifi_fbw_sel(0)`). The $+3\text{ dB}$ SNR boost rescues the synchronization pulses (HSYNC/VSYNC) and keeps the pilot's horizon visible.
-* **Hysteresis Recovery**: When the carrier returns strongly ($P_{\text{median}} \ge 22$ and $Q_{\text{phase}} \ge 80\%$ sustained for 1.0 s), the gearbox shifts back up to BW40.
+Production therefore uses:
+* `WIFI_BW40` as the public ESP-IDF channel-width configuration.
+* `phy_wifi_fbw_sel(1)` as a fixed analog-front-end setting.
+* The same BW40 setting re-applied after each RF channel retune.
+* No automatic or manual BW20 switching while the realtime video pipeline is running.
+
+This also removes a runtime RF-filter transient from the continuous MODEM_DIAG -> PARLIO -> Phase5 -> CVBS path.
+
 
 ---
 
