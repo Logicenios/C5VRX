@@ -97,9 +97,10 @@ check("video standard defaults to AUTO detector",
 check("menu resolves detected PAL/NTSC before raster start",
       "s_video_std = resolved_menu_standard();" in all_c)
 
-check("modern menu raster is 400x72 logical pixels",
-      "MENU_UI_WIDTH 400u" in read(MAIN / "menu_raster.h") and
-      "MENU_UI_LINES 72u" in read(MAIN / "menu_raster.h") and
+check("modern menu raster is SRAM-safe 384x56 logical pixels",
+      "MENU_UI_WIDTH 384u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_LINES 56u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_X_REPEAT 3u" in read(MAIN / "menu_raster.h") and
       "s_menu_raster.ui" in all_c)
 check("legacy seven-line text menu removed",
       "MENU_TEXT_BYTES" not in all_c and "MENU_ROWS" not in all_c)
