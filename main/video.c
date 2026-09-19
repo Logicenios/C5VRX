@@ -924,10 +924,7 @@ static void poll_transport_faults(void)
 
 /* Modern standalone menu renderer.
  *
- * SRAM-safe production raster: 384x56 logical pixels. One logical X pixel
- * maps to three 40 MHz DAC samples (75 ns), and every logical Y row is emitted
- * on three scanlines. This makes the on-screen controls 50% taller without the
- * oversized 400x72x4 backing store that exceeded ESP32-C5 DRAM.
+ * The 384x56 logical layout is scaled to 2188 samples by 202 scanlines.
  */
 enum {
     UI_ROOT = 22,
@@ -957,7 +954,9 @@ static const char *const s_menu_nav[6] = {
 static inline void menu_ui_pixel(int x, int y, uint8_t code)
 {
     if ((unsigned)x >= MENU_UI_WIDTH || (unsigned)y >= MENU_UI_LINES) return;
-    memset(&s_menu_raster.ui[y][x * MENU_UI_X_REPEAT], code, MENU_UI_X_REPEAT);
+    unsigned x0 = (unsigned)x * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
+    unsigned x1 = (unsigned)(x + 1) * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
+    memset(&s_menu_raster.ui[(unsigned)y / 2u][x0], code, x1 - x0);
 }
 
 static void menu_ui_rect(int x, int y, int w, int h, uint8_t code)
@@ -968,9 +967,13 @@ static void menu_ui_rect(int x, int y, int w, int h, uint8_t code)
     int x1 = x + w > (int)MENU_UI_WIDTH ? (int)MENU_UI_WIDTH : x + w;
     int y1 = y + h > (int)MENU_UI_LINES ? (int)MENU_UI_LINES : y + h;
     if (x1 <= x0 || y1 <= y0) return;
-    for (int yy = y0; yy < y1; ++yy) {
-        memset(&s_menu_raster.ui[yy][x0 * MENU_UI_X_REPEAT],
-               code, (size_t)(x1 - x0) * MENU_UI_X_REPEAT);
+    unsigned sy0 = (unsigned)y0 / 2u;
+    unsigned sy1 = ((unsigned)y1 + 1u) / 2u;
+    if (sy1 > MENU_UI_STORAGE_LINES) sy1 = MENU_UI_STORAGE_LINES;
+    for (unsigned yy = sy0; yy < sy1; ++yy) {
+        unsigned sx0 = (unsigned)x0 * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
+        unsigned sx1 = (unsigned)x1 * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
+        memset(&s_menu_raster.ui[yy][sx0], code, sx1 - sx0);
     }
 }
 

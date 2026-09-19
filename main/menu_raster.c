@@ -47,7 +47,7 @@ bool menu_raster_emit(const menu_raster_t *r, video_standard_t standard,
     const unsigned total_halves = field_halves * 8;
     /* Keep the taller menu centered at the same vertical position as the old
      * 112-line raster while staying clear of the vertical blanking interval. */
-    const unsigned text_start = pal ? 62 : 42;
+    const unsigned text_start = pal ? 43 : 23;
     for (unsigned h = 0; h < total_halves;) {
         /* PAL line 1 starts with broad sync; its five pre-equalizing
          * half-lines belong to the end of the preceding field. NTSC line 1
@@ -88,11 +88,13 @@ bool menu_raster_emit(const menu_raster_t *r, video_standard_t standard,
         if (!emit(ctx, prefix, MENU_PREFIX_BYTES)) return false;
         unsigned line = pos / 2;
         unsigned remaining = length - MENU_PREFIX_BYTES;
-        if (line >= text_start && line < text_start + MENU_UI_Y_REPEAT * MENU_UI_LINES) {
-            if (!emit(ctx, r->ui[(line - text_start) / MENU_UI_Y_REPEAT], MENU_UI_BYTES)) return false;
+        if (line >= text_start && line < text_start + MENU_UI_PHYSICAL_LINES) {
+            unsigned ui_line = (line - text_start) * MENU_UI_STORAGE_LINES / MENU_UI_PHYSICAL_LINES;
+            if (ui_line >= MENU_UI_STORAGE_LINES) ui_line = MENU_UI_STORAGE_LINES - 1u;
+            if (!emit(ctx, r->ui[ui_line], MENU_UI_BYTES)) return false;
             remaining -= MENU_UI_BYTES;
         }
-        if (!emit(ctx, r->blank, remaining)) return false;
+        if (remaining && !emit(ctx, r->blank, remaining)) return false;
         h += halves;
     }
     return true;
