@@ -21,7 +21,7 @@
 
 Flash your Seeed Studio XIAO ESP32-C5 directly from your browser (Google Chrome, Microsoft Edge, Brave, Opera) with zero installation required:
 
-**[Launch C5VRX Web Flasher]((https://c5vrx.com/))**
+https://c5vrx.com/
 
 - **Automatic Latest Firmware**: Automatically selects the latest continuous build from the `main` branch.
 - **One-Click Flashing**: Flashes the universal merged production image (`bootloader + partitions + app` at `0x0`) over Web Serial.
