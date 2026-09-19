@@ -5,7 +5,7 @@
   <p>From live RF to real-time analog NTSC composite video with one Seeed Studio XIAO ESP32-C5 and a passive resistor DAC.</p>
 
   <p>
-    <a href="https://twotoz.github.io/C5VRX/"><img src="https://img.shields.io/badge/Web%20Flasher-Online-1f6feb?style=flat" alt="Web Flasher" /></a>
+    <a href="https://c5vrx.com/"><img src="https://img.shields.io/badge/Web%20Flasher-Online-1f6feb?style=flat" alt="Web Flasher" /></a>
     <img src="https://img.shields.io/badge/status-production%20proven-success" alt="Production proven" />
     <img src="https://img.shields.io/badge/chip-ESP32--C5-111111" alt="ESP32-C5" />
     <img src="https://img.shields.io/badge/RF-5.8%20GHz%20(48%20channels)-6f42c1" alt="5.8 GHz" />
@@ -21,16 +21,42 @@
 
 Flash your Seeed Studio XIAO ESP32-C5 directly from your browser (Google Chrome, Microsoft Edge, Brave, Opera) with zero installation required:
 
-https://c5vrx.com/
+**[Open the C5VRX Web Flasher](https://c5vrx.com/)**
 
-- **Automatic Latest Firmware**: Automatically selects the latest continuous build from the `main` branch.
+`c5vrx.com` is the canonical production flasher. A static
+[GitHub Pages mirror](https://twotoz.github.io/C5VRX/) is available as a
+fallback.
+
+- **Automatic Latest Firmware**: Automatically selects the newest immutable semantic-version release.
 - **One-Click Flashing**: Flashes the universal merged production image (`bootloader + partitions + app` at `0x0`) over Web Serial.
-- **Selectable Releases**: Easily choose between latest `main` or previous releases.
+- **Selectable Releases**: Choose between versioned releases such as `v3.0.0`, `v3.0.1`, and newer.
 - **Offline / Local Execution**: You can also run the web flasher locally:
   ```bash
   python tools/open_webflasher.py
   ```
   *(Starts a local HTTP server at `http://localhost:8080/web/index.html` and opens your browser.)*
+
+### Automatic releases and versioning
+
+Every push or merged PR to `main` builds the production firmware and publishes a new immutable GitHub release with a semantic version tag.
+
+- `BREAKING CHANGE` or a conventional-commit `!` creates a **major** bump.
+- `feat:` / `feat(scope):` creates a **minor** bump.
+- `fix:`, `chore:`, `docs:`, and other changes create a **patch** bump.
+- If no stable release exists yet, the current `v3.0.0-rc1` line is promoted to `v3.0.0`.
+- The resolved version is written to `version.txt` before the ESP-IDF build, so the firmware metadata and GitHub release use the same version.
+- Release assets remain attached to their immutable version tag; the old mutable `main` release/tag is retired automatically after the first versioned release succeeds.
+
+### Website deployment
+
+Firmware releases and website deployment are intentionally separate:
+
+- `.github/workflows/build.yml` validates and builds firmware, then publishes a versioned release after a successful push to `main`.
+- `.github/workflows/deploy-web.yml` deploys only the static `web/` directory to the GitHub Pages mirror, and runs only when the web flasher itself changes (or when started manually).
+- Normal firmware and documentation commits therefore do not create unnecessary website deployments. The flasher discovers new versioned firmware releases dynamically through the GitHub API.
+
+Production hosting for `c5vrx.com` is managed separately; the GitHub Actions
+deployment controls only the `twotoz.github.io/C5VRX` mirror.
 
 ---
 
@@ -81,9 +107,10 @@ After startup, the CPU does not process pixels; the entire pipeline runs continu
 - **Fast Overload Safety Rem**: Instant gain cut ($\Delta G = -4 / -6$) if clipping occurs ($N_{\text{clip}} \ge 4$ and $P_{\text{median}} > 18$).
 - **Deadband Lock**: Zero register writes when locked in the clean target zone ($Q_{\text{phase}} \ge 70\%, P_{\text{median}} \in [18, 30]$).
 
-### 3. Dynamic Bandwidth Gearbox (BW40 <-> BW20)
-- **BW40 (Wide / Color)**: Default mode keeping the full 20 MHz baseband analog filter open (`phy_wifi_fbw_sel(1)`) for vibrant color subcarrier fidelity and horizontal resolution.
-- **BW20 (+3 dB Long-Range Survival)**: In severe fades ($G \ge 56$ and $Q_{\text{phase}} < 55\%$ or $P_{\text{median}} < 16$), the receiver automatically downshifts to BW20 (`phy_wifi_fbw_sel(0)`), halving thermal noise bandwidth for an immediate **$+3\text{ dB}$ SNR boost** (+41% range). Automatically upshifts back to BW40 when signal recovers.
+### 3. Fixed BW40 Analog Front-End
+- **BW40 is the production RF contract**: C5VRX keeps the wide analog front-end selected with `phy_wifi_fbw_sel(1)` during startup and after every channel retune.
+- **No runtime BW20 gearbox**: Earlier hardware testing showed the narrower setting rolls off part of the analog-FM video spectrum, reducing detail and causing chroma instability. The later theoretical "+3 dB survival" gearbox was therefore removed.
+- **No bandwidth-switch transient in flight**: Weak-signal recovery is handled by the adaptive gain controller and demodulator/noise handling while RF bandwidth remains fixed.
 
 ### 4. Soft-Noise Squelched Phase5 Demodulator
 - The `fm.bsasm` BitScrambler program implements soft-noise squelching: phase deltas around $\pm 180^\circ$ (deltas $-16 \dots -12$ and $+13 \dots +15$) are mapped to blanking pedestal (DAC code 20) instead of sync tip (DAC code 0).
@@ -108,7 +135,7 @@ Connect a 6-bit binary-weighted resistor DAC ladder to the XIAO pins, meeting at
 ### Recommended Analog Filters:
 1. **Shunt Termination**: 200 Ω resistor from `VIDEO` to `GND`. When connected to goggles with standard 75 Ω termination, this forms a matched 0–1.0 V standard CVBS level.
 2. **De-Emphasis Filter**: A **470 pF ceramic capacitor** placed in parallel across `VIDEO` and `GND` creates a 10–14 dB high-frequency de-emphasis low-pass filter, dramatically reducing triangular FM noise and snow.
-3. **BOOT Button**: The built-in BOOT button (GPIO 28) switches channels on short click and toggles the OSD menu on long press (≥ 600 ms).
+3. **BOOT Button**: The built-in BOOT button (GPIO 28) switches channels on short click. The experimental long-press menu is temporarily disabled in the production firmware while its raster geometry and display compatibility are reworked.
 
 ---
 
@@ -121,7 +148,6 @@ Connecting to the USB serial console (115200 baud) provides live telemetry and s
 | `c` / `C` | Cycle FPV channel / band (48 standard channels: RaceBand, Boscam A/B/E, FatShark, LowBand) |
 | `+` / `-` | Manual RF gain step (±2 index) |
 | `a` / `s` / `m` | Switch AGC mode: **Active** (auto-adapting) / **Shadow** (dry-run) / **Manual** (fixed) |
-| `b` | Cycle Bandwidth Gear: **Auto Gearbox** / Forced BW40 / Forced BW20 |
 | `f` | Cycle AFC Mode: **Auto Centering** (±1.5 MHz) / **Hold** / **Off** (0 kHz) |
 | `,` / `.` | Fine-tune carrier frequency offset in ±50 kHz steps |
 | `0` | Reset frequency offset to 0 kHz |
@@ -180,7 +206,7 @@ Before flashing, run the built-in validator to ensure zero DMA/BitScrambler cons
 ```bash
 python tools/validate_build.py
 ```
-*(All 31 architectural checks must pass.)*
+*(All architectural checks must pass.)*
 
 ---
 
@@ -188,7 +214,9 @@ python tools/validate_build.py
 
 #### Option A: Web Flasher (Zero-Install In-Browser Flasher)
 Launch the web flasher directly in your browser (Google Chrome, Microsoft Edge, Brave):
-**[Open C5VRX Web Flasher](https://twotoz.github.io/C5VRX/)**
+**[Open C5VRX Web Flasher](https://c5vrx.com/)**
+
+[GitHub Pages mirror](https://twotoz.github.io/C5VRX/)
 
 #### Option B: Zero-Friction Auto-Flash (Python Watcher)
 Run the auto-flash watcher:
@@ -215,7 +243,7 @@ Launch the dedicated low-latency serial monitor:
 ```bash
 python tools/monitor.py COM10
 ```
-Use the interactive hotkeys (`c` to cycle channels, `+`/`-` for manual gain, `b` for bandwidth gearbox, `a` for active AGC, `d` for hardware diagnostics).
+Use the interactive hotkeys (`c` to cycle channels, `+`/`-` for manual gain, `a` for active AGC, `d` for hardware diagnostics).
 
 ---
 

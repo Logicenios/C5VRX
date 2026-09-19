@@ -386,10 +386,11 @@ esp_err_t rf_start(void)
     phy_disable_agc();
     phy_rfagc_disable();
 
-    /* Start wide for full colour/detail. The software gearbox will switch the
-     * analog front-end to BW20 during weak-signal acquisition/deep fades. */
+    /* Fixed production RF contract: keep the analog front-end wide enough for
+     * the full analog-FM video spectrum. Hardware testing showed the narrower
+     * filter damages chroma/detail, so runtime BW20 switching is not used. */
     extern void phy_wifi_fbw_sel(uint32_t val);
-    phy_wifi_fbw_sel(1);
+    phy_wifi_fbw_sel(1u);
 
     /* Force high-sensitivity sweet-spot gain (index 52).
      * Provides sensitive reception of weak carriers out of the box while
@@ -417,7 +418,6 @@ extern void phy_rfagc_disable(void);
 extern void phy_set_freq(uint16_t freq_mhz, int offset);
 extern void phy_chip_set_chan_offset(int offset_khz);
 
-static bool s_analog_bw40 = true;
 static uint8_t s_current_gain_val = 52u;
 
 /* Standard FPV Channel Table: 6 Bands x 8 Channels = 48 Channels
@@ -500,17 +500,6 @@ static bool plan_wifi5_center(uint16_t freq_mhz, uint8_t *channel, uint16_t *cen
     if (channel) *channel = s_wifi5_centers[best].channel;
     if (center_mhz) *center_mhz = s_wifi5_centers[best].mhz;
     return true;
-}
-
-void rf_set_analog_bandwidth(bool bw40)
-{
-    s_analog_bw40 = bw40;
-    phy_wifi_fbw_sel(bw40 ? 1u : 0u);
-}
-
-bool rf_get_analog_bandwidth(void)
-{
-    return s_analog_bw40;
 }
 
 void rf_set_rx_gain(bool force, uint8_t gain_idx)
@@ -631,7 +620,7 @@ esp_err_t rf_set_channel(size_t index)
      * the analog-FM contract after every channel change. */
     phy_disable_agc();
     phy_rfagc_disable();
-    phy_wifi_fbw_sel(s_analog_bw40 ? 1u : 0u);
+    phy_wifi_fbw_sel(1u);
     phy_force_rx_gain(true, s_current_gain_val);
 
     /* Commit logical state only after the supported bootstrap succeeded. */

@@ -83,6 +83,73 @@ check("DAC_IDLE_CODE == 20",
 check("IQ_RATE_HZ == 40000000",
       bool(re.search(r"IQ_RATE_HZ\s+40000000", all_c)))
 
+check("AGC uses one complete 4092-byte descriptor",
+      bool(re.search(r"CONTROL_SAMPLE_BYTES\s+4092", all_c)) and
+      "get_completed_rx_sample_window(CONTROL_SAMPLE_BYTES)" in all_c)
+check("gain transition hot path has no AGC printf",
+      "[AGC:GAIN]" not in all_c)
+check("periodic runtime telemetry disabled",
+      bool(re.search(r"PERIODIC_TELEMETRY\s+0", all_c)))
+check("video standard defaults to AUTO detector",
+      "VIDEO_STD_MODE_AUTO" in all_c and
+      "video_standard_observe" in all_c and
+      "phase5_pair_is_sync" in all_c)
+check("menu resolves detected PAL/NTSC before raster start",
+      "s_video_std = resolved_menu_standard();" in all_c)
+
+check("modern menu raster is SRAM-safe 384x56 logical pixels",
+      "MENU_UI_WIDTH 384u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_LINES 56u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_X_REPEAT 3u" in read(MAIN / "menu_raster.h") and
+      "s_menu_raster.ui" in all_c)
+check("experimental menu is runtime-disabled for release",
+      bool(re.search(r"MENU_RUNTIME_ENABLED\s+0", all_c)) and
+      "if (active && !MENU_RUNTIME_ENABLED) return;" in all_c and
+      "s_menu_boot_btn_enabled = false" in all_c)
+check("legacy seven-line text menu removed",
+      "MENU_TEXT_BYTES" not in all_c and "MENU_ROWS" not in all_c)
+check("lag diagnostics poll PARLIO GDMA and BitScrambler",
+      "poll_transport_faults" in all_c and
+      "GDMA_IN_FAULT_MASK" in all_c and
+      "GDMA_OUT_FAULT_MASK" in all_c and
+      "LAG_EVT_BS_EOF_OVERLOAD" in all_c)
+check("lag events correlate against gain writes",
+      "near_gain_event_count" in all_c and
+      "s_last_gain_write_us = esp_timer_get_time();" in all_c)
+
+# ---- Web flasher / release safety ----
+web_app = read(ROOT / "web" / "app.js")
+workflow = read(ROOT / ".github" / "workflows" / "build.yml")
+web_workflow = read(ROOT / ".github" / "workflows" / "deploy-web.yml")
+readme = read(ROOT / "README.md")
+check("web flasher selects the application image explicitly",
+      "findApplicationAsset(assets)" in web_app and
+      "!name.includes('bootloader')" in web_app and
+      "!name.includes('partition')" in web_app and
+      "!name.includes('merged')" in web_app)
+check("full firmware fallback rejects incomplete release assets",
+      "Incomplete full firmware package" in web_app)
+check("release build is gated by architectural validation",
+      "needs: [version, validate]" in workflow)
+check("firmware CI does not create Pages deployments",
+      "actions/deploy-pages" not in workflow and
+      "Deploy Web Flasher to GitHub Pages" not in workflow)
+check("web deployment is isolated and path-filtered",
+      'paths:' in web_workflow and
+      '"web/**"' in web_workflow and
+      "workflow_dispatch:" in web_workflow and
+      "actions/deploy-pages@v4" in web_workflow)
+check("README uses canonical production flasher URL",
+      readme.count("https://c5vrx.com/") >= 3 and
+      "GitHub Pages mirror" in readme)
+
+check("gain transient classifier present",
+      "gain_quality_drop_count" in all_c and
+      "s_last_gain_drop_transition" in all_c)
+check("visible lag marker present",
+      "[LAG MARK]" in all_c and
+      "user_lag_mark_count" in all_c)
+
 # RX POS edge (not NEG)
 check("PARLIO_SAMPLE_EDGE_POS in video.c",
       "PARLIO_SAMPLE_EDGE_POS" in all_c)

@@ -86,9 +86,9 @@ bool menu_raster_emit(const menu_raster_t *r, video_standard_t standard,
         if (!emit(ctx, prefix, MENU_PREFIX_BYTES)) return false;
         unsigned line = pos / 2;
         unsigned remaining = length - MENU_PREFIX_BYTES;
-        if (line >= text_start && line < text_start + 2 * MENU_TEXT_LINES) {
-            if (!emit(ctx, r->text[(line - text_start) / 2], MENU_TEXT_BYTES)) return false;
-            remaining -= MENU_TEXT_BYTES;
+        if (line >= text_start && line < text_start + 2 * MENU_UI_LINES) {
+            if (!emit(ctx, r->ui[(line - text_start) / 2], MENU_UI_BYTES)) return false;
+            remaining -= MENU_UI_BYTES;
         }
         if (!emit(ctx, r->blank, remaining)) return false;
         h += halves;

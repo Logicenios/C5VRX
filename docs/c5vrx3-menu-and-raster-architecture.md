@@ -43,6 +43,34 @@ already-running RX cannot establish separation. The delay calculation now uses
 204 us, truncated from 204.8 us, plus driver latency; exact physical separation
 still needs measurement.
 
+### Automatic live-standard matching
+
+The menu standard now defaults to `AUTO` instead of blindly starting NTSC.
+
+While live video is healthy and RF gain is settled, the control task observes
+one already-completed 4092-byte RX descriptor. It mirrors the production
+Phase5 state mapping and recognizes only Phase5 transitions that the real
+`fm.bsasm` LUT would emit near sync tip. Valid H-sync runs are then classified
+by their 20 MS/s line period:
+
+- NTSC: approximately 1271 samples per line;
+- PAL: 1280 samples per line.
+
+A single interval cannot switch standards. PAL and NTSC maintain competing
+scores, with a dead zone between their timing windows, and a standard is only
+declared after repeated consistent votes. Gain-settling periods and weak/noisy
+carriers are excluded from voting.
+
+On menu entry, AUTO resolves to the last confidently detected live standard
+before the independent menu raster starts. This avoids deliberately asking the
+goggles/decoder to re-lock PAL -> NTSC or NTSC -> PAL merely because the menu
+opened. Manual NTSC and PAL modes remain available as debug/compatibility
+overrides.
+
+The detector is observation-only; it does not insert a framebuffer, restart
+Phase5, alter the RF bandwidth, or add work to the hardware-paced live sample
+path.
+
 ### Raster timing and memory
 
 Timing reference: [ITU-R BT.470](https://www.itu.int/rec/R-REC-BT.470/en), including
@@ -71,11 +99,25 @@ This is a quantized monochrome menu with a colour reference burst, not a claim
 of laboratory broadcast compliance. Analog ratios, edge shaping, oscillator
 tolerance and decoder compatibility require physical validation.
 
-Shared porch, blank and text buffers avoid a 1.6 MB PAL framebuffer. Chains use
-5,900 PAL or 5,100 NTSC nodes, with 6,000 slots reserved. Raster plus descriptor
-capacity occupies 148,800 bytes, slightly less than the old menu allocation.
-Text uses four samples/pixel. Only text pixels may change while scanning (one
-refresh can tear); timing buffers and links change only with TX stopped.
+Shared porch/blank buffers and a dedicated modern UI raster avoid a full PAL
+framebuffer. The production UI is **384 x 56 logical pixels**:
+
+- one logical X pixel = three 40 MHz DAC samples (1152 samples / 28.8 us UI width);
+- one logical Y row = two physical video lines (112-line UI height);
+- exact six-bit DAC shades only; no alpha, anti-aliasing or browser-style scaling;
+- persistent status bar + navigation rail + page content, rendered from the existing
+  8x8 bitmap font and small built-in icons.
+
+The UI backing store is 64,512 bytes. Together with sync/burst/blank templates,
+`menu_raster_t` is 83,968 bytes. The first 400x72x4 implementation was rejected
+by the production linker because it overflowed ESP32-C5 SRAM by 39,408 bytes.
+The compact 384x56x3 layout keeps the same modern status/sidebar/page structure
+while adding only about 7.2 KiB over the old menu raster.
+
+The scatter chain still uses one UI segment per displayed scanline, so the DMA
+node count does not grow with glyph complexity. Only `raster.ui` changes while
+the standalone menu is running; timing templates and descriptor links change
+only with TX stopped.
 
 ### Controls, console and validation
 

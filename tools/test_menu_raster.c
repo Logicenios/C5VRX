@@ -36,7 +36,7 @@ static void test(video_standard_t standard)
     unsigned eq = pal ? 5 : 6;
     used = nodes = 0;
     menu_raster_init(&raster, standard);
-    memset(raster.text, 60, sizeof(raster.text));
+    memset(raster.ui, 60, sizeof(raster.ui));
     assert(menu_raster_emit(&raster, standard, capture, NULL));
     assert(!menu_raster_emit(&raster, standard, reject, NULL));
     assert(used == (pal ? 6400000u : 5338668u));

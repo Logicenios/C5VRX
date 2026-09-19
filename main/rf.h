@@ -32,14 +32,6 @@ void rf_set_rx_gain(bool force, uint8_t gain_idx);
 uint32_t rf_get_rx_gain_reg(void);
 
 /**
- * Select analog filter bandwidth:
- * true  = BW40 (open 20 MHz baseband filter, full color fidelity)
- * false = BW20 (narrow 10 MHz baseband filter, +3 dB SNR survival mode)
- */
-void rf_set_analog_bandwidth(bool bw40);
-bool rf_get_analog_bandwidth(void);
-
-/**
  * FPV Channel and Carrier Frequency Fine-Tuning:
  */
 typedef struct {

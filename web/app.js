@@ -60,19 +60,6 @@ let localFileNameStr = '';
 // Known fallback releases if GitHub API rate-limits
 const FALLBACK_RELEASES = [
   {
-    tag_name: 'main',
-    name: 'C5VRX-3 (Latest main branch)',
-    published_at: '2026-09-19T10:41:19Z',
-    prerelease: false,
-    assets: [
-      { name: 'c5vrx3_merged.bin', size: 1152560, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/c5vrx3_merged.bin' },
-      { name: 'c5vrx3.bin', size: 1087024, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/c5vrx3.bin' },
-      { name: 'bootloader.bin', size: 23232, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/bootloader.bin' },
-      { name: 'partition-table.bin', size: 3072, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/partition-table.bin' },
-      { name: 'flasher_args.json', size: 909, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/main/flasher_args.json' },
-    ]
-  },
-  {
     tag_name: 'v3.0.0-rc1',
     name: 'C5VRX-3 v3.0.0-rc1: Seamless 16K Phase5 Production Receiver',
     published_at: '2026-09-18T17:01:49Z',
@@ -82,17 +69,10 @@ const FALLBACK_RELEASES = [
       { name: 'bootloader.bin', size: 23232, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/v3.0.0-rc1/bootloader.bin' },
       { name: 'partition-table.bin', size: 3072, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/v3.0.0-rc1/partition-table.bin' },
     ]
-  },
-  {
-    tag_name: 'legacy/v2-final',
-    name: 'C5VRX-2: Research Platform & Multi-Candidate Demodulator',
-    published_at: '2026-09-18T17:01:37Z',
-    prerelease: false,
-    assets: [
-      { name: 'c5vrx2.bin', size: 1205000, browser_download_url: 'https://github.com/Twotoz/C5VRX/releases/download/legacy%2Fv2-final/c5vrx2.bin' }
-    ]
   }
 ];
+
+const VERSION_TAG_PATTERN = /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 // Terminal output helper
 function log(msg, type = 'info') {
@@ -125,18 +105,6 @@ function checkSerialSupport() {
     return false;
   }
   return true;
-}
-
-// Convert ArrayBuffer to binary string required by esptool-js
-function bufferToBinaryString(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  const len = bytes.byteLength;
-  const chunkSize = 8192;
-  for (let i = 0; i < len; i += chunkSize) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunkSize, len)));
-  }
-  return binary;
 }
 
 // Tab Switching
@@ -220,49 +188,46 @@ async function fetchReleases() {
     if (!res.ok) throw new Error(`GitHub API HTTP ${res.status}`);
     const data = await res.json();
     if (!Array.isArray(data) || data.length === 0) throw new Error('No releases found');
-    githubReleases = data;
-    log(`Successfully fetched ${githubReleases.length} releases from GitHub.`);
-  } catch (err) {
-    log(`Warning: Failed to fetch online releases (${err.message}). Using cached release index.`);
-    githubReleases = FALLBACK_RELEASES;
-  }
 
-  // Ensure 'main' release is always present and at the top of the list
-  const mainIndex = githubReleases.findIndex(r => (r.tag_name || '').toLowerCase() === 'main');
-  if (mainIndex > 0) {
-    // Move main release to the very front
-    const mainRel = githubReleases.splice(mainIndex, 1)[0];
-    githubReleases.unshift(mainRel);
-  } else if (mainIndex === -1 && FALLBACK_RELEASES.length > 0) {
-    // If not returned by online API, prepend fallback main release
-    githubReleases.unshift(FALLBACK_RELEASES[0]);
+    // Ignore the old mutable "main" release/tag and legacy naming. The web
+    // flasher only consumes immutable semantic-version releases.
+    githubReleases = data
+      .filter(rel => VERSION_TAG_PATTERN.test(rel.tag_name || ''))
+      .sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0));
+
+    if (githubReleases.length === 0) {
+      throw new Error('No semantic-version releases found');
+    }
+
+    log(`Successfully fetched ${githubReleases.length} versioned releases from GitHub.`);
+  } catch (err) {
+    log(`Warning: Failed to fetch versioned releases (${err.message}). Using cached release index.`);
+    githubReleases = FALLBACK_RELEASES;
   }
 
   populateReleaseDropdown();
 }
-
 function populateReleaseDropdown() {
   selectRelease.innerHTML = '';
   githubReleases.forEach((rel, index) => {
     const opt = document.createElement('option');
     opt.value = index;
     const tag = rel.tag_name || rel.name;
-    const isMain = tag.toLowerCase() === 'main';
-    if (isMain) {
-      opt.textContent = `${tag} (Latest main build - Recommended)`;
-    } else if (rel.prerelease) {
-      opt.textContent = `${tag} [Pre-release]`;
+    const isLatest = index === 0;
+
+    if (rel.prerelease) {
+      opt.textContent = `${tag} [Pre-release]${isLatest ? ' (Latest available)' : ''}`;
     } else {
-      opt.textContent = `${tag}`;
+      opt.textContent = `${tag}${isLatest ? ' (Latest - Recommended)' : ''}`;
     }
     selectRelease.appendChild(opt);
   });
+
   if (githubReleases.length > 0) {
     selectRelease.value = 0;
     onReleaseSelected(0);
   }
 }
-
 selectRelease.addEventListener('change', () => {
   const idx = parseInt(selectRelease.value, 10);
   onReleaseSelected(idx);
@@ -280,7 +245,7 @@ function onReleaseSelected(index) {
   infoReleaseName.textContent = rel.name || rel.tag_name;
   infoReleaseDate.textContent = rel.published_at ? new Date(rel.published_at).toLocaleDateString() : 'N/A';
   infoReleaseTag.textContent = rel.tag_name;
-  
+
   const assetNames = (rel.assets || []).map(a => a.name).join(', ') || 'No binary assets attached';
   infoReleaseAssets.textContent = assetNames;
 
@@ -297,6 +262,19 @@ function updateFlashButtonState() {
   } else {
     btnFlash.disabled = (localFileBinary === null);
   }
+}
+
+function findApplicationAsset(assets) {
+  // GitHub returns release assets in upload order. Never use the first .bin:
+  // bootloader.bin is commonly uploaded before the application image.
+  return assets.find(asset => /^c5vrx(?:3)?\.bin$/i.test(asset.name || '')) ||
+    assets.find(asset => {
+      const name = (asset.name || '').toLowerCase();
+      return name.endsWith('.bin') &&
+        !name.includes('bootloader') &&
+        !name.includes('partition') &&
+        !name.includes('merged');
+    });
 }
 
 // Connect / Disconnect Handler
@@ -421,36 +399,38 @@ btnFlash.addEventListener('click', async () => {
         if (mergedAsset) {
           log(`Downloading ${mergedAsset.name}...`);
           const buf = await fetchBinary(mergedAsset.browser_download_url);
-          fileArray.push({ data: bufferToBinaryString(buf), address: 0x0 });
+          fileArray.push({ data: new Uint8Array(buf), address: 0x0 });
         } else {
           // Standard 3-part layout
           const bootloader = assets.find(a => a.name.includes('bootloader'));
           const ptable = assets.find(a => a.name.includes('partition'));
-          const app = assets.find(a => a.name.includes('c5vrx') || a.name.endsWith('.bin'));
-
-          if (!app) throw new Error('Could not find application firmware binary in release assets');
-
-          if (bootloader) {
-            log(`Downloading bootloader (${bootloader.name})...`);
-            const bBuf = await fetchBinary(bootloader.browser_download_url);
-            fileArray.push({ data: bufferToBinaryString(bBuf), address: 0x2000 });
+          const app = findApplicationAsset(assets);
+          const missing = [
+            !bootloader && 'bootloader',
+            !ptable && 'partition table',
+            !app && 'application firmware',
+          ].filter(Boolean);
+          if (missing.length > 0) {
+            throw new Error(`Incomplete full firmware package: missing ${missing.join(', ')}`);
           }
-          if (ptable) {
-            log(`Downloading partition table (${ptable.name})...`);
-            const pBuf = await fetchBinary(ptable.browser_download_url);
-            fileArray.push({ data: bufferToBinaryString(pBuf), address: 0x8000 });
-          }
+
+          log(`Downloading bootloader (${bootloader.name})...`);
+          const bBuf = await fetchBinary(bootloader.browser_download_url);
+          fileArray.push({ data: new Uint8Array(bBuf), address: 0x2000 });
+          log(`Downloading partition table (${ptable.name})...`);
+          const pBuf = await fetchBinary(ptable.browser_download_url);
+          fileArray.push({ data: new Uint8Array(pBuf), address: 0x8000 });
           log(`Downloading app binary (${app.name})...`);
           const aBuf = await fetchBinary(app.browser_download_url);
-          fileArray.push({ data: bufferToBinaryString(aBuf), address: 0x10000 });
+          fileArray.push({ data: new Uint8Array(aBuf), address: 0x10000 });
         }
       } else {
         // App only
-        const app = assets.find(a => a.name.includes('c5vrx') || a.name.endsWith('.bin'));
+        const app = findApplicationAsset(assets);
         if (!app) throw new Error('Could not find application firmware binary in release assets');
         log(`Downloading app binary (${app.name})...`);
         const aBuf = await fetchBinary(app.browser_download_url);
-        fileArray.push({ data: bufferToBinaryString(aBuf), address: 0x10000 });
+        fileArray.push({ data: new Uint8Array(aBuf), address: 0x10000 });
       }
     } else {
       // Local File
@@ -458,7 +438,7 @@ btnFlash.addEventListener('click', async () => {
       let offset = parseInt(inputFlashOffset.value.trim(), 16);
       if (isNaN(offset)) offset = 0x0;
       fileArray.push({
-        data: bufferToBinaryString(localFileBinary),
+        data: new Uint8Array(localFileBinary),
         address: offset
       });
     }
@@ -476,7 +456,8 @@ btnFlash.addEventListener('click', async () => {
       flashMode: 'dio',
       flashFreq: '80m',
       eraseAll: chkEraseAll.checked,
-      compress: true,
+      // ESP32-C5 native USB-Serial/JTAG can fail mid-write in the compressed path (status 201,0).
+      compress: false,
       reportProgress: (fileIndex, written, total) => {
         const percent = Math.floor((written / total) * 100);
         progressBar.style.width = `${percent}%`;
