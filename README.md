@@ -6,6 +6,7 @@
 
   <p>
     <a href="https://c5vrx.com/"><img src="https://img.shields.io/badge/Web%20Flasher-Online-1f6feb?style=flat" alt="Web Flasher" /></a>
+    <a href="https://discord.gg/3YNgJRHmzD"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&amp;logoColor=white" alt="Join the C5VRX Discord" /></a>
     <img src="https://img.shields.io/badge/status-production%20proven-success" alt="Production proven" />
     <img src="https://img.shields.io/badge/chip-ESP32--C5-111111" alt="ESP32-C5" />
     <img src="https://img.shields.io/badge/RF-5.8%20GHz%20(48%20channels)-6f42c1" alt="5.8 GHz" />
@@ -57,6 +58,12 @@ Firmware releases and website deployment are intentionally separate:
 
 Production hosting for `c5vrx.com` is managed separately; the GitHub Actions
 deployment controls only the `twotoz.github.io/C5VRX` mirror.
+
+---
+
+## Community
+
+Questions, build photos, feedback, or development discussion? **[Join the C5VRX Discord](https://discord.gg/3YNgJRHmzD)**.
 
 ---
 
