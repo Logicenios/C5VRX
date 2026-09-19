@@ -102,7 +102,7 @@ tolerance and decoder compatibility require physical validation.
 Shared porch/blank buffers and a dedicated modern UI raster avoid a full PAL
 framebuffer. The production UI is **384 x 56 logical pixels**:
 
-- one logical X pixel = three 40 MHz DAC samples (1152 samples / 28.8 us UI width);
+- horizontal coordinates use 18/5 DAC samples (1384 samples / 34.6 us UI width);
 - one logical Y row = three physical video lines (168-line UI height);
 - exact six-bit DAC shades only; no alpha, anti-aliasing or browser-style scaling;
 - persistent status bar + navigation rail + page content, rendered from the existing
@@ -116,7 +116,7 @@ The compact 384x56x3 layout keeps the same modern status/sidebar/page structure
 while adding only about 7.2 KiB over the old menu raster.
 
 The scatter chain still uses one UI segment per displayed scanline, so the DMA
-node count does not grow with glyph complexity. Its capacity is 6,592 nodes to
+node count does not grow with glyph complexity. Its capacity is 6,348 nodes to
 cover the 3x PAL raster. Only `raster.ui` changes while
 the standalone menu is running; timing templates and descriptor links change
 only with TX stopped.

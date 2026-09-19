@@ -72,7 +72,8 @@ bool menu_raster_emit(const menu_raster_t *r, video_standard_t standard,
         unsigned halves = pos + 1 < field_halves ? 2 : 1;
         length = menu_half_sample(standard, h + halves) - start;
         /* Carrier phase from absolute sample time, including at loop wrap.
-         * 32 phase bins limit burst phase quantization to 5.625 degrees. */
+         * Phase bins quantize only the burst start phase; samples within each
+         * burst retain the exact PAL/NTSC carrier frequency. */
         double cycles = pal ? (double)start * 709379.0 / 6400000.0 :
                               (double)start * 477750.0 / 5338668.0;
         cycles += pal ? ((h / 2) & 1u ? -0.375 : 0.375) : 0.5;
