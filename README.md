@@ -92,9 +92,10 @@ After startup, the CPU does not process pixels; the entire pipeline runs continu
 - **Fast Overload Safety Rem**: Instant gain cut ($\Delta G = -4 / -6$) if clipping occurs ($N_{\text{clip}} \ge 4$ and $P_{\text{median}} > 18$).
 - **Deadband Lock**: Zero register writes when locked in the clean target zone ($Q_{\text{phase}} \ge 70\%, P_{\text{median}} \in [18, 30]$).
 
-### 3. Dynamic Bandwidth Gearbox (BW40 <-> BW20)
-- **BW40 (Wide / Color)**: Default mode keeping the full 20 MHz baseband analog filter open (`phy_wifi_fbw_sel(1)`) for vibrant color subcarrier fidelity and horizontal resolution.
-- **BW20 (+3 dB Long-Range Survival)**: In severe fades ($G \ge 56$ and $Q_{\text{phase}} < 55\%$ or $P_{\text{median}} < 16$), the receiver automatically downshifts to BW20 (`phy_wifi_fbw_sel(0)`), halving thermal noise bandwidth for an immediate **$+3\text{ dB}$ SNR boost** (+41% range). Automatically upshifts back to BW40 when signal recovers.
+### 3. Fixed BW40 Analog Front-End
+- **BW40 is the production RF contract**: C5VRX keeps the wide analog front-end selected with `phy_wifi_fbw_sel(1)` during startup and after every channel retune.
+- **No runtime BW20 gearbox**: Earlier hardware testing showed the narrower setting rolls off part of the analog-FM video spectrum, reducing detail and causing chroma instability. The later theoretical "+3 dB survival" gearbox was therefore removed.
+- **No bandwidth-switch transient in flight**: Weak-signal recovery is handled by the adaptive gain controller and demodulator/noise handling while RF bandwidth remains fixed.
 
 ### 4. Soft-Noise Squelched Phase5 Demodulator
 - The `fm.bsasm` BitScrambler program implements soft-noise squelching: phase deltas around $\pm 180^\circ$ (deltas $-16 \dots -12$ and $+13 \dots +15$) are mapped to blanking pedestal (DAC code 20) instead of sync tip (DAC code 0).
@@ -132,7 +133,6 @@ Connecting to the USB serial console (115200 baud) provides live telemetry and s
 | `c` / `C` | Cycle FPV channel / band (48 standard channels: RaceBand, Boscam A/B/E, FatShark, LowBand) |
 | `+` / `-` | Manual RF gain step (±2 index) |
 | `a` / `s` / `m` | Switch AGC mode: **Active** (auto-adapting) / **Shadow** (dry-run) / **Manual** (fixed) |
-| `b` | Cycle Bandwidth Gear: **Auto Gearbox** / Forced BW40 / Forced BW20 |
 | `f` | Cycle AFC Mode: **Auto Centering** (±1.5 MHz) / **Hold** / **Off** (0 kHz) |
 | `,` / `.` | Fine-tune carrier frequency offset in ±50 kHz steps |
 | `0` | Reset frequency offset to 0 kHz |
