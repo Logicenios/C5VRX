@@ -468,7 +468,7 @@ btnFlash.addEventListener('click', async () => {
     }
 
     log('====================================================');
-    log('🎉 FLASHING COMPLETED SUCCESSFULLY!');
+    log('FLASHING COMPLETED SUCCESSFULLY!');
     log('Your C5VRX receiver is now running the new firmware.');
     log('====================================================');
     alert('Flashing completed successfully! Device has been reset.');
