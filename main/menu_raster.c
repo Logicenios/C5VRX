@@ -47,7 +47,7 @@ bool menu_raster_emit(const menu_raster_t *r, video_standard_t standard,
     const unsigned total_halves = field_halves * 8;
     /* Keep the taller menu centered at the same vertical position as the old
      * 112-line raster while staying clear of the vertical blanking interval. */
-    const unsigned text_start = pal ? 48 : 28;
+    const unsigned text_start = pal ? 62 : 42;
     for (unsigned h = 0; h < total_halves;) {
         /* PAL line 1 starts with broad sync; its five pre-equalizing
          * half-lines belong to the end of the preceding field. NTSC line 1
