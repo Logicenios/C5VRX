@@ -101,11 +101,11 @@ digital edges:
 
 ## 2. Digital mitigations in firmware
 
-### 2.1 Narrowing Wi-Fi analog baseband bandwidth (`WIFI_BW20`)
-In `main/wifi5.c`, setting `.ghz_5g = WIFI_BW20` forces the ESP32-C5 RF frontend
-to engage its 20 MHz analog baseband channel filter instead of 40 MHz. This cuts
-out approximately **3 dB of out-of-band thermal noise** before the signal ever
-reaches the ADC.
+### 2.1 Keep the RF front-end at BW40
+An early hypothesis proposed `WIFI_BW20` / `phy_wifi_fbw_sel(0)` as a way to reduce pre-discriminator thermal noise. Live hardware testing later rejected that as a production fix: the narrower front-end attenuated part of the wideband-FM video spectrum, reducing detail and destabilizing chroma.
+
+C5VRX therefore keeps `WIFI_BW40` and `phy_wifi_fbw_sel(1)` fixed. Noise reduction should happen without discarding wanted FM sidebands, for example through gain control, discriminator-domain noise handling, and post-demodulation de-emphasis/reconstruction filtering.
+
 
 ### 2.2 Phase5 centroid mapping and near-origin suppression (PR #5)
 In `main/wbfm_q4.c` and `main/c5vrx2_wbfm_q4_phase5_2to1.bsasm`:
