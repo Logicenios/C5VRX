@@ -2,7 +2,7 @@ name: C5VRX-3 Production CI
 
 on:
   push:
-    branches: [main, "codex/**"]
+    branches: [main, "codex/**", "feat/**"]
   pull_request:
     branches: [main]
 
@@ -43,11 +43,17 @@ jobs:
       - name: Prepare Release Artifacts
         shell: bash
         run: |
+          . /opt/esp/idf/export.sh
           mkdir -p release
           cp build/bootloader/bootloader.bin release/
           cp build/partition_table/partition-table.bin release/
           cp build/c5vrx3.bin release/
           cp build/flasher_args.json release/
+          esptool.py --chip esp32c5 merge_bin -o release/c5vrx3_merged.bin \
+            --flash_mode dio --flash_size 8MB --flash_freq 80m \
+            0x2000 build/bootloader/bootloader.bin \
+            0x8000 build/partition_table/partition-table.bin \
+            0x10000 build/c5vrx3.bin
           cd release
           sha256sum * > SHA256SUMS
 
@@ -57,3 +63,56 @@ jobs:
           name: c5vrx3-production-firmware
           path: release/
           if-no-files-found: error
+
+  release-main:
+    name: Publish Continuous Main Release
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Built Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: c5vrx3-production-firmware
+          path: release/
+
+      - name: Update Main GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload main release/* --clobber --repo Twotoz/C5VRX || \
+          gh release create main release/* \
+            --repo Twotoz/C5VRX \
+            --title "C5VRX-3 (Latest main branch)" \
+            --notes "Continuous build from main branch commit ${{ github.sha }}." \
+            --target main
+
+  deploy-pages:
+    name: Deploy Web Flasher to GitHub Pages
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+

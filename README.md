@@ -5,6 +5,7 @@
   <p>From live RF to real-time analog NTSC composite video with one Seeed Studio XIAO ESP32-C5 and a passive resistor DAC.</p>
 
   <p>
+    <a href="https://twotoz.github.io/C5VRX/"><img src="https://img.shields.io/badge/Web%20Flasher-Online-1f6feb?style=flat" alt="Web Flasher" /></a>
     <img src="https://img.shields.io/badge/status-production%20proven-success" alt="Production proven" />
     <img src="https://img.shields.io/badge/chip-ESP32--C5-111111" alt="ESP32-C5" />
     <img src="https://img.shields.io/badge/RF-5.8%20GHz%20(48%20channels)-6f42c1" alt="5.8 GHz" />
@@ -13,6 +14,23 @@
     <img src="https://img.shields.io/badge/license-GPL--3.0--only-blue" alt="GPL-3.0-only" />
   </p>
 </div>
+
+---
+
+## Web Flasher (Zero-Install Browser Flashing)
+
+Flash your Seeed Studio XIAO ESP32-C5 directly from your browser (Google Chrome, Microsoft Edge, Brave, Opera) with zero installation required:
+
+**[Launch C5VRX Web Flasher](https://twotoz.github.io/C5VRX/)**
+
+- **Automatic Latest Firmware**: Automatically selects the latest continuous build from the `main` branch.
+- **One-Click Flashing**: Flashes the universal merged production image (`bootloader + partitions + app` at `0x0`) over Web Serial.
+- **Selectable Releases**: Easily choose between latest `main` or previous releases.
+- **Offline / Local Execution**: You can also run the web flasher locally:
+  ```bash
+  python tools/open_webflasher.py
+  ```
+  *(Starts a local HTTP server at `http://localhost:8080/web/index.html` and opens your browser.)*
 
 ---
 
@@ -168,20 +186,24 @@ python tools/validate_build.py
 
 ### Step 3: Flash to ESP32-C5
 
-#### Option A: Zero-Friction Auto-Flash (Recommended)
+#### Option A: Web Flasher (Zero-Install In-Browser Flasher)
+Launch the web flasher directly in your browser (Google Chrome, Microsoft Edge, Brave):
+**[Open C5VRX Web Flasher](https://twotoz.github.io/C5VRX/)**
+
+#### Option B: Zero-Friction Auto-Flash (Python Watcher)
 Run the auto-flash watcher:
 ```bash
 python tools/auto_flash.py
 ```
 *Plug in or reset your Seeed Studio XIAO ESP32-C5 into download mode (hold BOOT while tapping RESET), and the watcher will detect the COM port, flash the firmware, and automatically trigger a watchdog reset into the application!*
 
-#### Option B: Direct Flash Script
+#### Option C: Direct Flash Script
 Specify your COM port (or omit to auto-detect):
 ```bash
 python tools/flash.py COM10
 ```
 
-#### Option C: Native ESP-IDF Flasher
+#### Option D: Native ESP-IDF Flasher
 ```bash
 idf.py -p COM10 flash
 ```
@@ -210,8 +232,14 @@ Use the interactive hotkeys (`c` to cycle channels, `+`/`-` for manual gain, `b`
 │   ├── video.c / video.h      # Realtime PARLIO RX/TX, Zero-EOF GDMA & AGC engine
 │   ├── fm.bsasm               # Phase5 BitScrambler demodulator program
 │   └── osd_font.h             # 8x8 font tables for OSD
+├── web/                       # Zero-install Betaflight-style Web Flasher (Web Serial API)
+│   ├── index.html             # Flasher dashboard UI
+│   ├── style.css              # Dark slate theme with blue accents & white topbar
+│   ├── app.js                 # Web Serial flasher & release management logic
+│   └── esptool.js             # Vendored esptool-js client with ESP32-C5 support
 ├── tools/                     # Production validation & flashing utilities
-│   ├── validate_build.py      # Architectural constraint validator (31 checks)
+│   ├── open_webflasher.py     # Local offline Web Flasher launcher & HTTP server
+│   ├── validate_build.py      # Architectural constraint validator
 │   ├── auto_flash.py          # Auto-detecting flashing watcher
 │   ├── flash.py               # One-click direct flasher
 │   ├── monitor.py             # Low-latency interactive serial console
