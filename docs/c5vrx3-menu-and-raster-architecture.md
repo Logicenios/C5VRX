@@ -99,11 +99,25 @@ This is a quantized monochrome menu with a colour reference burst, not a claim
 of laboratory broadcast compliance. Analog ratios, edge shaping, oscillator
 tolerance and decoder compatibility require physical validation.
 
-Shared porch, blank and text buffers avoid a 1.6 MB PAL framebuffer. Chains use
-5,900 PAL or 5,100 NTSC nodes, with 6,000 slots reserved. Raster plus descriptor
-capacity occupies 148,800 bytes, slightly less than the old menu allocation.
-Text uses four samples/pixel. Only text pixels may change while scanning (one
-refresh can tear); timing buffers and links change only with TX stopped.
+Shared porch/blank buffers and a dedicated modern UI raster avoid a full PAL
+framebuffer. The production UI is **400 x 72 logical pixels**:
+
+- one logical X pixel = four 40 MHz DAC samples (1600 samples / 40 us UI width);
+- one logical Y row = two physical video lines (144-line UI height);
+- exact six-bit DAC shades only; no alpha, anti-aliasing or browser-style scaling;
+- persistent status bar + navigation rail + page content, rendered from the existing
+  8x8 bitmap font and small built-in icons.
+
+The UI backing store is 115,200 bytes. Together with sync/burst/blank templates,
+`menu_raster_t` is 134,656 bytes. This is intentionally much smaller than a
+480x96x4 brute-force expanded framebuffer (184,320 bytes for UI pixels alone)
+while providing a substantially larger and more modern raster than the old
+256x56 text area.
+
+The scatter chain still uses one UI segment per displayed scanline, so the DMA
+node count does not grow with glyph complexity. Only `raster.ui` changes while
+the standalone menu is running; timing templates and descriptor links change
+only with TX stopped.
 
 ### Controls, console and validation
 
