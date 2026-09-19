@@ -1,5 +1,120 @@
 # C5VRX-3 Standalone Menu & Raster Architecture
 
+## Implemented on PR #26: independent menu output
+
+The dedicated generator is implemented and host-tested. Physical confirmation
+on the XIAO ESP32-C5 and FatShark HD3 is still required. A build or sample test
+does not establish decoder lock, analog levels, or uninterrupted DMA output.
+
+The reported symptom was a readable menu for about one second, then inversion
+and disappearance. Progressive timing, missing burst, synthetic IQ and live-ring
+splicing were visible in the old source. Decoder standard detection and clamp
+drift remain hypotheses, not measured root causes. The exact decoder model and
+its internal behavior have not been verified. Missing burst alone does not
+explain rejection of a monochrome signal.
+
+### Output ownership
+
+```text
+FLIGHT: MODEM_DIAG -> PARLIO RX -> 16 KiB ring -> Phase5 -> PARLIO TX -> DAC
+MENU:   independent SRAM raster -----------------------> PARLIO TX -> DAC
+```
+
+Flight clock, IQ ring, Phase5 program, sample edges and DAC GPIO order are
+unchanged. Both sources use the 40 MHz DAC clock. Menu samples are direct bytes:
+sync 0, blank/black 20, text 60, burst 20 +/- 8. Loaded voltages need measurement.
+
+`video.c` now owns the BitScrambler handle explicitly. In ESP-IDF v6.0.2,
+interrupting an infinite decorated TX transaction does not call its BitScrambler
+disable hook, and a subsequent NULL program does not detach the previous one.
+The new code explicitly disables/detaches Phase5 before menu output, then
+enables, loads, resets and starts it before returning to flight.
+
+Transitions stop TX through the driver. With the driver's transaction queue
+empty, a C5-specific adapter starts the separate scatter chain using its allocated
+channel's head register and PARLIO LL functions. The driver retains allocation
+and stop/reset ownership. There is no private driver-struct access or live-ring
+link replacement. FIFO-ready waiting has a one-millisecond timeout; unexpected
+transition errors use `ESP_ERROR_CHECK` rather than continuing with partial state.
+
+Returning to flight restarts RX at ring zero before the TX delay. Delaying an
+already-running RX cannot establish separation. The delay calculation now uses
+64-bit arithmetic: the old `8192u * 1000000u` overflowed. The requested delay is
+204 us, truncated from 204.8 us, plus driver latency; exact physical separation
+still needs measurement.
+
+### Raster timing and memory
+
+Timing reference: [ITU-R BT.470](https://www.itu.int/rec/R-REC-BT.470/en), including
+the line/field diagrams and burst sequences in
+[BT.470-6](https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.470-6-199811-S!!PDF-E.pdf).
+The hardware-independent `menu_raster.c` emits these DMA segments:
+
+- PAL: 625 lines/frame, 312.5 lines/field, 64 us lines, 50 fields/s; five
+  pre-equalizing, five broad and five post-equalizing half-line pulses. Line 1
+  starts with broad sync. Eight fields occupy exactly 6,400,000 samples.
+- NTSC: 525 lines/frame, 262.5 lines/field, approximately 59.94 fields/s; six
+  pulses in each vertical group. Cumulative half-line times are rounded to DMA
+  words rather than rounding every scanline independently. Eight fields occupy
+  5,338,668 samples: period error +0.25 ppm. The carrier is adjusted about
+  -0.895 Hz to close after 477,750 cycles, saving two frames of descriptors.
+- Ordinary H sync stays on the full-line grid across both fields. H-sync width
+  is 4.7 us; broad sync ends 4.7 us before the next half-line edge. Within the
+  NTSC cycle, timing quantization is at most 44.45 ns.
+- Burst is 4.43361875 MHz PAL or approximately 3.57954456 MHz NTSC. PAL uses
+  alternating phase and nine-line burst-blanking windows; NTSC suppresses burst
+  during its vertical pulse train. Absolute sample time determines phase,
+  including loop closure. Shared 32-phase templates quantize starting phase
+  by at most 5.625 degrees.
+
+This is a quantized monochrome menu with a colour reference burst, not a claim
+of laboratory broadcast compliance. Analog ratios, edge shaping, oscillator
+tolerance and decoder compatibility require physical validation.
+
+Shared porch, blank and text buffers avoid a 1.6 MB PAL framebuffer. Chains use
+5,900 PAL or 5,100 NTSC nodes, with 6,000 slots reserved. Raster plus descriptor
+capacity occupies 148,800 bytes, slightly less than the old menu allocation.
+Text uses four samples/pixel. Only text pixels may change while scanning (one
+refresh can tear); timing buffers and links change only with TX stopped.
+
+### Controls, console and validation
+
+The AGC/control task exclusively owns menu rendering, BOOT handling, transitions
+and inactivity timeout. Console menu commands enter a bounded queue. Diagnostic
+output no longer patches descriptors. The console directly drains the USB RX
+FIFO in bounded batches: IDF 6.0.2's nonblocking VFS read checks driver-buffer
+availability before calling its no-driver FIFO reader. No second FIFO reader or
+USB ISR driver is installed. Output retains the unbuffered VFS; the menu-active
+polling branch has no periodic output or `fflush`.
+
+Build with ESP-IDF v6.0.2 for `esp32c5`; `python tools/validate_build.py` checks
+35 production constraints. The host test runs the firmware generator and checks
+every sample, DMA bounds/alignment, both fields' pulses, horizontal phase, DAC
+range, burst windows/frequency, timing quantization and carrier closure:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I main \
+  tools/test_menu_raster.c main/menu_raster.c -lm -o /tmp/test_menu_raster
+/tmp/test_menu_raster
+```
+
+Remaining hardware tests: both standards beyond one second; repeated open/close;
+standard changes while open; simultaneous console/BOOT; timeout without USB;
+terminated DAC sync/burst/level measurements; underflows and restored flight
+RX/TX distance. Runtime heap, USB host behavior and direct scatter startup cannot
+be established by the host waveform test.
+
+---
+
+## Historical investigation and proposal (superseded)
+
+The sections below preserve the earlier diagnosis and proposed architecture.
+Their categorical decoder/clamp claims were not established measurements, and
+their progressive-menu status and proposed timing are superseded by the
+implementation above. In particular, PAL was 312 progressive lines (not 288
+total), NTSC interlace uses 262.5 lines/field, and the current NTSC generator does
+not use the proposed fixed 2542-sample line.
+
 ## 1. Executive Summary
 
 This document captures the empirical findings, root-cause analyses, and architectural decisions regarding the **C5VRX-3 on-screen configuration menu** on the Seeed Studio XIAO ESP32-C5.

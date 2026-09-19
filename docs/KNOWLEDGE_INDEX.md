@@ -39,7 +39,7 @@ Modern C5VRX
 | True 40 MS/s DAC reconstruction and 80 MS/s decoupled rate expansion roadmap | [issue-11-cvbs-analysis.md](issue-11-cvbs-analysis.md) |
 | Issue #17 True 40 MS/s cadence, adjacent25 failure modes, and interleaved demodulation | [issue-17-true40-cadence-and-interleaved-phase5.md](issue-17-true40-cadence-and-interleaved-phase5.md) |
 | Dual-loop self-calibrating AGC, FM phase coherence ($Q_{\text{phase}}$), and noise trap immunity | [dual-loop-adaptive-gain-optimizer.md](dual-loop-adaptive-gain-optimizer.md) |
-| C5VRX-3 standalone menu, analog decoder DC-clamp root causes, and broadcast raster architecture | [c5vrx3-menu-and-raster-architecture.md](c5vrx3-menu-and-raster-architecture.md) |
+| C5VRX-3 independent PAL/NTSC menu, waveform tests, decoder hypotheses and remaining hardware validation | [c5vrx3-menu-and-raster-architecture.md](c5vrx3-menu-and-raster-architecture.md) |
 | Wiring and remaining physical tests | [hardware-test.md](hardware-test.md) |
 | Accepted historical donor primitives | [proven-donors.md](proven-donors.md) |
 | Licensing and contributor evidence | [licensing.md](licensing.md) |

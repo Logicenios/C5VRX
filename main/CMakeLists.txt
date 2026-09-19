@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "rf.c"
         "video.c"
+        "menu_raster.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_wifi
