@@ -28,6 +28,10 @@ void rf_dump_tracked_timers(void);
  * force = true sets fixed gain index (0 = min gain / max attenuation, ~30-60 = high gain).
  * force = false restores automatic / default PHY gain.
  */
+/** Runtime analog receive filter: true=BW40, false=BW20. */
+void rf_set_analog_bandwidth(bool bw40);
+bool rf_get_analog_bandwidth(void);
+
 void rf_set_rx_gain(bool force, uint8_t gain_idx);
 uint32_t rf_get_rx_gain_reg(void);
 
