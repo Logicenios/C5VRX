@@ -83,6 +83,20 @@ check("DAC_IDLE_CODE == 20",
 check("IQ_RATE_HZ == 40000000",
       bool(re.search(r"IQ_RATE_HZ\s+40000000", all_c)))
 
+check("AGC uses one complete 4092-byte descriptor",
+      bool(re.search(r"CONTROL_SAMPLE_BYTES\s+4092", all_c)) and
+      "get_completed_rx_sample_window(CONTROL_SAMPLE_BYTES)" in all_c)
+check("gain transition hot path has no AGC printf",
+      "[AGC:GAIN]" not in all_c)
+check("periodic runtime telemetry disabled",
+      bool(re.search(r"PERIODIC_TELEMETRY\s+0", all_c)))
+check("video standard defaults to AUTO detector",
+      "VIDEO_STD_MODE_AUTO" in all_c and
+      "video_standard_observe" in all_c and
+      "phase5_pair_is_sync" in all_c)
+check("menu resolves detected PAL/NTSC before raster start",
+      "s_video_std = resolved_menu_standard();" in all_c)
+
 # RX POS edge (not NEG)
 check("PARLIO_SAMPLE_EDGE_POS in video.c",
       "PARLIO_SAMPLE_EDGE_POS" in all_c)
