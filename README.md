@@ -135,7 +135,7 @@ Connect a 6-bit binary-weighted resistor DAC ladder to the XIAO pins, meeting at
 ### Recommended Analog Filters:
 1. **Shunt Termination**: 200 Ω resistor from `VIDEO` to `GND`. When connected to goggles with standard 75 Ω termination, this forms a matched 0–1.0 V standard CVBS level.
 2. **De-Emphasis Filter**: A **470 pF ceramic capacitor** placed in parallel across `VIDEO` and `GND` creates a 10–14 dB high-frequency de-emphasis low-pass filter, dramatically reducing triangular FM noise and snow.
-3. **BOOT Button**: The built-in BOOT button (GPIO 28) switches channels on short click and toggles the OSD menu on long press (≥ 600 ms).
+3. **BOOT Button**: The built-in BOOT button (GPIO 28) switches channels on short click. The experimental long-press menu is temporarily disabled in the production firmware while its raster geometry and display compatibility are reworked.
 
 ---
 

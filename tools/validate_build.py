@@ -102,6 +102,10 @@ check("modern menu raster is SRAM-safe 384x56 logical pixels",
       "MENU_UI_LINES 56u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_X_REPEAT 3u" in read(MAIN / "menu_raster.h") and
       "s_menu_raster.ui" in all_c)
+check("experimental menu is runtime-disabled for release",
+      bool(re.search(r"MENU_RUNTIME_ENABLED\s+0", all_c)) and
+      "if (active && !MENU_RUNTIME_ENABLED) return;" in all_c and
+      "s_menu_boot_btn_enabled = false" in all_c)
 check("legacy seven-line text menu removed",
       "MENU_TEXT_BYTES" not in all_c and "MENU_ROWS" not in all_c)
 check("lag diagnostics poll PARLIO GDMA and BitScrambler",

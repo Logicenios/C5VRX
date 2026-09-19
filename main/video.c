@@ -117,6 +117,7 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 #define RAW_RING_BYTES   16384u      /* 16384 byte cyclic ring (16 KiB Seamless Golden) */
 #define DAC_IDLE_CODE    20u         /* Black/blanking pedestal; sync is 0 */
 #define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
+#define MENU_RUNTIME_ENABLED 0       /* Temporary: keep live CVBS path menu-free for release */
 #define CONTROL_SAMPLE_BYTES 4092u  /* one complete, already-finished GDMA descriptor */
 #define GAIN_SETTLE_TICKS 10        /* 500 ms decision hold after a physical gain write */
 #define GAIN_SEARCH_PROBE_TICKS 20  /* 1.0 s between no-carrier sensitivity probes */
@@ -165,7 +166,7 @@ static DMA_ATTR __attribute__((aligned(64))) menu_raster_t s_menu_raster;
 static DMA_ATTR __attribute__((aligned(64))) dma_descriptor_t s_menu_nodes[MENU_MAX_NODES];
 static unsigned s_menu_node_count;
 static volatile bool s_menu_active;
-static volatile bool s_menu_boot_btn_enabled = true;
+static volatile bool s_menu_boot_btn_enabled = false;
 static volatile int s_menu_cursor;
 static int s_menu_timeout_ticks;
 
@@ -1151,6 +1152,9 @@ static void start_menu_tx(void)
 
 static void video_set_menu_mode(bool active)
 {
+    /* Keep the implementation available for follow-up UI work, but do not let
+     * any input replace live video with the current unvalidated menu raster. */
+    if (active && !MENU_RUNTIME_ENABLED) return;
     if (s_menu_active == active) return;
     ESP_ERROR_CHECK(parlio_tx_unit_disable(s_tx));
     ESP_ERROR_CHECK(bitscrambler_disable(s_flight_bs));
@@ -1233,8 +1237,12 @@ static void handle_button_short_click(void)
 static void handle_button_long_click(void)
 {
     if (!s_menu_active) {
+        if (!MENU_RUNTIME_ENABLED) {
+            printf("[BTN: LONG] Menu temporarily disabled; live video unchanged\n");
+            return;
+        }
         if (!s_menu_boot_btn_enabled) {
-            printf("[BTN: LONG] Menu menu via BOOT button is DISABLED (Safe Flight Mode)\n");
+            printf("[BTN: LONG] Menu via BOOT button is DISABLED (Safe Flight Mode)\n");
             return;
         }
         s_menu_cursor = 0;
@@ -1317,10 +1325,16 @@ static void analog_agc_task(void *arg)
         int command;
         for (unsigned commands = 0; commands < 16 &&
              xQueueReceive(s_menu_commands, &command, 0) == pdTRUE; ++commands) {
-            if (command == 'o') video_set_menu_mode(!s_menu_active);
-            else if (command == 'v' || command == 'V') menu_cycle_standard_mode();
-            else if (command == 'O') s_menu_boot_btn_enabled = !s_menu_boot_btn_enabled;
-            else if (s_menu_active && (command == ' ' || command == 'n' || command == '\t'))
+            if (command == 'o') {
+                if (MENU_RUNTIME_ENABLED) video_set_menu_mode(!s_menu_active);
+                else printf("[MENU] Temporarily disabled; live video unchanged\n");
+            } else if (command == 'v' || command == 'V') {
+                if (MENU_RUNTIME_ENABLED) menu_cycle_standard_mode();
+                else printf("[MENU] Video-standard control unavailable while menu is disabled\n");
+            } else if (command == 'O') {
+                if (MENU_RUNTIME_ENABLED) s_menu_boot_btn_enabled = !s_menu_boot_btn_enabled;
+                else printf("[MENU] BOOT menu trigger is temporarily disabled\n");
+            } else if (s_menu_active && (command == ' ' || command == 'n' || command == '\t'))
                 handle_button_short_click();
             else if (s_menu_active) handle_button_long_click();
         }
@@ -1753,9 +1767,10 @@ static void console_diag_task(void *arg)
                            s_detected_video_std_valid ? video_standard_name(s_detected_video_std) : "UNKNOWN",
                            s_last_line_period_20m,
                            s_video_std_pal_score, s_video_std_ntsc_score);
-                    printf(" Menu Status:                %s (BOOT button trigger: %s)\n",
-                           s_menu_active ? "OPEN" : "CLOSED",
-                           s_menu_boot_btn_enabled ? "ENABLED" : "DISABLED (Safe Flight Mode)");
+                    printf(" Menu Status:                %s\n",
+                           MENU_RUNTIME_ENABLED ?
+                           (s_menu_active ? "OPEN" : "CLOSED") :
+                           "TEMPORARILY DISABLED (live video only)");
                     printf(" Keys:\n");
                     printf("  'a'/'s'/'m': AGC mode (active / shadow / manual)\n");
                     printf("  'l':         Mark a visible lag/freeze for correlation\n");
@@ -1765,9 +1780,7 @@ static void console_diag_task(void *arg)
                     printf("  ',' / '.':   Fine-tune offset (-50 / +50 kHz)\n");
                     printf("  '0':         Reset offset to 0 kHz\n");
                     printf("  'e':         Toggle RX sample edge (POS/NEG)\n");
-                    printf("  'v':         Cycle Video Standard (AUTO / NTSC / PAL)\n");
-                    printf("  'o':         Toggle menu via console\n");
-                    printf("  'O':         Toggle BOOT button menu trigger (Safe Flight Mode)\n");
+                    printf("  'v'/'o'/'O': Menu controls (temporarily disabled)\n");
                     printf("  'd':         Print this diagnostic summary\n");
                     printf("=======================================================\n\n");
                 }
