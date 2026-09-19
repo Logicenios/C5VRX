@@ -2,7 +2,7 @@ name: C5VRX-3 Production CI
 
 on:
   push:
-    branches: [main, "codex/**", "feat/**"]
+    branches: [main, "codex/**", "feat/**", "fix/**"]
   pull_request:
     branches: [main]
 
@@ -11,6 +11,101 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version:
+    name: Resolve Firmware Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.semver.outputs.version }}
+      version_number: ${{ steps.semver.outputs.version_number }}
+      previous_tag: ${{ steps.semver.outputs.previous_tag }}
+      reason: ${{ steps.semver.outputs.reason }}
+    steps:
+      - name: Checkout repository and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine next semantic version
+        id: semver
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Only pushes to main become public releases. Other builds keep the
+          # normal ESP-IDF git-derived development version.
+          if [[ "${GITHUB_EVENT_NAME}" != "push" || "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "version=" >> "${GITHUB_OUTPUT}"
+            echo "version_number=" >> "${GITHUB_OUTPUT}"
+            echo "previous_tag=" >> "${GITHUB_OUTPUT}"
+            echo "reason=development build" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          git fetch --tags --force
+
+          stable_tags() {
+            git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true
+          }
+
+          prerelease_tags() {
+            git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-' || true
+          }
+
+          head_tag="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+          latest_stable="$(stable_tags | head -n1)"
+          latest_prerelease="$(prerelease_tags | head -n1)"
+          previous_tag=""
+          reason=""
+
+          # Makes workflow re-runs idempotent if a tag was already created.
+          if [[ -n "${head_tag}" ]]; then
+            version="${head_tag}"
+            previous_tag="$(stable_tags | grep -vx "${head_tag}" | head -n1 || true)"
+            if [[ -z "${previous_tag}" ]]; then
+              previous_tag="${latest_prerelease}"
+            fi
+            reason="reuse existing release tag on HEAD"
+
+          # Promote the existing RC line to its stable version on the first
+          # versioned main release (v3.0.0-rc1 -> v3.0.0).
+          elif [[ -z "${latest_stable}" && -n "${latest_prerelease}" ]]; then
+            version="${latest_prerelease%%-*}"
+            previous_tag="${latest_prerelease}"
+            reason="promote latest prerelease to stable"
+
+          elif [[ -z "${latest_stable}" ]]; then
+            version="v0.1.0"
+            reason="initial semantic version"
+
+          else
+            previous_tag="${latest_stable}"
+            current="${latest_stable#v}"
+            IFS='.' read -r major minor patch <<< "${current}"
+            commits="$(git log "${latest_stable}..HEAD" --pretty='%s%n%b')"
+
+            if grep -Eq 'BREAKING CHANGE|^[A-Za-z]+(\([^)]+\))?!:' <<< "${commits}"; then
+              major=$((major + 1))
+              minor=0
+              patch=0
+              reason="breaking change -> major bump"
+            elif grep -Eq '^feat(\([^)]+\))?:' <<< "${commits}"; then
+              minor=$((minor + 1))
+              patch=0
+              reason="feature -> minor bump"
+            else
+              patch=$((patch + 1))
+              reason="fix/chore/docs/other -> patch bump"
+            fi
+
+            version="v${major}.${minor}.${patch}"
+          fi
+
+          echo "Resolved ${version} (${reason})"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "version_number=${version#v}" >> "${GITHUB_OUTPUT}"
+          echo "previous_tag=${previous_tag}" >> "${GITHUB_OUTPUT}"
+          echo "reason=${reason}" >> "${GITHUB_OUTPUT}"
+
   validate:
     name: Architectural & DSP Verification
     runs-on: ubuntu-latest
@@ -28,11 +123,19 @@ jobs:
 
   build:
     name: Build Production Firmware (ESP32-C5)
+    needs: version
     runs-on: ubuntu-latest
     container: espressif/idf:v6.0.2
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Stamp release version into ESP-IDF firmware
+        if: needs.version.outputs.version_number != ''
+        shell: bash
+        run: |
+          printf '%s\n' "${{ needs.version.outputs.version_number }}" > version.txt
+          echo "Building firmware version ${{ needs.version.outputs.version }}"
 
       - name: Build C5VRX-3 Firmware
         shell: bash
@@ -54,6 +157,11 @@ jobs:
             0x2000 build/bootloader/bootloader.bin \
             0x8000 build/partition_table/partition-table.bin \
             0x10000 build/c5vrx3.bin
+
+          if [[ -n "${{ needs.version.outputs.version }}" ]]; then
+            printf '%s\n' "${{ needs.version.outputs.version }}" > release/VERSION
+          fi
+
           cd release
           sha256sum * > SHA256SUMS
 
@@ -65,8 +173,8 @@ jobs:
           if-no-files-found: error
 
   release-main:
-    name: Publish Continuous Main Release
-    needs: build
+    name: Publish Versioned Main Release
+    needs: [version, build]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -78,16 +186,49 @@ jobs:
           name: c5vrx3-production-firmware
           path: release/
 
-      - name: Update Main GitHub Release
+      - name: Publish immutable semantic-version release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PREVIOUS_TAG: ${{ needs.version.outputs.previous_tag }}
+          VERSION_REASON: ${{ needs.version.outputs.reason }}
+        shell: bash
         run: |
-          gh release upload main release/* --clobber --repo Twotoz/C5VRX || \
-          gh release create main release/* \
-            --repo Twotoz/C5VRX \
-            --title "C5VRX-3 (Latest main branch)" \
-            --notes "Continuous build from main branch commit ${{ github.sha }}." \
-            --target main
+          set -euo pipefail
+
+          if [[ -z "${VERSION}" ]]; then
+            echo "No release version resolved."
+            exit 1
+          fi
+
+          echo "Publishing ${VERSION}: ${VERSION_REASON}"
+
+          # A re-run after the release was already created should succeed
+          # without minting another version.
+          if gh release view "${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${VERSION} already exists; leaving it unchanged."
+          else
+            args=(
+              release create "${VERSION}" release/*
+              --repo "${GITHUB_REPOSITORY}"
+              --target "${GITHUB_SHA}"
+              --title "C5VRX-3 ${VERSION}"
+              --generate-notes
+              --latest
+            )
+
+            if [[ -n "${PREVIOUS_TAG}" ]]; then
+              args+=(--notes-start-tag "${PREVIOUS_TAG}")
+            fi
+
+            gh "${args[@]}"
+          fi
+
+          # One-time cleanup of the old mutable release/tag model. This does
+          # not touch the main branch; it only removes refs/tags/main.
+          if gh release view main --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release delete main --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag
+          fi
 
   deploy-pages:
     name: Deploy Web Flasher to GitHub Pages
@@ -115,4 +256,3 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
