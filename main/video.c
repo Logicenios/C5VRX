@@ -382,7 +382,7 @@ static uint8_t *get_completed_rx_sample_window(size_t bytes)
 }
 
 /* =========================================================================
- * Receiver Modes, Dual-Loop AGC, Bandwidth Gearbox, and AFC State
+ * Receiver Modes, Dual-Loop AGC, Fixed BW40, and AFC State
  *
  * Direct Q4/I4 vector power: P[n] = I[n]^2 + Q[n]^2
  * Target: P_median in [20, 30] (effective radius ~4.5 - 5.5, phase sigma ~3.3 deg)
@@ -414,12 +414,6 @@ typedef enum {
 } agc_state_t;
 
 typedef enum {
-    BW_GEAR_AUTO = 0, /* Dynamic Bandwidth Adaptation: BW40 normally, BW20 in deep fade */
-    BW_GEAR_BW40 = 1, /* Forced BW40 (20 MHz baseband, full color) */
-    BW_GEAR_BW20 = 2, /* Forced BW20 (10 MHz baseband, +3 dB sensitivity) */
-} bw_gear_mode_t;
-
-typedef enum {
     AFC_MODE_AUTO = 0, /* Auto Carrier Centering: centers within safe +/-1.5 MHz bound when locked */
     AFC_MODE_HOLD = 1, /* AFC Hold: freeze current offset */
     AFC_MODE_OFF  = 2, /* AFC Off: reset to 0 kHz offset */
@@ -427,12 +421,10 @@ typedef enum {
 
 static volatile analog_agc_mode_t s_agc_mode = ANALOG_AGC_ACTIVE;
 static volatile agc_state_t s_agc_state = AGC_STATE_SEARCH;
-static volatile bw_gear_mode_t s_bw_gear_mode = BW_GEAR_AUTO;
 /* WBFM instantaneous phase slope contains the video modulation itself.
  * The short-window CFO estimator is useful diagnostics, but it is not yet a
  * calibrated LO-error estimator. Never retune automatically at boot. */
 static volatile afc_mode_t s_afc_mode = AFC_MODE_OFF;
-static volatile bool s_current_bw40 = true;
 static volatile uint8_t s_current_gain = 52u;   /* Physical RF gain applied */
 static volatile uint8_t s_shadow_gain = 52u;    /* Controller recommended gain */
 static volatile int s_last_p_median = 25;
@@ -511,8 +503,8 @@ static void menu_render_menu(void)
     }
     menu_draw_string(2, 16, buf);
 
-    snprintf(buf, sizeof(buf), "%c [3] GEAR:   %s",
-             (s_menu_cursor == 2) ? '>' : ' ', s_current_bw40 ? "BW40 (COLOR)" : "BW20 (+3dB)");
+    snprintf(buf, sizeof(buf), "%c [3] RF BW:  BW40 (LOCKED)",
+             (s_menu_cursor == 2) ? '>' : ' ');
     menu_draw_string(3, 16, buf);
 
     snprintf(buf, sizeof(buf), "%c [4] AFC:    %s",
@@ -666,10 +658,8 @@ static void handle_button_long_click(void)
             printf("[MENU: CHANNEL] Switched to %s (%u MHz)\n",
                    rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz);
             break;
-        case 2: /* GEAR (BW40 / BW20) */
-            s_current_bw40 = !s_current_bw40;
-            rf_set_analog_bandwidth(s_current_bw40);
-            printf("[MENU: GEAR] Bandwidth set to %s\n", s_current_bw40 ? "BW40" : "BW20");
+        case 2: /* RF BANDWIDTH STATUS (fixed production contract) */
+            printf("[MENU: RF BW] BW40 is fixed for full analog-FM video bandwidth\n");
             break;
         case 3: /* AFC MODE */
             if (s_afc_mode == AFC_MODE_AUTO) {
@@ -705,8 +695,6 @@ static void analog_agc_task(void *arg)
     int settle_ticks = 0;
     int drift_counter = 0;
     int lost_counter = 0;
-    int deep_fade_ticks = 0;
-    int strong_signal_ticks = 0;
     int afc_ticks = 0;
     int telemetry_ticks = 0;
     uint8_t target_gain = 52u;
@@ -965,52 +953,11 @@ apply_target:
             }
         }
 
-        /* 4. Dynamic Bandwidth Gearbox (BW40 High Gear <-> BW20 Long-Range Survival) */
-        if (s_bw_gear_mode == BW_GEAR_AUTO) {
-            if (s_current_bw40) {
-                /* In BW40: downshift to BW20 if entering deep fade / severe starvation */
-                if (s_current_gain >= 56u && (q_phase < 55 || p_median < 16)) {
-                    deep_fade_ticks++;
-                    if (deep_fade_ticks >= 4) { /* Persisted for 200 ms */
-                        s_current_bw40 = false;
-                        rf_set_analog_bandwidth(false); /* DOWNSHIFT to BW20 (+3 dB boost!) */
-                        printf("[GEARBOX] DOWNSHIFT -> BW20 (+3 dB SNR boost for deep fade)\n");
-                        deep_fade_ticks = 0;
-                        strong_signal_ticks = 0;
-                        settle_ticks = 2;
-                    }
-                } else {
-                    deep_fade_ticks = 0;
-                }
-            } else {
-                /* In BW20: upshift to BW40 if signal strongly recovered */
-                if (p_median >= 22 && q_phase >= 75) {
-                    strong_signal_ticks++;
-                    if (strong_signal_ticks >= 20) { /* Persisted continuously for 1.0s */
-                        s_current_bw40 = true;
-                        rf_set_analog_bandwidth(true); /* UPSHIFT to BW40 (restore full color!) */
-                        printf("[GEARBOX] UPSHIFT -> BW40 (Signal recovered, full color restored)\n");
-                        strong_signal_ticks = 0;
-                        deep_fade_ticks = 0;
-                        settle_ticks = 2;
-                    }
-                } else {
-                    strong_signal_ticks = 0;
-                }
-            }
-        } else if (s_bw_gear_mode == BW_GEAR_BW40) {
-            if (!s_current_bw40) {
-                s_current_bw40 = true;
-                rf_set_analog_bandwidth(true);
-            }
-        } else if (s_bw_gear_mode == BW_GEAR_BW20) {
-            if (s_current_bw40) {
-                s_current_bw40 = false;
-                rf_set_analog_bandwidth(false);
-            }
-        }
+        /* RF bandwidth is intentionally fixed at BW40. Narrowing the
+         * pre-discriminator PHY filter damaged analog-FM chroma/detail in
+         * hardware tests and runtime switching adds an unnecessary RF transient. */
 
-        /* 5. Experimental AFC.
+        /* 4. Experimental AFC.
          * Default is OFF: mean WBFM phase slope over a 6.4 us window includes
          * video modulation and is NOT a calibrated absolute carrier offset.
          * AUTO remains an explicit test mode only. */
@@ -1039,7 +986,7 @@ apply_target:
             }
         }
 
-        /* 6. Transient Carrier Lock Detection */
+        /* 5. Transient Carrier Lock Detection */
         bool is_locked = (s_agc_state == AGC_STATE_TRACK) && (q_phase >= 55);
         if (is_locked && !was_locked) {
             const fpv_channel_t *ch = rf_get_current_channel();
@@ -1062,7 +1009,7 @@ update_telemetry:
                    (s_agc_mode == ANALOG_AGC_SHADOW) ? "SHD" : "MAN",
                    (s_agc_state == AGC_STATE_TRACK) ? "TRACK" :
                    (s_agc_state == AGC_STATE_LEARN) ? "LEARN" : "SRCH",
-                   s_current_bw40 ? "BW40" : "BW20",
+                   "BW40",
                    ch->name,
                    total_khz / 1000,
                    (total_khz % 1000 >= 0 ? total_khz % 1000 : -(total_khz % 1000)),
@@ -1107,21 +1054,6 @@ static void console_diag_task(void *arg)
                 } else if (c == 'm') {
                     s_agc_mode = ANALOG_AGC_MANUAL;
                     printf("[AGC MODE] -> MANUAL (Fixed gain=%u)\n", s_current_gain);
-                } else if (c == 'b') {
-                    if (s_bw_gear_mode == BW_GEAR_AUTO) {
-                        s_bw_gear_mode = BW_GEAR_BW40;
-                        s_current_bw40 = true;
-                        rf_set_analog_bandwidth(true);
-                        printf("[BW GEAR] -> FORCED BW40 (Full color / 20 MHz baseband)\n");
-                    } else if (s_bw_gear_mode == BW_GEAR_BW40) {
-                        s_bw_gear_mode = BW_GEAR_BW20;
-                        s_current_bw40 = false;
-                        rf_set_analog_bandwidth(false);
-                        printf("[BW GEAR] -> FORCED BW20 (+3 dB SNR Long-Range Survival mode)\n");
-                    } else {
-                        s_bw_gear_mode = BW_GEAR_AUTO;
-                        printf("[BW GEAR] -> AUTO GEARBOX (Dynamic Bandwidth Adaptation)\n");
-                    }
                 } else if (c == 'c') {
                     rf_cycle_channel_in_band();
                     const fpv_channel_t *ch = rf_get_current_channel();
@@ -1196,10 +1128,7 @@ static void console_diag_task(void *arg)
                     printf(" AFC Mode:                   %s\n",
                            (s_afc_mode == AFC_MODE_AUTO) ? "AUTO EXPERIMENTAL (uncalibrated estimator)" :
                            (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (Offset Frozen)" : "OFF (0 kHz)");
-                    printf(" Bandwidth Gear:             %s (Current: %s)\n",
-                           (s_bw_gear_mode == BW_GEAR_AUTO) ? "AUTO (Dynamic Adaptation)" :
-                           (s_bw_gear_mode == BW_GEAR_BW40) ? "FORCED BW40" : "FORCED BW20",
-                           s_current_bw40 ? "BW40 (Wide / Color)" : "BW20 (Narrow / +3 dB Survival)");
+                    printf(" RF Bandwidth:               BW40 (fixed production mode)\n");
                     printf(" Adaptive AGC Mode:          %s (State=%s)\n",
                            (s_agc_mode == ANALOG_AGC_ACTIVE) ? "ACTIVE" :
                            (s_agc_mode == ANALOG_AGC_SHADOW) ? "SHADOW (Safe Dry-Run)" : "MANUAL",
@@ -1227,7 +1156,6 @@ static void console_diag_task(void *arg)
                     printf(" Keys:\n");
                     printf("  'a'/'s'/'m': AGC mode (active / shadow / manual)\n");
                     printf("  '+' / '-':   Manual gain step (+/-2)\n");
-                    printf("  'b':         Bandwidth gear (auto / forced bw40 / forced bw20)\n");
                     printf("  'c':         Cycle FPV channel (A1..A8, R1..R8, B1..B8, F1..F8)\n");
                     printf("  'f':         AFC mode (auto-centering / hold / off)\n");
                     printf("  ',' / '.':   Fine-tune offset (-50 / +50 kHz)\n");
