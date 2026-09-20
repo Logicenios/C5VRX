@@ -260,11 +260,16 @@ check("demod A/B switch resets semantic lock state",
       "cycle_demod_mode" in all_c and
       "video_standard_detector_reset();" in all_c and
       "receive_generation also makes the controller relearn cleanly" in all_c)
-check("demod mode persists but defaults safely to Golden",
+check("demod mode persists, migrates v3 and defaults safely to Golden",
       "SETTINGS_VERSION 4u" in all_c and
       ".demod_mode = (uint8_t)s_demod_mode" in all_c and
+      "legacy_v3 = settings.version == 3u" in all_c and
       "settings.demod_mode < DEMOD_MODE_COUNT" in all_c and
       "s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5" in all_c)
+check("Trajectory-only uncertainty does not contaminate Golden A/B",
+      "active_demod_shadow" in all_c and
+      "s_demod_mode != DEMOD_MODE_TRAJECTORY_V2" in all_c and
+      "shadow.trajectory_uncertainty_permille = 0" in all_c)
 check("PLL-lite remains observation-only and risk-gated",
       "pll_predictor_delta" in fusion_header and
       "pll_lite_slip_permille" in fusion_header and
