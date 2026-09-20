@@ -431,6 +431,29 @@ def synthetic_self_test() -> None:
     assert math.isfinite(pll.phase_error_rms)
     assert len(pll.output) == n
 
+    # Strong/clean guard: the experimental path must not buy weak-signal
+    # behavior by making an ordinary high-confidence signal worse.
+    clean_golden_abs = 0
+    clean_trajectory_abs = 0
+    clean_golden_hard = 0
+    clean_trajectory_hard = 0
+    clean_pairs = 0
+    for end in range(3, len(raw), 2):
+        truth_code = map_pair_sum_rad(truth[end - 1] + truth[end])
+        g = golden_code(raw[end - 2], raw[end])
+        t = trajectory_v2_code(raw[end - 2], raw[end - 1], raw[end])
+        ge = abs(g - truth_code)
+        te = abs(t - truth_code)
+        clean_golden_abs += ge
+        clean_trajectory_abs += te
+        clean_golden_hard += ge >= 16
+        clean_trajectory_hard += te >= 16
+        clean_pairs += 1
+    assert clean_trajectory_abs <= clean_golden_abs, (
+        clean_trajectory_abs, clean_golden_abs)
+    assert clean_trajectory_hard <= clean_golden_hard, (
+        clean_trajectory_hard, clean_golden_hard)
+
     m = phase5_pair_metrics(raw, 1, 8)
     assert m.pairs > 1000
 
@@ -484,6 +507,8 @@ def synthetic_self_test() -> None:
     print(
         "range_demod_bench self-test passed: "
         f"disc_mse={mse:.5f} pairs={m.pairs} "
+        f"clean_mae golden={clean_golden_abs/clean_pairs:.2f} "
+        f"traj={clean_trajectory_abs/clean_pairs:.2f} "
         f"winding_pm={1000.0*m.winding_disagree/max(1,m.pairs):.2f} "
         f"weak_clean_ge16 golden={1000.0*golden_hard/pairs:.1f}pm "
         f"traj={1000.0*trajectory_hard/pairs:.1f}pm "
