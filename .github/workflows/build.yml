@@ -153,6 +153,8 @@ jobs:
           /tmp/test_range_control
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_fusion_receiver.c -o /tmp/test_fusion_receiver
           /tmp/test_fusion_receiver
+          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_menu_raster.c main/menu_raster.c -lm -o /tmp/test_menu_raster
+          /tmp/test_menu_raster
           python3 tools/train_trajectory_v2.py --write --self-test
           git diff --exit-code -- main/fm_traj.bsasm main/trajectory_v2_lut.h
           python3 tools/range_demod_bench.py --self-test
