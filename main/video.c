@@ -589,6 +589,23 @@ static inline bool phase5_pair_is_sync(uint8_t previous, uint8_t current)
     return (s_phase5_sync_mask[index >> 3u] & (1u << (index & 7u))) != 0u;
 }
 
+static inline unsigned trajectory_v2_address(uint8_t previous_phase5,
+                                             uint8_t middle_raw,
+                                             uint8_t current_phase5)
+{
+    return (unsigned)previous_phase5 |
+           (((unsigned)middle_raw & 1u) << 5u) |
+           (((unsigned)current_phase5 >> 1u) << 6u);
+}
+
+static inline uint8_t trajectory_v2_code(uint8_t previous_phase5,
+                                         uint8_t middle_raw,
+                                         uint8_t current_phase5)
+{
+    return c5vrx_trajectory_v2_dac[
+        trajectory_v2_address(previous_phase5, middle_raw, current_phase5)];
+}
+
 static uint32_t s_receive_generation;
 
 static void video_standard_detector_reset(void)
@@ -646,7 +663,9 @@ static int video_semantic_observe(const uint8_t *raw, size_t bytes, size_t ring_
 
     for (size_t i = first + 2u; i < bytes; i += 2u, ++out_index) {
         uint8_t current = s_phase5_state_lut[raw[i]];
-        bool low = phase5_pair_is_sync(previous, current);
+        bool low = s_demod_mode == DEMOD_MODE_TRAJECTORY_V2 ?
+                   trajectory_v2_code(previous, raw[i - 1u], current) <= 8u :
+                   phase5_pair_is_sync(previous, current);
         previous = current;
 
         if (low) {
@@ -737,6 +756,8 @@ typedef struct {
     int strong_winding_events;
     int strong_winding_triplets;
     int strong_winding_permille;
+    uint32_t trajectory_uncertainty_sum;
+    uint32_t trajectory_states;
     fusion_shadow_metrics_t fusion_shadow;
 } control_metrics_t;
 
@@ -748,6 +769,7 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
     const size_t production_first = (ring_offset & 1u) ? 0u : 1u;
     int8_t prev_i = 0, prev_q = 0;
     uint8_t prev_phase = 0, prev2_phase = 0;
+    uint8_t prev_byte = 0;
     int prev_power = 0, prev2_power = 0;
     fusion_shadow_t fusion_shadow;
     fusion_shadow_reset(&fusion_shadow);
@@ -803,12 +825,18 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
                 ++m.strong_winding_triplets;
                 if (winding) ++m.strong_winding_events;
             }
+
+            unsigned traj_addr = trajectory_v2_address(prev2_phase, prev_byte, phase);
+            m.trajectory_uncertainty_sum +=
+                255u - c5vrx_trajectory_v2_confidence[traj_addr];
+            ++m.trajectory_states;
         }
 
         prev2_phase = prev_phase;
         prev_phase = phase;
         prev2_power = prev_power;
         prev_power = raw_power;
+        prev_byte = byte;
         prev_i = in_val;
         prev_q = q;
     }
@@ -845,6 +873,11 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
         m.iq_cross_permille = (cross * 2000) / iq_power;
     }
     m.fusion_shadow = fusion_shadow_finish(&fusion_shadow);
+    if (m.trajectory_states) {
+        m.fusion_shadow.trajectory_uncertainty_permille =
+            (int)((m.trajectory_uncertainty_sum * 1000u) /
+                  (m.trajectory_states * 255u));
+    }
     return m;
 }
 
