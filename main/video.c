@@ -125,6 +125,11 @@ BITSCRAMBLER_PROGRAM(s_fm4_program, "fm4");
 #define GAIN_SETTLE_TICKS 10        /* 500 ms decision hold after a physical gain write */
 #define GAIN_SEARCH_PROBE_TICKS 20  /* 1.0 s between no-carrier sensitivity probes */
 #define PERIODIC_TELEMETRY 0        /* keep live control path silent; diagnostics are on-demand */
+#define LAB_GAIN_MIN       2u        /* production controller lower bound */
+#define LAB_GAIN_MAX       62u       /* production controller upper bound */
+#define LAB_GAIN_STEP      2u        /* characterize the states production actually uses */
+#define LAB_GAIN_SETTLE_MS 700u      /* measure after the existing 500 ms gain hold */
+#define LAB_GAIN_DWELL_MS  1000u     /* one second per state for scope/video correlation */
 
 typedef enum {
     VIDEO_STD_MODE_AUTO = 0,
@@ -755,6 +760,28 @@ static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in k
 static volatile bool s_channel_scan_active;
 static volatile unsigned s_channel_scan_progress;
 
+/* Issue #27/#28 lab characterization is deliberately console-driven and
+ * opt-in. It never paces the realtime IQ/CVBS path and adds no periodic task. */
+typedef struct {
+    bool active;
+    bool sampled;
+    uint8_t gain;
+    uint8_t saved_gain;
+    uint8_t saved_shadow_gain;
+    analog_agc_mode_t saved_agc_mode;
+    agc_state_t saved_agc_state;
+    rf_bw_mode_t saved_bw_mode;
+    bool saved_bw40;
+    afc_mode_t saved_afc_mode;
+    int saved_offset_khz;
+    bool saved_quiet;
+    int64_t applied_us;
+    hw_transport_counters_t step_base;
+} lab_gain_sweep_t;
+
+static lab_gain_sweep_t s_gain_sweep;
+static volatile bool s_lab_quiet;
+
 #define SETTINGS_VERSION 1u
 #define SETTINGS_NAMESPACE "c5vrx"
 #define SETTINGS_KEY "settings"
@@ -921,6 +948,222 @@ static void poll_transport_faults(void)
     ++s_hw_counters.checks;
     record_transport_event(flags);
 }
+
+static hw_transport_counters_t lab_counter_snapshot(void)
+{
+    hw_transport_counters_t snapshot;
+    memcpy(&snapshot, (const void *)&s_hw_counters, sizeof(snapshot));
+    return snapshot;
+}
+
+static void lab_clear_transport_sticky(void)
+{
+    PARL_IO.int_clr.val = UINT32_MAX;
+    if (s_rx_dma_ch >= 0) AHB_DMA.in_intr[s_rx_dma_ch].clr.val = UINT32_MAX;
+    if (s_tx_dma_ch >= 0) AHB_DMA.out_intr[s_tx_dma_ch].clr.val = UINT32_MAX;
+    BITSCRAMBLER.state[BITSCRAMBLER_DIR_TX].val = 1u << 31;
+}
+
+static void lab_reset_correlation(void)
+{
+    memset((void *)&s_hw_counters, 0, sizeof(s_hw_counters));
+    memset(s_lag_events, 0, sizeof(s_lag_events));
+    s_lag_event_head = 0;
+    s_last_transport_event_us = 0;
+    s_last_transport_flags = 0;
+    s_last_user_lag_mark_us = 0;
+    s_last_gain_write_us = 0;
+    s_last_gain_drop_transition = s_gain_transition_count;
+    lab_clear_transport_sticky();
+}
+
+static uint32_t lab_delta(uint32_t current, uint32_t base)
+{
+    return current - base;
+}
+
+static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
+{
+    const hw_transport_counters_t current = lab_counter_snapshot();
+    const hw_transport_counters_t zero = {0};
+    if (!base) base = &zero;
+
+    int64_t now = esp_timer_get_time();
+    long long gain_age_ms = s_last_gain_write_us > 0 ?
+        (long long)((now - s_last_gain_write_us) / 1000) : -1;
+    long long transport_age_ms = s_last_transport_event_us > 0 ?
+        (long long)((now - s_last_transport_event_us) / 1000) : -1;
+
+    printf("C5VRX_LAB_ROW kind=%s gain=%u gain_reg=0x%08lx bw=%u afc=%u offset_khz=%d "
+           "agc=%u state=%u p=%d q=%d clip_pm=%d origin_pm=%d strength=%d "
+           "tx_empty=%lu rx_ovf=%lu tx_eof=%lu gdma_in=%lu gdma_out=%lu "
+           "bs_empty=%lu bs_eof=%lu lag=%lu near_gain=%lu qdrop=%lu "
+           "gain_age_ms=%lld transport_age_ms=%lld last_flags=0x%02lx\n",
+           kind, s_current_gain, (unsigned long)rf_get_rx_gain_reg(),
+           s_current_bw40 ? 40u : 20u, (unsigned)s_afc_mode,
+           rf_get_frequency_offset_khz(), (unsigned)s_agc_mode, (unsigned)s_agc_state,
+           s_last_p_median, s_last_q_phase, s_last_clip_permille,
+           s_last_origin_permille, s_signal_strength,
+           (unsigned long)lab_delta(current.parl_tx_rempty_count, base->parl_tx_rempty_count),
+           (unsigned long)lab_delta(current.parl_rx_wovf_count, base->parl_rx_wovf_count),
+           (unsigned long)lab_delta(current.parl_tx_eof_count, base->parl_tx_eof_count),
+           (unsigned long)lab_delta(current.gdma_in_fault_count, base->gdma_in_fault_count),
+           (unsigned long)lab_delta(current.gdma_out_fault_count, base->gdma_out_fault_count),
+           (unsigned long)lab_delta(current.bs_fifo_empty_count, base->bs_fifo_empty_count),
+           (unsigned long)lab_delta(current.bs_eof_overload_count, base->bs_eof_overload_count),
+           (unsigned long)lab_delta(current.lag_event_count, base->lag_event_count),
+           (unsigned long)lab_delta(current.near_gain_event_count, base->near_gain_event_count),
+           (unsigned long)lab_delta(current.gain_quality_drop_count, base->gain_quality_drop_count),
+           gain_age_ms, transport_age_ms, (unsigned long)s_last_transport_flags);
+}
+
+static void lab_apply_fixed_gain(uint8_t gain)
+{
+    if (gain < LAB_GAIN_MIN) gain = LAB_GAIN_MIN;
+    if (gain > LAB_GAIN_MAX) gain = LAB_GAIN_MAX;
+    s_current_gain = gain;
+    s_shadow_gain = gain;
+    s_last_gain_write_us = esp_timer_get_time();
+    rf_set_rx_gain(true, gain);
+    ++s_gain_transition_count;
+}
+
+static void lab_finish_gain_sweep(bool aborted)
+{
+    if (!s_gain_sweep.active) return;
+
+    const uint8_t saved_gain = s_gain_sweep.saved_gain;
+    const uint8_t saved_shadow_gain = s_gain_sweep.saved_shadow_gain;
+    const analog_agc_mode_t saved_agc_mode = s_gain_sweep.saved_agc_mode;
+    const agc_state_t saved_agc_state = s_gain_sweep.saved_agc_state;
+    const rf_bw_mode_t saved_bw_mode = s_gain_sweep.saved_bw_mode;
+    const bool saved_bw40 = s_gain_sweep.saved_bw40;
+    const afc_mode_t saved_afc_mode = s_gain_sweep.saved_afc_mode;
+    const int saved_offset_khz = s_gain_sweep.saved_offset_khz;
+    const bool saved_quiet = s_gain_sweep.saved_quiet;
+
+    s_gain_sweep.active = false;
+
+    /* Keep MANUAL long enough for analog_agc_task's private target_gain to
+     * follow the restored physical gain before restoring ACTIVE/SHADOW. */
+    s_agc_mode = ANALOG_AGC_MANUAL;
+    if (s_current_gain != saved_gain) lab_apply_fixed_gain(saved_gain);
+    s_shadow_gain = saved_gain;
+    vTaskDelay(pdMS_TO_TICKS(120));
+
+    s_rf_bw_mode = saved_bw_mode;
+    if (s_current_bw40 != saved_bw40) apply_rf_bandwidth(saved_bw40);
+    s_afc_mode = saved_afc_mode;
+    rf_set_frequency_offset_khz(saved_offset_khz);
+    s_agc_state = saved_agc_state;
+    s_shadow_gain = saved_shadow_gain;
+    s_agc_mode = saved_agc_mode;
+    s_lab_quiet = saved_quiet;
+
+    printf("C5VRX_GAIN_SWEEP_END status=%s restored_gain=%u restored_agc=%u restored_bw=%u\n",
+           aborted ? "ABORTED" : "COMPLETE", saved_gain, (unsigned)saved_agc_mode,
+           saved_bw40 ? 40u : 20u);
+}
+
+static void lab_start_gain_sweep(void)
+{
+    if (s_gain_sweep.active) {
+        lab_finish_gain_sweep(true);
+        return;
+    }
+    if (s_menu_active) {
+        printf("C5VRX_GAIN_SWEEP_REFUSED reason=menu_active\n");
+        return;
+    }
+
+    s_gain_sweep = (lab_gain_sweep_t) {
+        .active = true,
+        .sampled = false,
+        .gain = LAB_GAIN_MIN,
+        .saved_gain = s_current_gain,
+        .saved_shadow_gain = s_shadow_gain,
+        .saved_agc_mode = s_agc_mode,
+        .saved_agc_state = s_agc_state,
+        .saved_bw_mode = s_rf_bw_mode,
+        .saved_bw40 = s_current_bw40,
+        .saved_afc_mode = s_afc_mode,
+        .saved_offset_khz = rf_get_frequency_offset_khz(),
+        .saved_quiet = s_lab_quiet,
+    };
+
+    s_agc_mode = ANALOG_AGC_MANUAL;
+    s_rf_bw_mode = RF_BW_MODE_BW40;
+    if (!s_current_bw40) apply_rf_bandwidth(true);
+    s_afc_mode = AFC_MODE_OFF;
+    if (rf_get_frequency_offset_khz() != 0) rf_set_frequency_offset_khz(0);
+    s_lab_quiet = true;
+
+    /* Let a possible BW/AFC transition finish before the first measured gain
+     * state. No sample traffic is CPU-paced during this delay. */
+    vTaskDelay(pdMS_TO_TICKS(300));
+    lab_reset_correlation();
+
+    printf("C5VRX_GAIN_SWEEP_BEGIN min=%u max=%u step=%u settle_ms=%u dwell_ms=%u "
+           "bw=40 afc=off output=%s\n",
+           LAB_GAIN_MIN, LAB_GAIN_MAX, LAB_GAIN_STEP,
+           LAB_GAIN_SETTLE_MS, LAB_GAIN_DWELL_MS, output_mode_name());
+
+    s_gain_sweep.step_base = lab_counter_snapshot();
+    lab_apply_fixed_gain(s_gain_sweep.gain);
+    s_gain_sweep.applied_us = esp_timer_get_time();
+}
+
+static void lab_gain_sweep_tick(void)
+{
+    if (!s_gain_sweep.active) return;
+
+    int64_t elapsed_us = esp_timer_get_time() - s_gain_sweep.applied_us;
+    if (!s_gain_sweep.sampled &&
+        elapsed_us >= (int64_t)LAB_GAIN_SETTLE_MS * 1000LL) {
+        lab_print_row("GAIN_SWEEP", &s_gain_sweep.step_base);
+        s_gain_sweep.sampled = true;
+    }
+
+    if (elapsed_us < (int64_t)LAB_GAIN_DWELL_MS * 1000LL) return;
+
+    if (s_gain_sweep.gain + LAB_GAIN_STEP <= LAB_GAIN_MAX) {
+        s_gain_sweep.gain = (uint8_t)(s_gain_sweep.gain + LAB_GAIN_STEP);
+        s_gain_sweep.step_base = lab_counter_snapshot();
+        s_gain_sweep.sampled = false;
+        lab_apply_fixed_gain(s_gain_sweep.gain);
+        s_gain_sweep.applied_us = esp_timer_get_time();
+    } else {
+        lab_finish_gain_sweep(false);
+    }
+}
+
+static void lab_enter_quiet_baseline(void)
+{
+    if (s_gain_sweep.active) {
+        printf("C5VRX_LAB_BASELINE_REFUSED reason=gain_sweep_active\n");
+        return;
+    }
+    if (s_menu_active) {
+        printf("C5VRX_LAB_BASELINE_REFUSED reason=menu_active\n");
+        return;
+    }
+
+    s_agc_mode = ANALOG_AGC_MANUAL;
+    s_rf_bw_mode = RF_BW_MODE_BW40;
+    if (!s_current_bw40) apply_rf_bandwidth(true);
+    s_afc_mode = AFC_MODE_OFF;
+    if (rf_get_frequency_offset_khz() != 0) rf_set_frequency_offset_khz(0);
+    s_lab_quiet = true;
+
+    /* Baseline starts only after control-path setup transients are outside the
+     * run. Then all counters/timestamps are cleared in one explicit action. */
+    vTaskDelay(pdMS_TO_TICKS(600));
+    lab_reset_correlation();
+
+    printf("C5VRX_LAB_BASELINE_READY gain=%u bw=40 afc=off quiet=1 "
+           "instruction=do_not_touch_console_until_event\n", s_current_gain);
+}
+
 
 /* Modern standalone menu renderer.
  *
@@ -1878,7 +2121,7 @@ apply_target:
 
 control_tail: {
         bool is_locked = (s_agc_state == AGC_STATE_TRACK) && (q_phase >= 55);
-        if (is_locked && !was_locked) {
+        if (is_locked && !was_locked && !s_lab_quiet) {
             const fpv_channel_t *ch = rf_get_current_channel();
             printf("[CARRIER] Locked on %s (%u MHz) in %s (P=%d Q=%d%% G=%u)\n",
                    ch->name, ch->freq_mhz, rf_get_band_name(rf_get_current_band()),
@@ -1926,10 +2169,26 @@ static void console_diag_task(void *arg)
                            gain_age_ms, transport_age_ms,
                            (unsigned long)s_last_transport_flags,
                            s_current_gain, (unsigned)s_agc_state);
+                } else if (c == 'b') {
+                    lab_enter_quiet_baseline();
+                } else if (c == 'r') {
+                    lab_reset_correlation();
+                    printf("C5VRX_LAB_RESET gain=%u bw=%u afc=%u\n",
+                           s_current_gain, s_current_bw40 ? 40u : 20u, (unsigned)s_afc_mode);
+                } else if (c == 'p') {
+                    lab_print_row("SNAPSHOT", NULL);
+                } else if (c == 'g') {
+                    lab_start_gain_sweep();
+                } else if (c == 't') {
+                    rf_dump_tracked_timers();
+                } else if (c == 'q') {
+                    s_lab_quiet = !s_lab_quiet;
+                    printf("C5VRX_LAB_QUIET enabled=%u\n", s_lab_quiet ? 1u : 0u);
                 } else if (c == '+' || c == 'k') {
                     s_agc_mode = ANALOG_AGC_MANUAL;
-                    if (s_current_gain < 62u) {
-                        s_current_gain = s_current_gain <= 60u ? (uint8_t)(s_current_gain + 2u) : 62u;
+                    if (s_current_gain < LAB_GAIN_MAX) {
+                        s_current_gain = s_current_gain <= LAB_GAIN_MAX - LAB_GAIN_STEP ?
+                                         (uint8_t)(s_current_gain + LAB_GAIN_STEP) : LAB_GAIN_MAX;
                         s_last_gain_write_us = esp_timer_get_time();
                         rf_set_rx_gain(true, s_current_gain);
                         ++s_gain_transition_count;
@@ -1938,8 +2197,9 @@ static void console_diag_task(void *arg)
                     printf("[MANUAL GAIN] = %u (reg=0x%08lx)\n", s_current_gain, (unsigned long)rf_get_rx_gain_reg());
                 } else if (c == '-' || c == 'j') {
                     s_agc_mode = ANALOG_AGC_MANUAL;
-                    if (s_current_gain >= 2u) {
-                        s_current_gain = (uint8_t)(s_current_gain - 2u);
+                    if (s_current_gain > LAB_GAIN_MIN) {
+                        s_current_gain = s_current_gain >= LAB_GAIN_MIN + LAB_GAIN_STEP ?
+                                         (uint8_t)(s_current_gain - LAB_GAIN_STEP) : LAB_GAIN_MIN;
                         s_last_gain_write_us = esp_timer_get_time();
                         rf_set_rx_gain(true, s_current_gain);
                         ++s_gain_transition_count;
@@ -2040,7 +2300,8 @@ static void console_diag_task(void *arg)
                     printf(" AFC Mode:                   %s\n",
                            (s_afc_mode == AFC_MODE_AUTO) ? "AUTO EXPERIMENTAL (uncalibrated estimator)" :
                            (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (Offset Frozen)" : "OFF (0 kHz)");
-                    printf(" RF Bandwidth:               BW40 (fixed production mode)\n");
+                    printf(" RF Bandwidth:               mode=%s active=%s\n",
+                           rf_bw_mode_name(), s_current_bw40 ? "BW40" : "BW20");
                     printf(" Adaptive AGC Mode:          %s (State=%s)\n",
                            (s_agc_mode == ANALOG_AGC_ACTIVE) ? "ACTIVE" :
                            (s_agc_mode == ANALOG_AGC_SHADOW) ? "SHADOW (Safe Dry-Run)" : "MANUAL",
@@ -2104,6 +2365,10 @@ static void console_diag_task(void *arg)
                            "TEMPORARILY DISABLED (live video only)");
                     printf(" Keys:\n");
                     printf("  'a'/'s'/'m': AGC mode (active / shadow / manual)\n");
+                    printf("  'b':         Enter quiet MANUAL/BW40/AFC-off baseline + reset counters\n");
+                    printf("  'g':         Start/abort G2..G62 production-state gain sweep\n");
+                    printf("  'p'/'r':     Machine-readable snapshot / reset lag counters\n");
+                    printf("  't'/'q':     Vendor timer inventory / quiet unsolicited lock message\n");
                     printf("  'l':         Mark a visible lag/freeze for correlation\n");
                     printf("  '+' / '-':   Manual gain step (+/-2)\n");
                     printf("  'c':         Cycle FPV channel (A1..A8, R1..R8, B1..B8, F1..F8)\n");
@@ -2111,12 +2376,13 @@ static void console_diag_task(void *arg)
                     printf("  ',' / '.':   Fine-tune offset (-50 / +50 kHz)\n");
                     printf("  '0':         Reset offset to 0 kHz\n");
                     printf("  'e':         Toggle RX sample edge (POS/NEG)\n");
-                    printf("  'v'/'o'/'O': Menu controls (temporarily disabled)\n");
+                    printf("  'v'/'o'/'O': Menu controls\n");
                     printf("  'd':         Print this diagnostic summary\n");
                     printf("=======================================================\n\n");
                 }
             }
         }
+        lab_gain_sweep_tick();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
