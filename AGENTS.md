@@ -41,12 +41,12 @@ the project explicitly changes hosting architecture.
 ### Website deployment
 
 - `.github/workflows/deploy-web.yml` is the only production web deployment.
-- It publishes the static `web/` directory from `main` to GitHub Pages.
-- It runs when `web/**` (or the Pages workflow itself) changes on `main`, or
-  when manually dispatched.
-- Firmware-only PRs and firmware releases do not need a Pages deployment.
-- The deployed JavaScript discovers firmware dynamically through the public
-  GitHub Releases API.
+- It always checks out trusted `main` before constructing the Pages artifact.
+- It publishes `web/` plus a generated same-origin `firmware/` mirror.
+- It runs for web changes on `main`, manually, and after successful Production
+  CI so new/updated/removed PR builds and new releases refresh the mirror.
+- Browser release discovery should use the generated
+  `firmware/releases.json` manifest first.
 
 ### Normal release versioning
 
@@ -89,27 +89,31 @@ same-repository guard on `publish-pr-build`.
 
 ### How PR builds reach the flasher
 
-Do not copy PR binaries into `web/` and do not create a PR-specific Pages
-deployment. The flow is:
+Do not commit generated PR binaries into `web/` and do not deploy untrusted
+PR web code. The production Pages deployment always checks out trusted
+`main`, then mirrors firmware release assets server-side into the Pages
+artifact.
 
 ```text
 PR commit
-  -> build.yml
-  -> validated firmware artifacts
+  -> build.yml validates + builds firmware
   -> GitHub prerelease tag pr-<number>
-  -> existing GitHub Pages app queries /releases at runtime
-  -> PR Builds tab filters prerelease tags matching ^pr-[0-9]+$
-  -> user explicitly selects and confirms experimental flash
+  -> Production CI completes successfully
+  -> deploy-web.yml checks out main
+  -> tools/prepare_pages_site.sh downloads current release assets server-side
+  -> Pages artifact contains firmware/pr-<number>/...
+  -> firmware/releases.json adds same-origin local_url entries
+  -> PR Builds tab downloads from twotoz.github.io itself
+  -> user explicitly confirms experimental flash
 ```
 
-The **Releases** tab must contain only semantic-version releases. Experimental
-`pr-<number>` firmware belongs only in the separate **PR Builds** tab and must
-never become the default selection.
+The **Releases** tab contains semantic-version releases; **PR Builds** contains
+only `pr-<number>` prereleases. The Pages mirror keeps the newest 20 semantic
+firmware releases plus all currently active PR prereleases.
 
-A web UI change made in a PR is not visible on the production Pages site until
-that change is merged into `main` and `deploy-web.yml` completes. The PR
-firmware prerelease itself can still be discovered by whatever flasher UI is
-currently deployed.
+A web UI change made in a PR is still not deployed until merged into `main`.
+PR firmware can trigger a Pages **mirror refresh**, but that refresh checks out
+`main` and therefore cannot deploy unmerged PR HTML/JavaScript.
 
 
 ### CI concurrency on merge
@@ -133,16 +137,17 @@ seconds.
 
 ### Browser download path for release assets
 
-The web flasher must not depend on a third-party CORS proxy for firmware
-downloads. Release discovery still uses GitHub's Releases API, but binary
-downloads should prefer each asset's API `url` with:
+The production browser must download firmware **same-origin from GitHub
+Pages**. Direct browser fetches of GitHub Release assets are not reliable:
+GitHub can redirect binary requests to storage origins that do not satisfy the
+browser CORS request.
 
-```http
-Accept: application/octet-stream
-X-GitHub-Api-Version: 2022-11-28
-```
+`tools/prepare_pages_site.sh` runs inside GitHub Actions, where CORS does not
+apply. It downloads selected GitHub Release assets and places them under
+`firmware/<tag>/` in the Pages artifact. It also generates
+`firmware/releases.json`, adding `local_url` to each mirrored asset.
 
-Public release assets can be downloaded through this GitHub endpoint without a
-user token. The asset's `browser_download_url` may be kept only as a GitHub
-fallback. Do not reintroduce `corsproxy.io` or another external proxy into
-the production flasher.
+`web/app.js` must prefer `asset.local_url`. GitHub asset/API URLs are only a
+development fallback when the Pages manifest is unavailable. Never add a
+third-party CORS proxy, and do not make production flashing depend on
+cross-origin GitHub binary fetches.

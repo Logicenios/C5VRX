@@ -216,41 +216,55 @@ function handleLocalFile(file) {
   reader.readAsArrayBuffer(file);
 }
 
-// Fetch GitHub Releases and temporary PR prereleases.
-// The static GitHub Pages site never receives firmware files itself; it reads
-// this release index at runtime and downloads the selected release assets.
+// Fetch the firmware index mirrored into the GitHub Pages artifact.
+// Production flashing must stay same-origin: browsers cannot reliably fetch
+// GitHub Release storage redirects due to CORS.
 async function fetchReleases() {
-  selectRelease.innerHTML = '<option value="">Fetching releases from GitHub...</option>';
-  selectPrBuild.innerHTML = '<option value="">Fetching PR builds from GitHub...</option>';
+  selectRelease.innerHTML = '<option value="">Fetching firmware index...</option>';
+  selectPrBuild.innerHTML = '<option value="">Fetching PR builds...</option>';
 
+  let data = null;
   try {
-    const res = await fetch('https://api.github.com/repos/Twotoz/C5VRX/releases?per_page=100', {
-      headers: { 'Accept': 'application/vnd.github.v3+json' }
-    });
-    if (!res.ok) throw new Error(`GitHub API HTTP ${res.status}`);
-    const data = await res.json();
-    if (!Array.isArray(data) || data.length === 0) throw new Error('No releases found');
-
-    let productionReleases = data
-      .filter(rel => VERSION_TAG_PATTERN.test(rel.tag_name || ''))
-      .sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0));
-    const prBuilds = data
-      .filter(rel => rel.prerelease && PR_BUILD_TAG_PATTERN.test(rel.tag_name || ''))
-      .sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0));
-
-    if (productionReleases.length === 0) {
-      log('Warning: No versioned release returned by GitHub. Keeping the cached production release as the safe default.');
-      productionReleases = FALLBACK_RELEASES;
+    const mirrorUrl = new URL('firmware/releases.json', document.baseURI);
+    mirrorUrl.searchParams.set('t', Date.now().toString());
+    const mirrorRes = await fetch(mirrorUrl.href, { cache: 'no-store' });
+    if (!mirrorRes.ok) throw new Error(`Pages firmware index HTTP ${mirrorRes.status}`);
+    data = await mirrorRes.json();
+    if (!Array.isArray(data)) throw new Error('Pages firmware index is not an array');
+    log(`Loaded same-origin firmware index from GitHub Pages (${data.length} build(s)).`);
+  } catch (mirrorError) {
+    // Metadata fallback only. Binary flashing still prefers same-origin assets;
+    // this path mainly keeps local development usable for release browsing.
+    log(`Warning: Pages firmware index unavailable (${mirrorError.message}); falling back to GitHub release metadata.`);
+    try {
+      const res = await fetch('https://api.github.com/repos/Twotoz/C5VRX/releases?per_page=100', {
+        headers: { 'Accept': 'application/vnd.github.v3+json' },
+        cache: 'no-store'
+      });
+      if (!res.ok) throw new Error(`GitHub API HTTP ${res.status}`);
+      data = await res.json();
+      if (!Array.isArray(data)) throw new Error('GitHub releases response is not an array');
+    } catch (apiError) {
+      log(`Warning: Failed to fetch release metadata (${apiError.message}). Using cached production release only.`);
+      data = FALLBACK_RELEASES;
     }
-
-    githubReleases = productionReleases;
-    githubPrBuilds = prBuilds;
-    log(`Fetched ${githubReleases.length} versioned release(s) and ${githubPrBuilds.length} experimental PR build(s).`);
-  } catch (err) {
-    log(`Warning: Failed to fetch GitHub releases (${err.message}). Using cached production release only.`);
-    githubReleases = FALLBACK_RELEASES;
-    githubPrBuilds = [];
   }
+
+  let productionReleases = data
+    .filter(rel => VERSION_TAG_PATTERN.test(rel.tag_name || ''))
+    .sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0));
+  const prBuilds = data
+    .filter(rel => rel.prerelease && PR_BUILD_TAG_PATTERN.test(rel.tag_name || ''))
+    .sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0));
+
+  if (productionReleases.length === 0) {
+    log('Warning: No versioned release in firmware index. Keeping the cached production release as a safe fallback.');
+    productionReleases = FALLBACK_RELEASES;
+  }
+
+  githubReleases = productionReleases;
+  githubPrBuilds = prBuilds;
+  log(`Available: ${githubReleases.length} versioned release(s), ${githubPrBuilds.length} experimental PR build(s).`);
 
   populateReleaseDropdown();
   populatePrBuildDropdown();
@@ -640,16 +654,29 @@ btnFlash.addEventListener('click', async () => {
 });
 
 async function fetchReleaseAsset(asset) {
-  if (!asset) throw new Error('Missing GitHub release asset metadata');
+  if (!asset) throw new Error('Missing firmware asset metadata');
 
-  // Prefer GitHub's official release-asset REST endpoint. For public
-  // repositories this endpoint works without authentication and supports
-  // binary download via Accept: application/octet-stream. api.github.com also
-  // gives us a stable API/CORS surface instead of depending on a third-party
-  // proxy.
+  if (asset.local_url) {
+    const localUrl = new URL(asset.local_url, document.baseURI);
+    log(`Downloading ${asset.name} from same-origin Pages firmware mirror...`);
+    const localRes = await fetch(localUrl.href, { cache: 'no-store' });
+    if (!localRes.ok) {
+      throw new Error(`Pages firmware mirror HTTP ${localRes.status} for ${asset.name}`);
+    }
+    const buffer = await localRes.arrayBuffer();
+    if (asset.size && buffer.byteLength !== asset.size) {
+      throw new Error(
+        `Firmware mirror size mismatch for ${asset.name}: expected ${asset.size}, got ${buffer.byteLength}`
+      );
+    }
+    return buffer;
+  }
+
+  // Development fallback only. Production Pages manifests always attach a
+  // local_url. GitHub's release storage redirect may still be blocked by CORS.
   if (asset.url) {
     try {
-      log(`Downloading ${asset.name} via GitHub asset API...`);
+      log(`No Pages mirror URL for ${asset.name}; trying GitHub asset API...`);
       const apiRes = await fetch(asset.url, {
         method: 'GET',
         headers: {
@@ -666,24 +693,24 @@ async function fetchReleaseAsset(asset) {
     }
   }
 
-  if (!asset.browser_download_url) {
-    throw new Error(`No downloadable URL available for ${asset.name || 'release asset'}`);
+  if (asset.browser_download_url) {
+    try {
+      const directRes = await fetch(asset.browser_download_url, {
+        method: 'GET',
+        redirect: 'follow',
+        cache: 'no-store'
+      });
+      if (!directRes.ok) throw new Error(`GitHub download HTTP ${directRes.status}`);
+      return await directRes.arrayBuffer();
+    } catch (directError) {
+      throw new Error(
+        `This build is not mirrored on GitHub Pages and GitHub's cross-origin download was blocked. ` +
+        `Refresh the flasher after the Pages sync completes. Details: ${directError.message}`
+      );
+    }
   }
 
-  try {
-    const directRes = await fetch(asset.browser_download_url, {
-      method: 'GET',
-      redirect: 'follow',
-      cache: 'no-store'
-    });
-    if (!directRes.ok) throw new Error(`GitHub download HTTP ${directRes.status}`);
-    return await directRes.arrayBuffer();
-  } catch (directError) {
-    throw new Error(
-      `Could not download ${asset.name || 'release asset'} from GitHub. ` +
-      `Asset API and browser download both failed: ${directError.message}`
-    );
-  }
+  throw new Error(`No downloadable URL available for ${asset.name || 'firmware asset'}`);
 }
 
 btnClearConsole.addEventListener('click', () => {

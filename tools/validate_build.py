@@ -252,11 +252,23 @@ check("PR builds have a separate warned flasher tab",
       'id="tabPr"' in read(ROOT / "web" / "index.html") and
       'id="panePr"' in read(ROOT / "web" / "index.html") and
       'id="selectPrBuild"' in read(ROOT / "web" / "index.html"))
-check("web flasher downloads release assets through GitHub API without third-party proxy",
-      "fetchReleaseAsset(" in web_app and
-      "'Accept': 'application/octet-stream'" in web_app and
-      "'X-GitHub-Api-Version': '2022-11-28'" in web_app and
+check("web flasher prefers same-origin Pages firmware mirror",
+      "firmware/releases.json" in web_app and
+      "asset.local_url" in web_app and
+      "same-origin Pages firmware mirror" in web_app and
       "corsproxy.io" not in web_app)
+check("Pages deploy builds firmware mirror from trusted main",
+      'workflow_run:' in web_workflow and
+      'workflows: ["C5VRX-3 Production CI"]' in web_workflow and
+      "ref: main" in web_workflow and
+      "tools/prepare_pages_site.sh pages-site" in web_workflow and
+      "path: pages-site/" in web_workflow)
+prepare_pages = read(ROOT / "tools" / "prepare_pages_site.sh")
+check("Pages mirror includes versioned releases and active PR prereleases",
+      "gh release download" in prepare_pages and
+      "local_url" in prepare_pages and
+      "^pr-[0-9]+$" in prepare_pages and
+      ".[:20]" in prepare_pages)
 check("same-repo PR firmware is published only as an explicit prerelease",
       "publish-pr-build:" in workflow and
       "github.event.pull_request.head.repo.full_name == github.repository" in workflow and
@@ -272,9 +284,10 @@ check("release build is gated by architectural validation",
 check("firmware CI does not create Pages deployments",
       "actions/deploy-pages" not in workflow and
       "Deploy Web Flasher to GitHub Pages" not in workflow)
-check("web deployment is isolated, path-filtered and GitHub Pages-only",
+check("web deployment is GitHub Pages-only and refreshes after firmware CI",
       'paths:' in web_workflow and
       '"web/**"' in web_workflow and
+      "workflow_run:" in web_workflow and
       "workflow_dispatch:" in web_workflow and
       "actions/deploy-pages@v4" in web_workflow and
       "Pages Mirror" not in web_workflow and
@@ -285,12 +298,14 @@ check("README documents GitHub Pages as the only production flasher host",
       "There is no VPS" in readme and
       "c5vrx.com" not in readme)
 agents = read(ROOT / "AGENTS.md")
-check("AGENTS documents release, PR-build and Pages flow",
+check("AGENTS documents release, PR-build and trusted Pages mirror flow",
       "## Releases, PR builds, and web flasher deployment" in agents and
       "pr-<PR_NUMBER>" in agents and
       "PR Builds" in agents and
       "GitHub Pages" in agents and
-      "do not create a PR-specific Pages" in agents)
+      "always checks out trusted" in agents and
+      "firmware/releases.json" in agents and
+      "same-origin" in agents)
 
 check("gain transient classifier present",
       "gain_quality_drop_count" in all_c and

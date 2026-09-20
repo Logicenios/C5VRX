@@ -33,7 +33,7 @@ The production web flasher is hosted entirely by **GitHub Pages** at
 application server, or separate production web host in the current deployment.
 
 - **Automatic Latest Firmware**: Automatically selects the newest immutable semantic-version release.
-- **One-Click Flashing**: Flashes the universal merged production image (`bootloader + partitions + app` at `0x0`) over Web Serial. Firmware binaries are fetched directly through GitHub's release-asset API; no external CORS proxy is required.
+- **One-Click Flashing**: Flashes the universal merged production image (`bootloader + partitions + app` at `0x0`) over Web Serial. Firmware is mirrored into the GitHub Pages artifact and fetched same-origin, so browser CORS redirects are not part of the production flash path.
 - **Selectable Releases**: The **Releases** tab contains only semantic-version releases such as `v3.0.0`, `v3.0.1`, and newer.
 - **Separate PR Builds Tab**: Same-repository pull requests publish a temporary `pr-<number>` GitHub prerelease. Experimental builds appear only under **PR Builds**, never in the normal Releases list, and require an explicit warning confirmation before flashing.
 - **Offline / Local Execution**: You can also run the web flasher locally:
@@ -58,10 +58,11 @@ Every push or merged PR to `main` builds the production firmware and publishes a
 Firmware releases and website deployment are intentionally separate:
 
 - `.github/workflows/build.yml` validates and builds firmware, then publishes a versioned release after a successful push to `main`. For same-repository PRs it also maintains a clearly marked temporary prerelease (`pr-<number>`) and removes it when the PR closes.
-- `.github/workflows/deploy-web.yml` is the **only production website deployment**. It publishes the static `web/` directory to GitHub Pages and runs only when the flasher itself changes (or when started manually).
-- Normal firmware and documentation commits therefore do not redeploy the website. The already-deployed static flasher discovers new semantic releases and temporary `pr-<number>` prereleases dynamically through the GitHub Releases API.
-- A pull request does **not** deploy a separate website. Its firmware becomes flashable by publishing release assets under `pr-<number>`; the GitHub Pages app discovers that temporary prerelease at runtime.
-- When the PR closes or merges, CI deletes its temporary prerelease/tag. Web UI changes themselves reach GitHub Pages only after they are merged into `main`.
+- `.github/workflows/deploy-web.yml` is the **only production website deployment**. It always checks out trusted `main`, then packages the web flasher plus a generated firmware mirror into one GitHub Pages artifact.
+- `tools/prepare_pages_site.sh` mirrors the newest semantic firmware releases and all active `pr-<number>` prereleases under `firmware/<tag>/`, and generates `firmware/releases.json`.
+- The browser reads that Pages manifest and downloads binaries from the same `twotoz.github.io` origin. This avoids GitHub Release storage CORS redirects entirely.
+- Successful Production CI triggers a Pages mirror refresh, so newly published/updated PR builds and releases become available without deploying unmerged PR web code.
+- When a PR closes or merges, CI deletes its temporary prerelease/tag; the next successful cleanup-triggered Pages refresh removes it from the mirror.
 
 ---
 
