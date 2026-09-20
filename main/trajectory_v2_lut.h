@@ -2,14 +2,9 @@
  * Source model: tools/train_trajectory_v2.py
  * Address: prev_phase5 | (middle_i_sign << 5) | ((current_phase5 >> 1) << 6)
  *
- * Training prior:
- *   - physically plausible adjacent FM slope/acceleration;
- *   - random carrier phase, Q4 amplitude, fades and additive I/Q noise;
- *   - strong triplets (power >= 32) target raw exact-adjacent d0+d1;
- *   - weak triplets target the clean local trajectory (PLL-lite holdover prior).
- *
- * The d0+d1 target is never re-wrapped. Confidence is inverse target spread
- * and is supervisory only; it never CPU-paces the live pixel stream.
+ * Strong triplets target raw exact-adjacent d0+d1. Weak triplets target the
+ * clean local FM trajectory as a PLL-lite holdover prior. d0+d1 is never
+ * re-wrapped. Confidence is inverse target spread and is supervisory only.
  */
 #pragma once
 #include <stdint.h>
