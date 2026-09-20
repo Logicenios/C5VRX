@@ -427,17 +427,16 @@ check("same-repo PR firmware is published only as an explicit prerelease",
       "--prerelease" in workflow and
       'tag="pr-${PR_NUMBER}"' in workflow and
       "cleanup-pr-build:" in workflow)
-check("stacked development PRs publish webflasher firmware",
+check("stacked development PRs publish webflasher firmware from PR events only",
       'branches: [main, "feat/**", "fix/**", "codex/**"]' in workflow and
+      'types: [opened, synchronize, reopened, closed]' in workflow and
       "Publish Experimental PR Build" in workflow and
-      "github.event.action == 'opened'" in workflow and
-      "github.event.action == 'reopened'" in workflow and
-      "github.event_name == 'push'" in workflow and
-      "github.ref != 'refs/heads/main'" in workflow and
-      "gh pr list" in workflow and
-      '--head "${GITHUB_REF_NAME}"' in workflow and
-      "steps.pr.outputs.publish == 'true'" in workflow and
-      "pull-requests: read" in workflow)
+      "github.event_name == 'pull_request'" in workflow and
+      "github.event.action != 'closed'" in workflow and
+      "github.event.pull_request.head.repo.full_name == github.repository" in workflow and
+      "github.event.pull_request.head.sha" in workflow and
+      "gh pr list" not in workflow and
+      "pull-requests: read" not in workflow)
 check("CI concurrency separates merge push from PR-close cleanup",
       "github.event_name" in workflow and
       "github.event.pull_request.number || github.ref" in workflow and
@@ -470,7 +469,8 @@ check("AGENTS documents release, PR-build and trusted Pages mirror flow",
       "firmware/releases.json" in agents and
       "same-origin" in agents and
       "Debugging a PR build missing from the web flasher" in agents and
-      'gh pr list --head "${GITHUB_REF_NAME}"' in agents and
+      "pull_request workflow is the sole owner" in agents and
+      'branches: [main, "feat/**", "fix/**", "codex/**"]' in agents and
       "selecting `4BIT@80` while" in agents)
 
 check("gain transient classifier present",
