@@ -606,6 +606,16 @@ static inline uint8_t trajectory_v2_code(uint8_t previous_phase5,
         trajectory_v2_address(previous_phase5, middle_raw, current_phase5)];
 }
 
+static inline fusion_shadow_metrics_t active_demod_shadow(fusion_shadow_metrics_t shadow)
+{
+    /* Compressed-LUT ambiguity is only a live failure mechanism when TRAJ V2
+     * is actually selected. Keep GOLDEN A/B behavior free of this extra
+     * penalty; generic raw-IQ/PLL-lite evidence remains active in both modes. */
+    if (s_demod_mode != DEMOD_MODE_TRAJECTORY_V2)
+        shadow.trajectory_uncertainty_permille = 0;
+    return shadow;
+}
+
 static uint32_t s_receive_generation;
 
 static void video_standard_detector_reset(void)
@@ -944,7 +954,7 @@ static void fusion_observer_task(void *arg)
             metrics.origin_permille, metrics.winding_permille,
             metrics.strong_winding_permille, metrics.iq_skew_permille,
             metrics.iq_cross_permille, s_last_sync_quality,
-            metrics.fusion_shadow);
+            active_demod_shadow(metrics.fusion_shadow));
         fusion_temporal_metrics_t tm = fusion_temporal_update(&temporal, &obs);
         fusion_temporal_publish(&tm);
     }
@@ -1084,6 +1094,7 @@ static void cycle_demod_mode(void)
      * PAL/NTSC votes or lock age from the previous demodulator across an A/B
      * switch. receive_generation also makes the controller relearn cleanly. */
     video_standard_detector_reset();
+    ++s_profile_generation; /* reset Fusion temporal/optimizer state for clean A/B */
 }
 
 static void apply_rf_bandwidth(bool bw40)
@@ -2694,7 +2705,7 @@ static void channel_auto_search(void)
             metrics.p_median, metrics.q_phase, metrics.clip_permille,
             metrics.origin_permille, metrics.winding_permille,
             metrics.strong_winding_permille, metrics.iq_skew_permille,
-            metrics.iq_cross_permille, 0, metrics.fusion_shadow);
+            metrics.iq_cross_permille, 0, active_demod_shadow(metrics.fusion_shadow));
         int rank = scan_fusion.quality + quality * 2;
         if (scan_fusion.context != FUSION_CONTEXT_NO_CARRIER &&
             metrics.q_phase >= 22 && rank > best_rank) {
@@ -3077,7 +3088,7 @@ static void analog_agc_task(void *arg)
             p_median, q_phase, clip_permille, origin_permille,
             metrics.winding_permille, metrics.strong_winding_permille,
             metrics.iq_skew_permille, metrics.iq_cross_permille,
-            sync_quality, metrics.fusion_shadow);
+            sync_quality, active_demod_shadow(metrics.fusion_shadow));
         s_last_fusion_quality = fusion_obs.quality;
         s_last_fusion_confidence = fusion_obs.confidence;
         s_last_fusion_context = (int)fusion_obs.context;
