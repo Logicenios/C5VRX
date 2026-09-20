@@ -1327,6 +1327,8 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            "nf_valid=%u nf_dbm=%d rssi_valid=%u rssi_dbm=%d "
            "dc_i_x100=%d dc_q_x100=%d iq_skew_pm=%d iq_cross_pm=%d "
            "winding_pm=%d strong_winding_pm=%d sync_q=%d sync_width=%u "
+           "fusion_ctx=%d fusion_q=%d fusion_conf=%d fusion_lowiq_pm=%d "
+           "fusion_lag2_pm=%d fusion_lag4_pm=%d fusion_consensus_pm=%d fusion_slope_x100=%d "
            "fft_forced=%u fft=%d filter_mode=%u adc_sel=%u filter_reg=0x%08lx "
            "adc_reg=0x%08lx source_mux=0x%08lx "
            "tx_empty=%lu rx_ovf=%lu tx_eof=%lu gdma_in=%lu gdma_out=%lu "
@@ -1344,6 +1346,9 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            s_last_iq_skew_permille, s_last_iq_cross_permille,
            s_last_winding_permille, s_last_strong_winding_permille,
            s_last_sync_quality, (unsigned)s_last_sync_width_20m,
+           s_last_fusion_context, s_last_fusion_quality, s_last_fusion_confidence,
+           s_last_fusion_low_confidence_pm, s_last_fusion_lag2_pm,
+           s_last_fusion_lag4_pm, s_last_fusion_consensus_pm, s_last_fusion_slope_x100,
            s_lab_fft_forced ? 1u : 0u, (int)s_lab_fft_value,
            (unsigned)phy.rx_filter_mode, (unsigned)phy.adc_rate_sel,
            (unsigned long)phy.rx_filter_reg, (unsigned long)phy.adc_rate_reg,
@@ -2369,9 +2374,14 @@ static void channel_auto_search(void)
                                    sizeof(s_control_sample_buf),
                                    scan_ring_offset);
         int quality = signal_strength_score(&metrics, 52u);
-        int rank = metrics.q_phase * 4 + metrics.p_median + quality -
-                   demod_winding_penalty(metrics.winding_permille);
-        if (metrics.q_phase >= 22 && rank > best_rank) {
+        fusion_observation_t scan_fusion = fusion_make_observation(
+            metrics.p_median, metrics.q_phase, metrics.clip_permille,
+            metrics.origin_permille, metrics.winding_permille,
+            metrics.strong_winding_permille, metrics.iq_skew_permille,
+            metrics.iq_cross_permille, 0, metrics.fusion_shadow);
+        int rank = scan_fusion.quality + quality * 2;
+        if (scan_fusion.context != FUSION_CONTEXT_NO_CARRIER &&
+            metrics.q_phase >= 22 && rank > best_rank) {
             best_rank = rank;
             best_channel = channel;
             best_quality = quality;
