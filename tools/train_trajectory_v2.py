@@ -45,9 +45,7 @@ def s4(v: int) -> int:
 
 
 def phase_rad(byte: int) -> float:
-    q = s4(byte & 0x0F) * 64.0 + (31.5 if s4(byte & 0x0F) >= 0 else -31.5)
-    i = s4((byte >> 4) & 0x0F) * 64.0 + (31.5 if s4((byte >> 4) & 0x0F) >= 0 else -31.5)
-    # Match bucket centres used by the historical Q4 model exactly.
+    # Match bucket centres used by the historical full-Q4 model exactly.
     qc = byte & 0x0F
     ic = (byte >> 4) & 0x0F
     q = qc * 64.0 + 31.5
@@ -82,7 +80,7 @@ def scale_rad(rad: float) -> int:
 
 
 def trajectory_address(previous: int, middle: int, current: int) -> int:
-    return phase5(previous) | ((middle & 1) << 5) | ((phase5(current) >> 1) << 6)
+    return phase5(previous) | (((middle >> 7) & 1) << 5) | ((phase5(current) >> 1) << 6)
 
 
 def parse_lut_words(text: str) -> list[int]:
@@ -160,7 +158,7 @@ def self_test() -> None:
     # --write and update this digest in the same reviewed change.
     packed = bytes(dac) + bytes(confidence)
     digest = hashlib.sha256(packed).hexdigest()
-    expected = "662222820f078a17d69efc7392958aa95634a055175ce45678d3d637e70f3807"
+    expected = "15e57fe6e571da29acce82c6824e276a306faae3ed54d4f4a5984c9f3d269f86"
     assert digest == expected, f"Trajectory v2 table drift: {digest}"
 
     # Spot-check address semantics across quadrant/sign boundaries.
@@ -169,7 +167,7 @@ def self_test() -> None:
         a = trajectory_address(p, m, c)
         assert 0 <= a < 1024
         assert (a & 31) == phase5(p)
-        assert ((a >> 5) & 1) == (m & 1)
+        assert ((a >> 5) & 1) == ((m >> 7) & 1)
         assert ((a >> 6) & 15) == (phase5(c) >> 1)
 
     print(
@@ -179,54 +177,114 @@ def self_test() -> None:
     )
 
 
+def _xorshift32(state: int) -> tuple[int, float]:
+    state ^= (state << 13) & 0xFFFFFFFF
+    state ^= state >> 17
+    state ^= (state << 5) & 0xFFFFFFFF
+    state &= 0xFFFFFFFF
+    return state, state / 4294967296.0
+
+
+def _js_round(x: float) -> int:
+    # Match Math.round used when the canonical table was trained.
+    return math.floor(x + 0.5)
+
+
 def regenerate() -> tuple[list[int], list[int], list[int]]:
-    try:
-        import numpy as np
-    except ImportError as exc:
-        raise SystemExit("--write requires NumPy") from exc
+    """Rebuild the pinned physics prior.
 
-    phi = np.array([phase_rad(b) for b in range(256)], dtype=np.float64)
-    p5 = np.array([phase5(b) for b in range(256)], dtype=np.int32)
-    counts = np.zeros(1024, dtype=np.int64)
-    sums = np.zeros(1024, dtype=np.float64)
-    sums2 = np.zeros(1024, dtype=np.float64)
+    Strong Q4 triplets follow their exact raw adjacent discriminator. Weak
+    triplets use the known clean local FM trajectory as a small PLL/holdover
+    prior. This prevents impossible uniform-Q4 jumps from dominating the LUT.
+    """
+    golden_words = parse_lut_words((ROOT / "main" / "fm.bsasm").read_text())
+    phases = [phase_rad(b) for b in range(256)]
+    phases5 = [phase5(b) for b in range(256)]
+    powers = []
+    for b in range(256):
+        i, q = s4((b >> 4) & 0x0F), s4(b & 0x0F)
+        powers.append(i * i + q * q)
 
-    m_grid, c_grid = np.indices((256, 256), dtype=np.int32)
-    m_flat = m_grid.reshape(-1)
-    c_flat = c_grid.reshape(-1)
-    middle_hint = m_flat & 1
-    curr4 = p5[c_flat] >> 1
+    count = [0] * 1024
+    sums = [0.0] * 1024
+    sums2 = [0.0] * 1024
+    state = 0x314159
+    spare = None
 
-    def wrap_np(x):
-        return (x + math.pi) % TAU - math.pi
+    def uniform() -> float:
+        nonlocal state
+        state, value = _xorshift32(state)
+        return value
 
-    for p in range(256):
-        d0 = wrap_np(phi[m_flat] - phi[p])
-        d1 = wrap_np(phi[c_flat] - phi[m_flat])
-        summed = d0 + d1  # DO NOT wrap this sum.
-        phase8 = np.where(
-            summed * 256.0 / TAU >= 0,
-            np.floor(summed * 256.0 / TAU + 0.5),
-            -np.floor(-summed * 256.0 / TAU + 0.5),
-        ).astype(np.int32)
-        n = phase8 * 3
-        correction = np.where(n < 0, -((-n + 2) // 4), (n + 2) // 4)
-        target = np.clip(20 + correction, 0, 63).astype(np.int32)
-        address = p5[p] | (middle_hint << 5) | (curr4 << 6)
-        counts += np.bincount(address, minlength=1024)
-        sums += np.bincount(address, weights=target, minlength=1024)
-        sums2 += np.bincount(address, weights=target * target, minlength=1024)
+    def gaussian() -> float:
+        nonlocal spare
+        if spare is not None:
+            value, spare = spare, None
+            return value
+        u = max(1e-12, uniform())
+        v = uniform()
+        radius = math.sqrt(-2.0 * math.log(u))
+        angle = TAU * v
+        spare = radius * math.sin(angle)
+        return radius * math.cos(angle)
 
-    denom = np.maximum(counts, 1)
-    mean = sums / denom
-    dac = np.where(mean >= 0, np.floor(mean + 0.5), -np.floor(-mean + 0.5)).astype(np.int32)
-    variance = np.maximum(0.0, sums2 / denom - mean * mean)
-    std = np.sqrt(variance)
-    confidence = np.clip(np.floor(255.0 * (1.0 - np.minimum(std, 32.0) / 32.0) + 0.5), 0, 255).astype(np.int32)
+    def quant(phi: float, amplitude: float, sigma: float) -> int:
+        i = amplitude * math.cos(phi) + sigma * gaussian()
+        q = amplitude * math.sin(phi) + sigma * gaussian()
+        ii = max(-8, min(7, _js_round(i))) & 0x0F
+        qq = max(-8, min(7, _js_round(q))) & 0x0F
+        return (ii << 4) | qq
 
-    words = dac.copy()
-    words[:256] |= p5 << 8
-    return words.tolist(), dac.tolist(), confidence.tolist()
+    for _ in range(1_200_000):
+        phi0 = (uniform() * 2.0 - 1.0) * math.pi
+        slope = (uniform() * 2.0 - 1.0) * 0.98
+        accel = (uniform() * 2.0 - 1.0) * 0.34
+        d0 = max(-1.20, min(1.20, slope - accel * 0.5))
+        d1 = max(-1.20, min(1.20, slope + accel * 0.5))
+
+        amplitude = 1.6 + uniform() * 5.3
+        if uniform() < 0.10:
+            amplitude = 0.45 + uniform() * 2.0
+        sigma = uniform() * 1.15
+
+        p = quant(phi0, amplitude, sigma)
+        m = quant(wrap(phi0 + d0), amplitude, sigma)
+        c = quant(wrap(phi0 + d0 + d1), amplitude, sigma)
+
+        clean_target = scale_rad(d0 + d1)
+        raw_exact = scale_rad(
+            wrap(phases[m] - phases[p]) + wrap(phases[c] - phases[m]))
+        strong = min(powers[p], powers[m], powers[c]) >= 32
+        target = raw_exact if strong else clean_target
+
+        address = phases5[p] | (((m >> 7) & 1) << 5) | ((phases5[c] >> 1) << 6)
+        count[address] += 1
+        sums[address] += target
+        sums2[address] += target * target
+
+    dac = [20] * 1024
+    confidence = [0] * 1024
+    for address in range(1024):
+        if count[address]:
+            mean = sums[address] / count[address]
+            variance = max(0.0, sums2[address] / count[address] - mean * mean)
+            std = math.sqrt(variance)
+            dac[address] = max(0, min(63, iround(mean)))
+            confidence[address] = max(
+                0, min(255, iround(255.0 * (1.0 - min(std, 24.0) / 24.0))))
+        else:
+            prev = address & 31
+            current4 = (address >> 6) & 15
+            c0 = current4 << 1
+            c1 = c0 | 1
+            d0 = golden_words[(prev << 5) | c0] & 63
+            d1 = golden_words[(prev << 5) | c1] & 63
+            dac[address] = iround((d0 + d1) * 0.5)
+
+    words = list(dac)
+    for raw in range(256):
+        words[raw] |= phases5[raw] << 8
+    return words, dac, confidence
 
 
 def write_generated() -> None:
@@ -244,9 +302,11 @@ def write_generated() -> None:
 
     header = f"""/* Generated Trajectory v2 reference tables.
  * Source model: tools/train_trajectory_v2.py
- * Address: prev_phase5 | (middle_q_lsb << 5) | ((current_phase5 >> 1) << 6)
- * The DAC target is the uniform-geometry mean of exact adjacent d0+d1 with
- * NO second wrap. Confidence is inverse target spread and is supervisory only.
+ * Address: prev_phase5 | (middle_i_sign << 5) | ((current_phase5 >> 1) << 6)
+ *
+ * Strong triplets target raw exact-adjacent d0+d1. Weak triplets target the
+ * clean local FM trajectory as a PLL-lite holdover prior. d0+d1 is never
+ * re-wrapped. Confidence is inverse target spread and is supervisory only.
  */
 #pragma once
 #include <stdint.h>
