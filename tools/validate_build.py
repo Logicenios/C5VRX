@@ -143,6 +143,42 @@ check("manual gain cannot step below production lower bound",
       "s_current_gain > LAB_GAIN_MIN" in all_c and
       "LAB_GAIN_MIN       2u" in all_c)
 
+check("PHY lab exposes read-only filter/ADC snapshot",
+      "rf_get_phy_snapshot" in all_c and
+      "RX_GAIN_STATUS_REG" in all_c and
+      "ADC_RATE_REG" in all_c and
+      "rx_filter_mode" in all_c)
+check("FFT placement probe is bounded and restores automatic FFT scaling",
+      "C5VRX_FFT_PROBE_BEGIN" in all_c and
+      "s_lab_fft_values[] = {16, 24, 32, 40}" in all_c and
+      "rf_set_fft_scale_force(false, 0)" in all_c)
+check("fixed-gain BW40/BW20 A/B probe present",
+      "C5VRX_BW_PROBE_BEGIN" in all_c and
+      'lab_print_row("BW_SWEEP"' in all_c and
+      "LAB_BW_SETTLE_MS" in all_c)
+check("Q4 IQ-centering metrics present",
+      "dc_i_x100" in all_c and "dc_q_x100" in all_c and
+      "iq_skew_permille" in all_c and "iq_cross_permille" in all_c)
+check("lag correlation covers any tracked PHY write",
+      "near_phy_event_count" in all_c and
+      "s_last_phy_write_us" in all_c and
+      "PHY_WRITE_BW" in all_c and "PHY_WRITE_OFFSET" in all_c and
+      "PHY_WRITE_FFT" in all_c)
+check("TRACK freezes automatic bandwidth and AFC writes",
+      "TRACK is a hard no-write zone" in all_c and
+      "AUTO AFC is acquisition-only" in all_c and
+      "s_agc_state != AGC_STATE_TRACK" in all_c)
+check("unsafe undocumented gain/filter ROM controls remain out of production",
+      all(symbol not in all_c for symbol in (
+          "phy_pbus_set_rxgain(",
+          "phy_bb_gain_index(",
+          "phy_agc_max_gain_set(",
+          "phy_wifi_agc_sat_gain(",
+          "phy_chan_filt_set(",
+          "phy_rx_filter_mode(",
+          "phy_rfrx_rxdc_cal(",
+      )))
+
 # ---- Web flasher / release safety ----
 web_app = read(ROOT / "web" / "app.js")
 workflow = read(ROOT / ".github" / "workflows" / "build.yml")
