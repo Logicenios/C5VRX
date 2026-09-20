@@ -22,6 +22,11 @@
 
 The current experimental range work measures semantic CVBS sync and the exact-adjacent winding loss hidden by the 50 ns endpoint discriminator. See `docs/range-demod-quality-v2.md` for the measurement model and hardware validation rules.
 
+The current Range v2 work is documented in:
+- `docs/range-v2.md` — implementation and validation overview;
+- `docs/range-v2-knowledge.md` — preserved control/demod engineering knowledge;
+- `docs/range-v2-research-notes.md` — RF research hypotheses and hardware test plan.
+
 ## Web Flasher (Zero-Install Browser Flashing)
 
 Flash your Seeed Studio XIAO ESP32-C5 directly from your browser (Google Chrome, Microsoft Edge, Brave, Opera) with zero installation required:
