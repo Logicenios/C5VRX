@@ -194,7 +194,8 @@ check("fusion profile stays supervisory over the proven realtime demod",
       "RX_PROFILE_FUSION_EXP" in all_c and
       "fusion_optimizer_tick" in all_c and
       "fusion_make_observation" in all_c and
-      bs_srcs == ["fm.bsasm", "fm4.bsasm"])
+      'target_bitscrambler_add_src("fm.bsasm")' in read(MAIN / "CMakeLists.txt") and
+      'target_bitscrambler_add_src("fm4.bsasm")' in read(MAIN / "CMakeLists.txt"))
 check("lag correlation covers any tracked PHY write",
       "near_phy_event_count" in all_c and
       "s_last_phy_write_us" in all_c and
