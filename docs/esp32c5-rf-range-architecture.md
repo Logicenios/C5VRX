@@ -49,6 +49,71 @@ gain. C5VRX now records these as both a PHY write and gain-write correlation
 event. AUTO AFC is acquisition-only; once TRACK is reached it freezes the
 current RF state.
 
+## Experimental RX profiles
+
+PR #35 now exposes the range research as explicit menu profiles while keeping
+**BALANCED** as the boot/default profile. On the RF page, a normal long press
+still cycles BW40/BW20/AUTO; holding for about two seconds cycles the complete
+RX profile.
+
+### BALANCED
+
+Known production behavior: C5VRX fixed-gain controller, BW40 default, AFC off,
+no undocumented PHY polling, no hardware AGC and no forced FFT scaling.
+
+### RANGE EXP
+
+Starts high (G56), searches mainly in the upper gain range, uses the
+acquisition-only BW40/BW20 gearbox and leaves AFC off. It is range-biased, but
+the emergency overload path can still escape to lower gain so the mode remains
+usable close to a VTX.
+
+### BLOCKER EXP
+
+Starts at moderate gain and caps the C5VRX controller at G48. BW40 remains
+active. This targets strong nearby transmitters, multi-VTX environments and
+testing whether apparent weak-signal failures are actually front-end
+compression/blocking.
+
+### RECOVERY
+
+Keeps BW40 but makes SEARCH/relearn faster and enables acquisition-only AFC.
+TRACK still freezes software PHY writes. This targets the user-visible
+brief-RF-disturbance -> slow goggles re-lock failure mode.
+
+### AUTO EXP
+
+Combines the safe experimental evidence rather than blindly enabling every ROM
+knob:
+
+- raw Q4 phase coherence remains the primary lock signal;
+- rail clipping and near-origin occupancy drive gain direction;
+- Q4 DC offsets, I/Q power skew and I/Q cross-correlation reject gain states
+  that have good amplitude but poor phase geometry;
+- rate-limited PHY noise-floor and wideband-RSSI reads are used only as a
+  bounded SEARCH bias when their values are physically plausible;
+- BW40/BW20 changes are acquisition-only and freeze in TRACK;
+- AFC is acquisition-only and freezes in TRACK;
+- FFT scaling remains automatic unless the bounded `F` probe, on the current
+  boot, proves a material improvement in raw MODEM_DIAG Q4 metrics. Only then
+  does AUTO reuse the best measured FFT value.
+
+The purpose is a self-characterizing receiver, not a fast software loop that
+continually perturbs the PHY.
+
+### HW AGC EXP
+
+This deliberately invasive comparison mode releases the production forced
+gain, enables Espressif AGC and sets the C5-only AGC maximum-gain ceiling to
+62. C5VRX software gain control is put in MANUAL so both controllers cannot
+fight each other. Q4 and transport metrics continue to run for comparison.
+
+The boot path previously disables both packet AGC and `rfagc`; because the
+exact relationship between `phy_enable_agc()` and the separate RF-AGC disable
+is undocumented, this mode is an experiment, not a claim that the complete
+RF+BB AGC chain has been restored. Gain/FFT/BW lab sweeps refuse to start
+while HW AGC owns the chain.
+
 ## Read-only observability added in this PR
 
 Every lab row can include:
@@ -87,6 +152,12 @@ The ESP32-C5 ROM symbol map also exposes receive-side functions including:
 These names prove that the PHY contains more controls than one aggregate gain
 index. They do **not** prove the C ABI, valid value ranges, stage meaning, or
 that a call is safe while continuous MODEM_DIAG video is running.
+
+Two lower-risk C5 interfaces have now been promoted only inside explicit
+experimental profiles: `phy_agc_max_gain_set()` / `phy_enable_agc()` for the
+isolated HW-AGC comparison, and read-only `phy_get_noise_floor()` /
+`phy_get_rssi()` observations for AUTO bias. Their outputs are range-checked
+before use and the default BALANCED profile never polls them.
 
 For that reason this PR deliberately does not invoke them. The promotion rule
 is:
