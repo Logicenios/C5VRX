@@ -119,10 +119,19 @@ The later ~10% horizontal widening adds 8,288 bytes to the UI backing store
 without increasing the DMA node count.
 
 The scatter chain still uses one UI segment per displayed scanline, so the DMA
-node count does not grow with glyph complexity. Its capacity is 6,348 nodes to
-cover the 3x PAL raster. Only `raster.ui` changes while
-the standalone menu is running; timing templates and descriptor links change
-only with TX stopped.
+node count does not grow with glyph complexity. PAL currently needs 6,348 nodes
+and NTSC 5,548. A `dma_descriptor_t` is 12 bytes on ESP32-C5, so a static PAL
+chain alone costs 76,176 bytes.
+
+The widened 1600-byte UI rows initially pushed static `.dram0.bss` 7,488 bytes
+past the C5 linker limit. The fix is not to shrink the menu again: menu
+descriptors are now counted from the resolved raster and allocated only while
+the standalone menu owns TX using
+`MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL`. The chain is freed after live
+TX has restarted and no GDMA link can reference it. This removes the large
+descriptor array from static BSS and avoids reserving the PAL maximum for NTSC.
+Only `raster.ui` changes while the standalone menu is running; timing templates
+and descriptor links change only with TX stopped.
 
 ### Controls, console and validation
 
