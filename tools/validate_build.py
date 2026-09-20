@@ -228,7 +228,8 @@ traj_gen = read(ROOT / "tools" / "train_trajectory_v2.py")
 check("Trajectory v2 preserves exact-adjacent branch semantics",
       "raw_exact = scale_rad(" in traj_gen and
       "wrap(phases[m] - phases[p]) + wrap(phases[c] - phases[m])" in traj_gen and
-      "never re-wrapped" in read(MAIN / "trajectory_v2_lut.h"))
+      "d0+d1 is never" in read(MAIN / "trajectory_v2_lut.h") and
+      "re-wrapped" in read(MAIN / "trajectory_v2_lut.h"))
 check("Trajectory v2 live loop stays two-bundle and quiet 20M->40M",
       "trajectory:" in traj_asm and
       "emit:" in traj_asm and
