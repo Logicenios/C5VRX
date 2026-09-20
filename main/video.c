@@ -1290,7 +1290,9 @@ static void settings_load(void)
         err = nvs_get_blob(handle, SETTINGS_KEY, &settings, &length);
         nvs_close(handle);
     }
-    if (err != ESP_OK || length != sizeof(settings) || settings.version != SETTINGS_VERSION) {
+    bool legacy_v3 = settings.version == 3u;
+    if (err != ESP_OK || length != sizeof(settings) ||
+        (!legacy_v3 && settings.version != SETTINGS_VERSION)) {
         s_rx_profile = RX_PROFILE_FUSION_EXP;
         s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;
         s_rf_bw_mode = RF_BW_MODE_BW40;
@@ -1308,7 +1310,13 @@ static void settings_load(void)
     apply_rf_bandwidth(s_rf_bw_mode != RF_BW_MODE_BW20);
     if (settings.afc_mode <= AFC_MODE_OFF) s_afc_mode = (afc_mode_t)settings.afc_mode;
     if (settings.output_mode <= VIDEO_OUTPUT_4BIT_80) s_output_mode = (video_output_mode_t)settings.output_mode;
-    if (settings.demod_mode < DEMOD_MODE_COUNT) s_demod_mode = (demod_mode_t)settings.demod_mode;
+    /* v3 used this exact byte as zero-initialized reserved storage, so old
+     * Range-v2 settings migrate losslessly with the proven GOLDEN demod. */
+    if (legacy_v3) {
+        s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;
+    } else if (settings.demod_mode < DEMOD_MODE_COUNT) {
+        s_demod_mode = (demod_mode_t)settings.demod_mode;
+    }
     if (s_demod_mode == DEMOD_MODE_TRAJECTORY_V2) s_output_mode = VIDEO_OUTPUT_6BIT_40;
     if (settings.video_std_mode <= VIDEO_STD_MODE_PAL) s_video_std_mode = (video_standard_mode_t)settings.video_std_mode;
     if (settings.rx_profile < RX_PROFILE_COUNT &&
@@ -1355,7 +1363,8 @@ static void settings_load(void)
     s_menu_boot_btn_enabled = settings.menu_boot_btn_enabled != 0;
     if (s_afc_mode == AFC_MODE_HOLD) apply_frequency_offset_khz_tracked(settings.frequency_offset_khz);
     else if (s_afc_mode == AFC_MODE_OFF) apply_frequency_offset_khz_tracked(0);
-    ESP_LOGI(TAG, "Restored settings: channel=%u profile=%s BW=%s output=%s demod=%s",
+    ESP_LOGI(TAG, "Restored settings%s: channel=%u profile=%s BW=%s output=%s demod=%s",
+             legacy_v3 ? " (v3 migrated)" : "",
              settings.channel_index, rx_profile_name(), rf_bw_mode_name(),
              output_mode_name(), demod_mode_name());
 }
