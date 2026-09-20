@@ -2677,7 +2677,7 @@ static void analog_agc_task(void *arg)
             sync_quality = video_semantic_observe(s_control_sample_buf,
                                                   sizeof(s_control_sample_buf),
                                                   ring_offset);
-            fresh_sync = sync_quality >= 60;
+            fresh_sync = sync_quality >= 70;
         }
         if (fresh_sync) sync_age_ticks = 0;
         else if (sync_age_ticks < 100) ++sync_age_ticks;

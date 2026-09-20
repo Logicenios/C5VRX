@@ -68,7 +68,7 @@ static inline uint8_t range_control_tick(range_control_t *c, bool sync,
     int sync_quality_avg = c->syncs ?
                            c->sync_quality_sum / (int)c->syncs : 0;
     int score = c->quality_sum / 10 + (int)c->syncs * 20;
-    bool video = c->syncs >= 2 && sync_quality_avg >= 60;
+    bool video = c->syncs >= 2 && sync_quality_avg >= 70;
     c->locked = video && clipping < 20 && !demod_static_heavy(winding);
     c->samples = c->syncs = 0;
     c->power_sum = c->clip_sum = c->quality_sum = 0;

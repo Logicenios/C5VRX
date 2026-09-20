@@ -50,8 +50,7 @@ The observer now scores both:
 - H-sync pulse width (target about 94 samples at 20 MS/s);
 - repeated line period near NTSC (~1271 samples) or PAL (1280 samples).
 
-A random low pulse can score at most 40/100.  A fresh sync requires >=60,
-therefore a repeated physically plausible line period must be present.
+A random low pulse can score at most 40/100. A perfect line-period match alone scores at most 60/100. A fresh sync requires >=70, so both a repeated physically plausible line period and credible H-sync width must contribute.
 
 ## Range-controller change
 

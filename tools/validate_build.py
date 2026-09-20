@@ -93,7 +93,7 @@ check("video standard defaults to AUTO semantic detector",
       "VIDEO_STD_MODE_AUTO" in all_c and
       "video_semantic_observe" in all_c and
       "phase5_pair_is_sync" in all_c and
-      "fresh_sync = sync_quality >= 60" in all_c)
+      "fresh_sync = sync_quality >= 70" in all_c)
 check("menu resolves detected PAL/NTSC before raster start",
       "s_video_std = resolved_menu_standard();" in all_c)
 
@@ -170,12 +170,12 @@ check("shadow exact-adjacent endpoint winding observer present",
 check("semantic CVBS sync score requires pulse width plus line period",
       "video_semantic_observe" in all_c and
       "s_last_sync_quality" in all_c and
-      "fresh_sync = sync_quality >= 60" in all_c and
+      "fresh_sync = sync_quality >= 70" in all_c and
       "width_score" in all_c and "best_period_score" in all_c)
 check("range trials penalize endpoint winding instead of amplitude-only scoring",
       "demod_winding_penalty" in read(MAIN / "range_control.h") and
       "DEMOD_STATIC_HEAVY_WINDING_PM" in read(MAIN / "demod_quality.h") and
-      "sync_quality_avg >= 60" in read(MAIN / "range_control.h"))
+      "sync_quality_avg >= 70" in read(MAIN / "range_control.h"))
 check("lag correlation covers any tracked PHY write",
       "near_phy_event_count" in all_c and
       "s_last_phy_write_us" in all_c and
