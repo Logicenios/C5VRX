@@ -259,7 +259,8 @@ check("Range v2 combines Fusion with acquisition-only BW/AFC",
       'return "RANGE V2"' in all_c and
       "s_rf_bw_mode = RF_BW_MODE_AUTO" in all_c and
       "s_last_fusion_risk >= 450" in all_c and
-      "goto profile_post_gain" in all_c)
+      "goto profile_post_gain" in all_c and
+      "Persisted menu fields" in all_c)
 
 check("RF menu preserves BW control and adds two-second profile selector",
       "LONG:BW  2S:PROFILE" in all_c and
