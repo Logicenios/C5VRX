@@ -29,21 +29,20 @@ def read(path):
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-# ---- fm.bsasm checks ----
+# ---- BitScrambler checks ----
 bsasm_files = list(MAIN.glob("*.bsasm"))
-check("exactly one .bsasm file", len(bsasm_files) == 1,
+check("two .bsasm programs (default + experimental)",
+      {f.name for f in bsasm_files} == {"fm.bsasm", "fm4.bsasm"},
       f"found {[f.name for f in bsasm_files]}")
 
-if bsasm_files:
-    bsasm = read(bsasm_files[0])
-    check("fm.bsasm: cfg eof_on downstream", "cfg eof_on downstream" in bsasm)
-    check("fm.bsasm: cfg trailing_bytes 0", "cfg trailing_bytes 0" in bsasm)
-    check("fm.bsasm: cfg prefetch true", "cfg prefetch true" in bsasm)
-    check("fm.bsasm: cfg lut_width_bits 16", "cfg lut_width_bits 16" in bsasm)
-    check("fm.bsasm: NO eof_on upstream", "cfg eof_on upstream" not in bsasm,
-          "upstream EOF semantics must not appear")
-    check("fm.bsasm: NO trailing_bytes 9", "trailing_bytes 9" not in bsasm,
-          "9-byte tail causes 225 ns discard bug")
+for bsasm_file in bsasm_files:
+    bsasm = read(bsasm_file)
+    check(f"{bsasm_file.name}: cfg eof_on downstream", "cfg eof_on downstream" in bsasm)
+    check(f"{bsasm_file.name}: cfg trailing_bytes 0", "cfg trailing_bytes 0" in bsasm)
+    check(f"{bsasm_file.name}: cfg prefetch true", "cfg prefetch true" in bsasm)
+    check(f"{bsasm_file.name}: cfg lut_width_bits 16", "cfg lut_width_bits 16" in bsasm)
+    check(f"{bsasm_file.name}: NO eof_on upstream", "cfg eof_on upstream" not in bsasm)
+    check(f"{bsasm_file.name}: NO trailing_bytes 9", "trailing_bytes 9" not in bsasm)
 
 # ---- Production .c file checks ----
 c_files = list(MAIN.glob("*.c"))
@@ -102,10 +101,15 @@ check("modern menu raster is SRAM-safe 384x56 logical pixels",
       "MENU_UI_LINES 56u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_X_REPEAT 3u" in read(MAIN / "menu_raster.h") and
       "s_menu_raster.ui" in all_c)
-check("experimental menu is runtime-disabled for release",
-      bool(re.search(r"MENU_RUNTIME_ENABLED\s+0", all_c)) and
-      "if (active && !MENU_RUNTIME_ENABLED) return;" in all_c and
-      "s_menu_boot_btn_enabled = false" in all_c)
+check("native menu enabled with safe defaults",
+      bool(re.search(r"MENU_RUNTIME_ENABLED\s+1", all_c)) and
+      "s_menu_boot_btn_enabled = true" in all_c and
+      "RF_BW_MODE_BW40" in all_c and "VIDEO_OUTPUT_6BIT_40" in all_c)
+check("experimental BW auto and 4-bit@80 remain opt-in",
+      "AUTO EXP" in all_c and "VIDEO_OUTPUT_4BIT_80" in all_c and
+      "DAC4_RATE_HZ     80000000u" in all_c)
+check("menu lifecycle does not double-disable BitScrambler",
+      all_c.count("bitscrambler_disable(s_flight_bs)") == 1)
 check("legacy seven-line text menu removed",
       "MENU_TEXT_BYTES" not in all_c and "MENU_ROWS" not in all_c)
 check("lag diagnostics poll PARLIO GDMA and BitScrambler",
@@ -173,13 +177,11 @@ check("no periodic telemetry or timer tasks in production",
       "telemetry_task" not in all_c and "hw_diag_task" not in all_c,
       "periodic tasks must not be present")
 
-# One BS program
+# Default + experimental BS programs
 cmake_main = read(MAIN / "CMakeLists.txt")
 bs_srcs = re.findall(r'target_bitscrambler_add_src\("([^"]+)"\)', cmake_main)
-check("exactly one BitScrambler program in CMakeLists",
-      len(bs_srcs) == 1, f"found: {bs_srcs}")
-if bs_srcs:
-    check("BitScrambler program is fm.bsasm", bs_srcs[0] == "fm.bsasm")
+check("default + experimental BitScrambler programs in CMakeLists",
+      bs_srcs == ["fm.bsasm", "fm4.bsasm"], f"found: {bs_srcs}")
 
 # ---- Summary ----
 print(f"\n{'='*50}")

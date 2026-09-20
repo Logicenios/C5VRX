@@ -35,6 +35,9 @@
 #define RF_CHANNEL_NUMBER   173u
 #define RF_BANDWIDTH        WIFI_BW40
 
+/* Runtime analog filter state; startup remains BW40. */
+static bool s_analog_bw40 = true;
+
 /* MAC TX queue hardware registers (IDF-pinned: ESP32-C5, IDF 6.0.x).
  * Identical to C5VRX-2 wifi5.c proven addresses. */
 #define REG32(a)         (*(volatile uint32_t *)(uintptr_t)(a))
@@ -386,11 +389,10 @@ esp_err_t rf_start(void)
     phy_disable_agc();
     phy_rfagc_disable();
 
-    /* Fixed production RF contract: keep the analog front-end wide enough for
-     * the full analog-FM video spectrum. Hardware testing showed the narrower
-     * filter damages chroma/detail, so runtime BW20 switching is not used. */
+    /* Boot wide for full analog-FM video bandwidth. Runtime BW20/AUTO is
+     * explicitly opt-in from the native menu; BW40 remains the safe default. */
     extern void phy_wifi_fbw_sel(uint32_t val);
-    phy_wifi_fbw_sel(1u);
+    phy_wifi_fbw_sel(s_analog_bw40 ? 1u : 0u);
 
     /* Force high-sensitivity sweet-spot gain (index 52).
      * Provides sensitive reception of weak carriers out of the box while
@@ -500,6 +502,17 @@ static bool plan_wifi5_center(uint16_t freq_mhz, uint8_t *channel, uint16_t *cen
     if (channel) *channel = s_wifi5_centers[best].channel;
     if (center_mhz) *center_mhz = s_wifi5_centers[best].mhz;
     return true;
+}
+
+void rf_set_analog_bandwidth(bool bw40)
+{
+    s_analog_bw40 = bw40;
+    phy_wifi_fbw_sel(bw40 ? 1u : 0u);
+}
+
+bool rf_get_analog_bandwidth(void)
+{
+    return s_analog_bw40;
 }
 
 void rf_set_rx_gain(bool force, uint8_t gain_idx)
@@ -617,10 +630,10 @@ esp_err_t rf_set_channel(size_t index)
     rf_enable_continuous_modem();
 
     /* Public/undocumented retune paths can touch PHY receive state. Re-assert
-     * the analog-FM contract after every channel change. */
+     * the currently selected analog bandwidth after every channel change. */
     phy_disable_agc();
     phy_rfagc_disable();
-    phy_wifi_fbw_sel(1u);
+    phy_wifi_fbw_sel(s_analog_bw40 ? 1u : 0u);
     phy_force_rx_gain(true, s_current_gain_val);
 
     /* Commit logical state only after the supported bootstrap succeeded. */
