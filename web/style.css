@@ -260,6 +260,11 @@ body {
   color: var(--text-highlight);
 }
 
+.tab-btn-pr.active {
+  background-color: #3a2b0f;
+  color: #ffd866;
+}
+
 .tab-pane {
   display: none;
 }

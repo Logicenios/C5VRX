@@ -8,8 +8,10 @@ const btnFlash = document.getElementById('btnFlash');
 const unsupportedWarning = document.getElementById('unsupportedWarning');
 
 const tabGithub = document.getElementById('tabGithub');
+const tabPr = document.getElementById('tabPr');
 const tabLocal = document.getElementById('tabLocal');
 const paneGithub = document.getElementById('paneGithub');
+const panePr = document.getElementById('panePr');
 const paneLocal = document.getElementById('paneLocal');
 const sourceBadge = document.getElementById('sourceBadge');
 
@@ -17,8 +19,18 @@ const selectRelease = document.getElementById('selectRelease');
 const btnRefreshReleases = document.getElementById('btnRefreshReleases');
 const selectPackageType = document.getElementById('selectPackageType');
 const releaseDetails = document.getElementById('releaseDetails');
+
+const selectPrBuild = document.getElementById('selectPrBuild');
+const btnRefreshPrBuilds = document.getElementById('btnRefreshPrBuilds');
+const selectPrPackageType = document.getElementById('selectPrPackageType');
+const prBuildDetails = document.getElementById('prBuildDetails');
 const prBuildWarning = document.getElementById('prBuildWarning');
 const prBuildNumber = document.getElementById('prBuildNumber');
+const infoPrBuildName = document.getElementById('infoPrBuildName');
+const infoPrBuildDate = document.getElementById('infoPrBuildDate');
+const infoPrBuildTag = document.getElementById('infoPrBuildTag');
+const infoPrBuildAssets = document.getElementById('infoPrBuildAssets');
+
 const infoReleaseName = document.getElementById('infoReleaseName');
 const infoReleaseDate = document.getElementById('infoReleaseDate');
 const infoReleaseTag = document.getElementById('infoReleaseTag');
@@ -49,13 +61,14 @@ const consoleOutput = document.getElementById('consoleOutput');
 const btnClearConsole = document.getElementById('btnClearConsole');
 
 // App State
-let activeSource = 'github'; // 'github' | 'local'
+let activeSource = 'github'; // 'github' | 'pr' | 'local'
 let port = null;
 let transport = null;
 let esploader = null;
 let isConnected = false;
 let isFlashing = false;
 let githubReleases = [];
+let githubPrBuilds = [];
 let localFileBinary = null;
 let localFileNameStr = '';
 
@@ -116,32 +129,42 @@ function checkSerialSupport() {
 }
 
 // Tab Switching
-tabGithub.addEventListener('click', () => {
-  activeSource = 'github';
-  tabGithub.classList.add('active');
-  tabLocal.classList.remove('active');
-  paneGithub.classList.add('active');
-  paneLocal.classList.remove('active');
-  const idx = parseInt(selectRelease.value, 10);
-  if (Number.isInteger(idx)) {
-    onReleaseSelected(idx);
-  } else {
-    sourceBadge.textContent = 'GitHub';
-    sourceBadge.className = 'badge';
-  }
-  updateFlashButtonState();
-});
+function activateSource(source) {
+  activeSource = source;
 
-tabLocal.addEventListener('click', () => {
-  activeSource = 'local';
-  tabLocal.classList.add('active');
-  tabGithub.classList.remove('active');
-  paneLocal.classList.add('active');
-  paneGithub.classList.remove('active');
-  sourceBadge.textContent = 'Local File';
-  sourceBadge.className = 'badge badge-secondary';
+  tabGithub.classList.toggle('active', source === 'github');
+  tabPr.classList.toggle('active', source === 'pr');
+  tabLocal.classList.toggle('active', source === 'local');
+
+  paneGithub.classList.toggle('active', source === 'github');
+  panePr.classList.toggle('active', source === 'pr');
+  paneLocal.classList.toggle('active', source === 'local');
+
+  if (source === 'github') {
+    const idx = parseInt(selectRelease.value, 10);
+    if (Number.isInteger(idx)) onReleaseSelected(idx);
+    else {
+      sourceBadge.textContent = 'Release';
+      sourceBadge.className = 'badge';
+    }
+  } else if (source === 'pr') {
+    const idx = parseInt(selectPrBuild.value, 10);
+    if (Number.isInteger(idx)) onPrBuildSelected(idx);
+    else {
+      sourceBadge.textContent = 'PR Builds';
+      sourceBadge.className = 'badge badge-danger';
+    }
+  } else {
+    sourceBadge.textContent = 'Local File';
+    sourceBadge.className = 'badge badge-secondary';
+  }
+
   updateFlashButtonState();
-});
+}
+
+tabGithub.addEventListener('click', () => activateSource('github'));
+tabPr.addEventListener('click', () => activateSource('pr'));
+tabLocal.addEventListener('click', () => activateSource('local'));
 
 // Drag & drop file handling
 dropzone.addEventListener('click', () => inputLocalFile.click());
@@ -193,9 +216,13 @@ function handleLocalFile(file) {
   reader.readAsArrayBuffer(file);
 }
 
-// Fetch GitHub Releases
+// Fetch GitHub Releases and temporary PR prereleases.
+// The static GitHub Pages site never receives firmware files itself; it reads
+// this release index at runtime and downloads the selected release assets.
 async function fetchReleases() {
   selectRelease.innerHTML = '<option value="">Fetching releases from GitHub...</option>';
+  selectPrBuild.innerHTML = '<option value="">Fetching PR builds from GitHub...</option>';
+
   try {
     const res = await fetch('https://api.github.com/repos/Twotoz/C5VRX/releases?per_page=100', {
       headers: { 'Accept': 'application/vnd.github.v3+json' }
@@ -204,8 +231,6 @@ async function fetchReleases() {
     const data = await res.json();
     if (!Array.isArray(data) || data.length === 0) throw new Error('No releases found');
 
-    // Production releases always stay first and remain the default selection.
-    // PR builds are explicit prereleases tagged pr-<number>.
     let productionReleases = data
       .filter(rel => VERSION_TAG_PATTERN.test(rel.tag_name || ''))
       .sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0));
@@ -218,57 +243,73 @@ async function fetchReleases() {
       productionReleases = FALLBACK_RELEASES;
     }
 
-    githubReleases = [...productionReleases, ...prBuilds];
-    log(`Fetched ${productionReleases.length} versioned release(s) and ${prBuilds.length} experimental PR build(s).`);
+    githubReleases = productionReleases;
+    githubPrBuilds = prBuilds;
+    log(`Fetched ${githubReleases.length} versioned release(s) and ${githubPrBuilds.length} experimental PR build(s).`);
   } catch (err) {
-    log(`Warning: Failed to fetch versioned releases (${err.message}). Using cached release index.`);
+    log(`Warning: Failed to fetch GitHub releases (${err.message}). Using cached production release only.`);
     githubReleases = FALLBACK_RELEASES;
+    githubPrBuilds = [];
   }
 
   populateReleaseDropdown();
+  populatePrBuildDropdown();
 }
+
 function populateReleaseDropdown() {
   selectRelease.innerHTML = '';
-
-  const releaseGroup = document.createElement('optgroup');
-  releaseGroup.label = 'Versioned releases';
-  const prGroup = document.createElement('optgroup');
-  prGroup.label = '⚠ Experimental PR builds';
 
   githubReleases.forEach((rel, index) => {
     const opt = document.createElement('option');
     opt.value = index;
     const tag = rel.tag_name || rel.name;
-    const prNumber = getPrBuildNumber(rel);
-
-    if (prNumber !== null) {
-      opt.textContent = `PR #${prNumber} [EXPERIMENTAL / UNMERGED]`;
-      prGroup.appendChild(opt);
-      return;
-    }
-
-    const isLatestProduction = releaseGroup.children.length === 0;
-    if (rel.prerelease) {
-      opt.textContent = `${tag} [Pre-release]${isLatestProduction ? ' (Latest available)' : ''}`;
-    } else {
-      opt.textContent = `${tag}${isLatestProduction ? ' (Latest - Recommended)' : ''}`;
-    }
-    releaseGroup.appendChild(opt);
+    const isLatest = index === 0;
+    opt.textContent = rel.prerelease
+      ? `${tag} [Pre-release]${isLatest ? ' (Latest available)' : ''}`
+      : `${tag}${isLatest ? ' (Latest - Recommended)' : ''}`;
+    selectRelease.appendChild(opt);
   });
 
-  if (releaseGroup.children.length > 0) selectRelease.appendChild(releaseGroup);
-  if (prGroup.children.length > 0) selectRelease.appendChild(prGroup);
-
-  // Normal releases are stored before PR builds, so index 0 is never a PR
-  // build when a versioned release (or the cached safe release) exists.
   if (githubReleases.length > 0) {
+    selectRelease.disabled = false;
     selectRelease.value = '0';
     onReleaseSelected(0);
+  } else {
+    selectRelease.disabled = true;
+    selectRelease.innerHTML = '<option value="">No versioned releases available</option>';
+    releaseDetails.style.display = 'none';
   }
 }
+
+function populatePrBuildDropdown() {
+  selectPrBuild.innerHTML = '';
+
+  githubPrBuilds.forEach((rel, index) => {
+    const opt = document.createElement('option');
+    const prNumber = getPrBuildNumber(rel);
+    opt.value = index;
+    opt.textContent = `PR #${prNumber} — EXPERIMENTAL / UNMERGED`;
+    selectPrBuild.appendChild(opt);
+  });
+
+  if (githubPrBuilds.length > 0) {
+    selectPrBuild.disabled = false;
+    selectPrBuild.value = '0';
+    onPrBuildSelected(0);
+  } else {
+    selectPrBuild.disabled = true;
+    selectPrBuild.innerHTML = '<option value="">No active PR builds available</option>';
+    prBuildDetails.style.display = 'none';
+    prBuildNumber.textContent = '';
+  }
+}
+
 selectRelease.addEventListener('change', () => {
-  const idx = parseInt(selectRelease.value, 10);
-  onReleaseSelected(idx);
+  onReleaseSelected(parseInt(selectRelease.value, 10));
+});
+
+selectPrBuild.addEventListener('change', () => {
+  onPrBuildSelected(parseInt(selectPrBuild.value, 10));
 });
 
 btnRefreshReleases.addEventListener('click', () => {
@@ -276,29 +317,44 @@ btnRefreshReleases.addEventListener('click', () => {
   fetchReleases();
 });
 
+btnRefreshPrBuilds.addEventListener('click', () => {
+  log('Refreshing PR builds from GitHub...');
+  fetchReleases();
+});
+
 function onReleaseSelected(index) {
   const rel = githubReleases[index];
   if (!rel) return;
+
   releaseDetails.style.display = 'block';
   infoReleaseName.textContent = rel.name || rel.tag_name;
   infoReleaseDate.textContent = rel.published_at ? new Date(rel.published_at).toLocaleDateString() : 'N/A';
   infoReleaseTag.textContent = rel.tag_name;
+  infoReleaseAssets.textContent = (rel.assets || []).map(a => a.name).join(', ') || 'No binary assets attached';
 
-  const prNumber = getPrBuildNumber(rel);
-  if (prNumber !== null) {
-    prBuildNumber.textContent = `#${prNumber}`;
-    prBuildWarning.style.display = 'block';
-    sourceBadge.textContent = `PR #${prNumber}`;
-    sourceBadge.className = 'badge badge-danger';
-  } else {
-    prBuildWarning.style.display = 'none';
-    sourceBadge.textContent = 'GitHub';
+  if (activeSource === 'github') {
+    sourceBadge.textContent = rel.prerelease ? 'Pre-release' : 'Release';
     sourceBadge.className = 'badge';
   }
+  updateFlashButtonState();
+}
 
-  const assetNames = (rel.assets || []).map(a => a.name).join(', ') || 'No binary assets attached';
-  infoReleaseAssets.textContent = assetNames;
+function onPrBuildSelected(index) {
+  const rel = githubPrBuilds[index];
+  if (!rel) return;
 
+  const prNumber = getPrBuildNumber(rel);
+  prBuildDetails.style.display = 'block';
+  prBuildNumber.textContent = prNumber !== null ? `#${prNumber}` : '';
+  infoPrBuildName.textContent = rel.name || rel.tag_name;
+  infoPrBuildDate.textContent = rel.published_at ? new Date(rel.published_at).toLocaleDateString() : 'N/A';
+  infoPrBuildTag.textContent = rel.tag_name;
+  infoPrBuildAssets.textContent = (rel.assets || []).map(a => a.name).join(', ') || 'No binary assets attached';
+
+  if (activeSource === 'pr') {
+    sourceBadge.textContent = prNumber !== null ? `PR #${prNumber}` : 'PR Build';
+    sourceBadge.className = 'badge badge-danger';
+  }
   updateFlashButtonState();
 }
 
@@ -307,11 +363,32 @@ function updateFlashButtonState() {
     btnFlash.disabled = true;
     return;
   }
+
   if (activeSource === 'github') {
-    btnFlash.disabled = (githubReleases.length === 0);
+    const idx = parseInt(selectRelease.value, 10);
+    btnFlash.disabled = !Number.isInteger(idx) || !githubReleases[idx];
+  } else if (activeSource === 'pr') {
+    const idx = parseInt(selectPrBuild.value, 10);
+    btnFlash.disabled = !Number.isInteger(idx) || !githubPrBuilds[idx];
   } else {
     btnFlash.disabled = (localFileBinary === null);
   }
+}
+
+function getSelectedRemoteBuild() {
+  if (activeSource === 'github') {
+    return {
+      release: githubReleases[parseInt(selectRelease.value, 10)],
+      packageType: selectPackageType.value
+    };
+  }
+  if (activeSource === 'pr') {
+    return {
+      release: githubPrBuilds[parseInt(selectPrBuild.value, 10)],
+      packageType: selectPrPackageType.value
+    };
+  }
+  return { release: null, packageType: null };
 }
 
 function findApplicationAsset(assets) {
@@ -425,19 +502,17 @@ async function disconnectDevice() {
 btnFlash.addEventListener('click', async () => {
   if (!isConnected || !esploader || isFlashing) return;
 
-  if (activeSource === 'github') {
-    const selectedRelease = githubReleases[parseInt(selectRelease.value, 10)];
-    const prNumber = getPrBuildNumber(selectedRelease);
-    if (prNumber !== null) {
-      const accepted = window.confirm(
-        `WARNING: PR #${prNumber} is an experimental, unmerged test build.\n\n` +
-        'It may be unstable, fail to boot, corrupt settings, or produce broken video. ' +
-        'Only continue if you intentionally want to test this PR build.\n\nFlash it anyway?'
-      );
-      if (!accepted) {
-        log(`Cancelled experimental PR #${prNumber} flash.`);
-        return;
-      }
+  if (activeSource === 'pr') {
+    const selectedBuild = githubPrBuilds[parseInt(selectPrBuild.value, 10)];
+    const prNumber = getPrBuildNumber(selectedBuild);
+    const accepted = window.confirm(
+      `WARNING: PR #${prNumber ?? '?'} is an experimental, unmerged test build.\n\n` +
+      'It may be unstable, fail to boot, corrupt settings, or produce broken video. ' +
+      'Only continue if you intentionally want to test this pull request.\n\nFlash it anyway?'
+    );
+    if (!accepted) {
+      log(`Cancelled experimental PR #${prNumber ?? '?'} flash.`);
+      return;
     }
   }
 
@@ -452,13 +527,14 @@ btnFlash.addEventListener('click', async () => {
   try {
     const fileArray = [];
 
-    if (activeSource === 'github') {
-      const rel = githubReleases[parseInt(selectRelease.value, 10)];
-      if (!rel) throw new Error('No release selected');
+    if (activeSource === 'github' || activeSource === 'pr') {
+      const selected = getSelectedRemoteBuild();
+      const rel = selected.release;
+      if (!rel) throw new Error(activeSource === 'pr' ? 'No PR build selected' : 'No release selected');
       const assets = rel.assets || [];
-      const packageType = selectPackageType.value;
+      const packageType = selected.packageType;
 
-      log(`Fetching binaries for release ${rel.tag_name} (${packageType})...`);
+      log(`Fetching binaries for ${activeSource === 'pr' ? 'PR build' : 'release'} ${rel.tag_name} (${packageType})...`);
 
       if (packageType === 'merged') {
         const mergedAsset = assets.find(a => a.name.includes('merged'));

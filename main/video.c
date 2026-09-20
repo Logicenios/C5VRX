@@ -32,6 +32,7 @@
 #include "menu_font.h"
 #include "menu_raster.h"
 #include "range_control.h"
+#include "demod_quality.h"
 #include "hal/parlio_ll.h"
 #include "hal/usb_serial_jtag_ll.h"
 
@@ -160,6 +161,8 @@ static volatile bool s_detected_video_std_valid;
 static volatile uint8_t s_video_std_pal_score;
 static volatile uint8_t s_video_std_ntsc_score;
 static volatile uint16_t s_last_line_period_20m;
+static volatile uint16_t s_last_sync_width_20m;
+static volatile int s_last_sync_quality;
 static QueueHandle_t s_menu_commands;
 static bitscrambler_handle_t s_flight_bs;
 
@@ -578,6 +581,8 @@ static void video_standard_detector_reset(void)
     s_video_std_ntsc_score = 0;
     s_detected_video_std_valid = false;
     s_last_line_period_20m = 0;
+    s_last_sync_width_20m = 0;
+    s_last_sync_quality = 0;
 }
 
 static void video_standard_vote(video_standard_t standard, uint16_t period)
@@ -606,18 +611,19 @@ static void video_standard_vote(video_standard_t standard, uint16_t period)
  * odd byte of each 16-bit read, so this mirrors the same 20 MS/s sample
  * cadence. Valid H-sync low runs are about 94 samples wide. Their start-to-
  * start period is ~1271 samples for NTSC and exactly 1280 for PAL. */
-static bool video_standard_observe(const uint8_t *raw, size_t bytes, size_t ring_offset)
+static int video_semantic_observe(const uint8_t *raw, size_t bytes, size_t ring_offset)
 {
-    if (!raw || bytes < 3000u) return false;
+    if (!raw || bytes < 3000u) return 0;
 
     const size_t first = (ring_offset & 1u) ? 0u : 1u;
-    if (first + 2u >= bytes) return false;
+    if (first + 2u >= bytes) return 0;
 
     uint8_t previous = s_phase5_state_lut[raw[first]];
     bool in_sync = false;
     unsigned run_start = 0;
     unsigned run_len = 0;
     unsigned starts[4];
+    unsigned widths[4];
     unsigned start_count = 0;
     unsigned out_index = 1;
 
@@ -635,28 +641,58 @@ static bool video_standard_observe(const uint8_t *raw, size_t bytes, size_t ring
                 ++run_len;
             }
         } else if (in_sync) {
-            /* Reject active-video noise, equalizing pulses and broad V-sync. */
+            /* Real horizontal sync is ~94 samples at 20 MS/s.  Keep the broad
+             * physical acceptance window for robustness, but score closeness
+             * to the real pulse width instead of treating every accepted low
+             * run as equally convincing. */
             if (run_len >= 70u && run_len <= 125u && start_count < 4u) {
-                starts[start_count++] = run_start;
+                starts[start_count] = run_start;
+                widths[start_count] = run_len;
+                ++start_count;
             }
             in_sync = false;
             run_len = 0u;
         }
     }
 
-    bool valid_sync = false;
+    unsigned width_error_sum = 0;
+    for (unsigned i = 0; i < start_count; ++i) {
+        unsigned w = widths[i];
+        width_error_sum += w > 94u ? w - 94u : 94u - w;
+    }
+    unsigned width_error = start_count ? width_error_sum / start_count : 100u;
+    int width_score = start_count ? 40 - (int)width_error * 4 : 0;
+    if (width_score < 0) width_score = 0;
+    s_last_sync_width_20m = start_count ? (uint16_t)widths[0] : 0u;
+
+    int best_period_score = 0;
+    bool valid_period = false;
     for (unsigned i = 1; i < start_count; ++i) {
         unsigned period = starts[i] - starts[i - 1u];
-        /* Keep a dead zone between standards so one noisy edge cannot flip it. */
+        int score = 0;
+
         if (period >= 1266u && period <= 1275u) {
-            valid_sync = true;
+            unsigned error = period > 1271u ? period - 1271u : 1271u - period;
+            score = 60 - (int)error * 8;
+            valid_period = true;
             video_standard_vote(VIDEO_STD_NTSC, (uint16_t)period);
         } else if (period >= 1277u && period <= 1284u) {
-            valid_sync = true;
+            unsigned error = period > 1280u ? period - 1280u : 1280u - period;
+            score = 60 - (int)error * 8;
+            valid_period = true;
             video_standard_vote(VIDEO_STD_PAL, (uint16_t)period);
         }
+        if (score > best_period_score) best_period_score = score;
     }
-    return valid_sync;
+
+    /* A lone random low pulse can earn at most 40/100.  TRACK/acquisition
+     * requires >=60, which means a physically plausible repeated line period
+     * must also be present. */
+    int quality = width_score + best_period_score;
+    if (!valid_period) quality = width_score;
+    if (quality > 100) quality = 100;
+    s_last_sync_quality = quality;
+    return quality;
 }
 
 typedef struct {
@@ -678,13 +714,23 @@ typedef struct {
     int dc_q_x100;
     int iq_skew_permille;
     int iq_cross_permille;
+    int winding_events;
+    int winding_triplets;
+    int winding_permille;
+    int strong_winding_events;
+    int strong_winding_triplets;
+    int strong_winding_permille;
 } control_metrics_t;
 
-static control_metrics_t analyze_control_window(const uint8_t *sample, size_t bytes)
+static control_metrics_t analyze_control_window(const uint8_t *sample, size_t bytes,
+                                                size_t ring_offset)
 {
     control_metrics_t m = {0};
     uint16_t hist[129] = {0};
+    const size_t production_first = (ring_offset & 1u) ? 0u : 1u;
     int8_t prev_i = 0, prev_q = 0;
+    uint8_t prev_phase = 0, prev2_phase = 0;
+    int prev_power = 0, prev2_power = 0;
 
     for (size_t i = 0; i < bytes; ++i) {
         uint8_t byte = sample[i];
@@ -701,6 +747,8 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
         m.sum_iq += (int)in_val * q;
 
         int p = i2 + q2;
+        const int raw_power = p;
+        const uint8_t phase = s_phase5_state_lut[byte];
         if (p <= 4) ++m.n_origin;
         if (p > 128) p = 128;
         ++hist[p];
@@ -715,6 +763,31 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
                 m.sum_dot += dot;
             }
         }
+
+        /* fm.bsasm consumes one parity at 20 MS/s. Count exactly those
+         * endpoint intervals, while using the skipped 40 MS/s middle sample
+         * only as a shadow oracle. */
+        bool production_endpoint =
+            i >= production_first + 2u &&
+            ((i - production_first) & 1u) == 0u;
+        if (production_endpoint) {
+            bool winding = demod_phase5_endpoint_loses_winding(prev2_phase,
+                                                               prev_phase,
+                                                               phase);
+            ++m.winding_triplets;
+            if (winding) ++m.winding_events;
+            if (prev2_power >= DEMOD_STRONG_POWER_MIN &&
+                prev_power >= DEMOD_STRONG_POWER_MIN &&
+                raw_power >= DEMOD_STRONG_POWER_MIN) {
+                ++m.strong_winding_triplets;
+                if (winding) ++m.strong_winding_events;
+            }
+        }
+
+        prev2_phase = prev_phase;
+        prev_phase = phase;
+        prev2_power = prev_power;
+        prev_power = raw_power;
         prev_i = in_val;
         prev_q = q;
     }
@@ -730,6 +803,10 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
     m.q_phase = bytes > 1u ? (m.n_coherent * 100) / (int)(bytes - 1u) : 0;
     m.clip_permille = bytes ? (m.n_clip * 1000) / (int)bytes : 0;
     m.origin_permille = bytes ? (m.n_origin * 1000) / (int)bytes : 1000;
+    m.winding_permille = m.winding_triplets ?
+        (m.winding_events * 1000) / m.winding_triplets : 0;
+    m.strong_winding_permille = m.strong_winding_triplets ?
+        (m.strong_winding_events * 1000) / m.strong_winding_triplets : 0;
     m.dc_i_x100 = bytes ? (m.sum_i * 100) / (int)bytes : 0;
     m.dc_q_x100 = bytes ? (m.sum_q * 100) / (int)bytes : 0;
 
@@ -900,6 +977,8 @@ static volatile int s_last_dc_i_x100 = 0;
 static volatile int s_last_dc_q_x100 = 0;
 static volatile int s_last_iq_skew_permille = 0;
 static volatile int s_last_iq_cross_permille = 0;
+static volatile int s_last_winding_permille = 0;
+static volatile int s_last_strong_winding_permille = 0;
 static volatile uint32_t s_gain_transition_count = 0;
 static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in kHz */
 static volatile bool s_channel_scan_active;
@@ -1227,6 +1306,7 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            "agc=%u state=%u profile=%u p=%d q=%d clip_pm=%d origin_pm=%d strength=%d "
            "nf_valid=%u nf_dbm=%d rssi_valid=%u rssi_dbm=%d "
            "dc_i_x100=%d dc_q_x100=%d iq_skew_pm=%d iq_cross_pm=%d "
+           "winding_pm=%d strong_winding_pm=%d sync_q=%d sync_width=%u "
            "fft_forced=%u fft=%d filter_mode=%u adc_sel=%u filter_reg=0x%08lx "
            "adc_reg=0x%08lx source_mux=0x%08lx "
            "tx_empty=%lu rx_ovf=%lu tx_eof=%lu gdma_in=%lu gdma_out=%lu "
@@ -1242,6 +1322,8 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            s_phy_rssi_valid ? 1u : 0u, s_last_phy_rssi_dbm,
            s_last_dc_i_x100, s_last_dc_q_x100,
            s_last_iq_skew_permille, s_last_iq_cross_permille,
+           s_last_winding_permille, s_last_strong_winding_permille,
+           s_last_sync_quality, (unsigned)s_last_sync_width_20m,
            s_lab_fft_forced ? 1u : 0u, (int)s_lab_fft_value,
            (unsigned)phy.rx_filter_mode, (unsigned)phy.adc_rate_sel,
            (unsigned long)phy.rx_filter_reg, (unsigned long)phy.adc_rate_reg,
@@ -2248,12 +2330,18 @@ static void channel_auto_search(void)
         if (rf_set_channel(channel) != ESP_OK) continue;
         vTaskDelay(pdMS_TO_TICKS(90));
         uint8_t *src = get_completed_rx_sample_window(CONTROL_SAMPLE_BYTES);
+        size_t scan_ring_offset =
+            (src >= s_raw_ring && src < s_raw_ring + sizeof(s_raw_ring)) ?
+            (size_t)(src - s_raw_ring) : 0u;
         sync_dma_m2c(src, CONTROL_SAMPLE_BYTES);
         memcpy(s_control_sample_buf, src, sizeof(s_control_sample_buf));
         control_metrics_t metrics =
-            analyze_control_window(s_control_sample_buf, sizeof(s_control_sample_buf));
+            analyze_control_window(s_control_sample_buf,
+                                   sizeof(s_control_sample_buf),
+                                   scan_ring_offset);
         int quality = signal_strength_score(&metrics, 52u);
-        int rank = metrics.q_phase * 4 + metrics.p_median + quality;
+        int rank = metrics.q_phase * 4 + metrics.p_median + quality -
+                   demod_winding_penalty(metrics.winding_permille);
         if (metrics.q_phase >= 22 && rank > best_rank) {
             best_rank = rank;
             best_channel = channel;
@@ -2506,7 +2594,9 @@ static void analog_agc_task(void *arg)
         sync_dma_m2c((void *)sample_src, CONTROL_SAMPLE_BYTES);
         memcpy(s_control_sample_buf, sample_src, sizeof(s_control_sample_buf));
         control_metrics_t metrics =
-            analyze_control_window(s_control_sample_buf, sizeof(s_control_sample_buf));
+            analyze_control_window(s_control_sample_buf,
+                                   sizeof(s_control_sample_buf),
+                                   ring_offset);
 
         int p_median = metrics.p_median;
         int q_phase = metrics.q_phase;
@@ -2514,6 +2604,7 @@ static void analog_agc_task(void *arg)
         int n_origin = metrics.n_origin;
         int clip_permille = metrics.clip_permille;
         int origin_permille = metrics.origin_permille;
+        int winding_permille = metrics.winding_permille;
 
         s_last_p_median = p_median;
         s_last_q_phase = q_phase;
@@ -2525,6 +2616,8 @@ static void analog_agc_task(void *arg)
         s_last_dc_q_x100 = metrics.dc_q_x100;
         s_last_iq_skew_permille = metrics.iq_skew_permille;
         s_last_iq_cross_permille = metrics.iq_cross_permille;
+        s_last_winding_permille = metrics.winding_permille;
+        s_last_strong_winding_permille = metrics.strong_winding_permille;
 
         /* The undocumented reads are observation-only and rate-limited. AUTO
          * uses them only when they return physically plausible values. */
@@ -2578,10 +2671,13 @@ static void analog_agc_task(void *arg)
             s_cfo_khz = (s_cfo_khz * 7 + instant_cfo) / 8;
         }
 
+        int sync_quality = 0;
         bool fresh_sync = false;
         if (settle_ticks == 0) {
-            fresh_sync = video_standard_observe(s_control_sample_buf,
-                                               sizeof(s_control_sample_buf), ring_offset);
+            sync_quality = video_semantic_observe(s_control_sample_buf,
+                                                  sizeof(s_control_sample_buf),
+                                                  ring_offset);
+            fresh_sync = sync_quality >= 70;
         }
         if (fresh_sync) sync_age_ticks = 0;
         else if (sync_age_ticks < 100) ++sync_age_ticks;
@@ -2591,7 +2687,8 @@ static void analog_agc_task(void *arg)
         if (s_rx_profile == RX_PROFILE_HW_AGC_EXP && rf_get_experimental_hw_agc()) {
             /* Vendor AGC owns gain only in this explicitly experimental mode.
              * C5VRX still classifies lock and transport but never writes gain. */
-            if (q_phase >= 65 && p_median >= 10 && clip_permille < 40) {
+            if (fresh_sync && q_phase >= 65 && p_median >= 10 &&
+                clip_permille < 40 && !demod_static_heavy(winding_permille)) {
                 s_agc_state = AGC_STATE_TRACK;
             } else if (q_phase >= 25) {
                 s_agc_state = AGC_STATE_LEARN;
@@ -2616,7 +2713,8 @@ static void analog_agc_task(void *arg)
             }
             if (s_agc_mode == ANALOG_AGC_ACTIVE) {
                 target_gain = range_control_tick(&range_controller, fresh_sync,
-                    p_median, q_phase, clip_permille, origin_permille);
+                    sync_quality, p_median, q_phase, clip_permille,
+                    origin_permille, winding_permille);
                 s_agc_state = range_controller.locked ? AGC_STATE_TRACK :
                               AGC_STATE_LEARN;
                 s_shadow_gain = target_gain;
@@ -2667,7 +2765,8 @@ static void analog_agc_task(void *arg)
              * static. Require repeated phase-coherent windows before LEARN. */
             bool search_candidate = s_rx_profile == RX_PROFILE_RANGE_EXP ?
                 (recent_sync && q_phase >= 30 && p_median >= 8 &&
-                 origin_permille < 700 && clip_permille < 40) :
+                 origin_permille < 700 && clip_permille < 40 &&
+                 winding_permille < 260) :
                 (q_phase >= 30 ||
                  (q_phase >= 20 && p_median >= 8 && origin_permille < 700));
             int required_carrier_ticks =
@@ -2772,7 +2871,8 @@ static void analog_agc_task(void *arg)
         }
 
         case AGC_STATE_TRACK: {
-            if ((s_rx_profile == RX_PROFILE_RANGE_EXP && !recent_sync) ||
+            if ((s_rx_profile == RX_PROFILE_RANGE_EXP &&
+                 (!recent_sync || winding_permille >= 320)) ||
                 (q_phase < 25 && p_median < 12)) {
                 if (++lost_counter >= (s_rx_profile == RX_PROFILE_RECOVERY_EXP ? 4 : 10)) {
                     s_agc_state = AGC_STATE_SEARCH;
@@ -2883,7 +2983,10 @@ profile_post_gain:
         }
 
 control_tail: {
-        bool is_locked = (s_agc_state == AGC_STATE_TRACK) && (q_phase >= 55);
+        bool is_locked = (s_agc_state == AGC_STATE_TRACK) && (q_phase >= 55) &&
+                         (s_rx_profile != RX_PROFILE_RANGE_EXP ||
+                          (s_last_sync_quality >= 60 &&
+                           !demod_static_heavy(winding_permille)));
         if (is_locked && !was_locked && !s_lab_quiet) {
             const fpv_channel_t *ch = rf_get_current_channel();
             printf("[CARRIER] Locked on %s (%u MHz) in %s (P=%d Q=%d%% G=%u)\n",
@@ -2895,9 +2998,11 @@ control_tail: {
         if (PERIODIC_TELEMETRY) {
             if (++telemetry_ticks >= 20) {
                 telemetry_ticks = 0;
-                printf("[AGC] state=%d G=%u P=%d Q=%d%% clip=%d.%d%% std=%s\n",
+                printf("[AGC] state=%d G=%u P=%d Q=%d%% clip=%d.%d%% wind=%d.%d%% syncQ=%d std=%s\n",
                        s_agc_state, s_current_gain, p_median, q_phase,
                        clip_permille / 10, clip_permille % 10,
+                       winding_permille / 10, winding_permille % 10,
+                       s_last_sync_quality,
                        s_detected_video_std_valid ? video_standard_name(s_detected_video_std) : "UNKNOWN");
             }
         }
@@ -3113,6 +3218,10 @@ static void console_diag_task(void *arg)
                            (double)s_last_dc_i_x100 / 100.0, (double)s_last_dc_q_x100 / 100.0,
                            s_last_iq_skew_permille / 10, s_last_iq_skew_permille % 10,
                            s_last_iq_cross_permille / 10, s_last_iq_cross_permille % 10);
+                    printf(" Demod Quality:              endpoint winding=%d.%d%% strong=%d.%d%% syncQ=%d width=%u\n",
+                           s_last_winding_permille / 10, s_last_winding_permille % 10,
+                           s_last_strong_winding_permille / 10, s_last_strong_winding_permille % 10,
+                           s_last_sync_quality, (unsigned)s_last_sync_width_20m);
                     printf(" Gain Transitions:           %lu (control window=%u IQ samples / %.1f us)\n",
                            (unsigned long)s_gain_transition_count, CONTROL_SAMPLE_BYTES,
                            (double)CONTROL_SAMPLE_BYTES * 1000000.0 / (double)IQ_RATE_HZ);

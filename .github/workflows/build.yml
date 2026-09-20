@@ -124,6 +124,15 @@ jobs:
       - name: Verify Architectural Constraints
         run: python tools/validate_build.py
 
+      - name: Run host range / demod tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_demod_quality.c -o /tmp/test_demod_quality
+          /tmp/test_demod_quality
+          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_range_control.c -o /tmp/test_range_control
+          /tmp/test_range_control
+
   build:
     name: Build Production Firmware (ESP32-C5)
     if: github.event_name != 'pull_request' || github.event.action != 'closed'

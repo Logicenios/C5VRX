@@ -5,7 +5,7 @@
   <p>From live RF to real-time analog NTSC composite video with one Seeed Studio XIAO ESP32-C5 and a passive resistor DAC.</p>
 
   <p>
-    <a href="https://c5vrx.com/"><img src="https://img.shields.io/badge/Web%20Flasher-Online-1f6feb?style=flat" alt="Web Flasher" /></a>
+    <a href="https://twotoz.github.io/C5VRX/"><img src="https://img.shields.io/badge/Web%20Flasher-Online-1f6feb?style=flat" alt="Web Flasher" /></a>
     <a href="https://discord.gg/3YNgJRHmzD"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&amp;logoColor=white" alt="Join the C5VRX Discord" /></a>
     <img src="https://img.shields.io/badge/status-production%20proven-success" alt="Production proven" />
     <img src="https://img.shields.io/badge/chip-ESP32--C5-111111" alt="ESP32-C5" />
@@ -18,20 +18,24 @@
 
 ---
 
+## Range / demod research
+
+The current experimental range work measures semantic CVBS sync and the exact-adjacent winding loss hidden by the 50 ns endpoint discriminator. See `docs/range-demod-quality-v2.md` for the measurement model and hardware validation rules.
+
 ## Web Flasher (Zero-Install Browser Flashing)
 
 Flash your Seeed Studio XIAO ESP32-C5 directly from your browser (Google Chrome, Microsoft Edge, Brave, Opera) with zero installation required:
 
-**[Open the C5VRX Web Flasher](https://c5vrx.com/)**
+**[Open the C5VRX Web Flasher](https://twotoz.github.io/C5VRX/)**
 
-`c5vrx.com` is the canonical production flasher. A static
-[GitHub Pages mirror](https://twotoz.github.io/C5VRX/) is available as a
-fallback.
+The production web flasher is hosted entirely by **GitHub Pages** at
+[twotoz.github.io/C5VRX](https://twotoz.github.io/C5VRX/). There is no VPS,
+application server, or separate production web host in the current deployment.
 
 - **Automatic Latest Firmware**: Automatically selects the newest immutable semantic-version release.
 - **One-Click Flashing**: Flashes the universal merged production image (`bootloader + partitions + app` at `0x0`) over Web Serial.
-- **Selectable Releases**: Choose between versioned releases such as `v3.0.0`, `v3.0.1`, and newer.
-- **Experimental PR Builds**: Same-repository pull requests publish a temporary `pr-<number>` prerelease. These builds are listed after normal releases, are never the default selection, show a prominent warning, and require an extra confirmation before flashing.
+- **Selectable Releases**: The **Releases** tab contains only semantic-version releases such as `v3.0.0`, `v3.0.1`, and newer.
+- **Separate PR Builds Tab**: Same-repository pull requests publish a temporary `pr-<number>` GitHub prerelease. Experimental builds appear only under **PR Builds**, never in the normal Releases list, and require an explicit warning confirmation before flashing.
 - **Offline / Local Execution**: You can also run the web flasher locally:
   ```bash
   python tools/open_webflasher.py
@@ -54,11 +58,10 @@ Every push or merged PR to `main` builds the production firmware and publishes a
 Firmware releases and website deployment are intentionally separate:
 
 - `.github/workflows/build.yml` validates and builds firmware, then publishes a versioned release after a successful push to `main`. For same-repository PRs it also maintains a clearly marked temporary prerelease (`pr-<number>`) and removes it when the PR closes.
-- `.github/workflows/deploy-web.yml` deploys only the static `web/` directory to the GitHub Pages mirror, and runs only when the web flasher itself changes (or when started manually).
-- Normal firmware and documentation commits therefore do not create unnecessary website deployments. The flasher discovers new versioned firmware releases dynamically through the GitHub API.
-
-Production hosting for `c5vrx.com` is managed separately; the GitHub Actions
-deployment controls only the `twotoz.github.io/C5VRX` mirror.
+- `.github/workflows/deploy-web.yml` is the **only production website deployment**. It publishes the static `web/` directory to GitHub Pages and runs only when the flasher itself changes (or when started manually).
+- Normal firmware and documentation commits therefore do not redeploy the website. The already-deployed static flasher discovers new semantic releases and temporary `pr-<number>` prereleases dynamically through the GitHub Releases API.
+- A pull request does **not** deploy a separate website. Its firmware becomes flashable by publishing release assets under `pr-<number>`; the GitHub Pages app discovers that temporary prerelease at runtime.
+- When the PR closes or merges, CI deletes its temporary prerelease/tag. Web UI changes themselves reach GitHub Pages only after they are merged into `main`.
 
 ---
 
@@ -223,9 +226,7 @@ python tools/validate_build.py
 
 #### Option A: Web Flasher (Zero-Install In-Browser Flasher)
 Launch the web flasher directly in your browser (Google Chrome, Microsoft Edge, Brave):
-**[Open C5VRX Web Flasher](https://c5vrx.com/)**
-
-[GitHub Pages mirror](https://twotoz.github.io/C5VRX/)
+**[Open C5VRX Web Flasher on GitHub Pages](https://twotoz.github.io/C5VRX/)**
 
 #### Option B: Zero-Friction Auto-Flash (Python Watcher)
 Run the auto-flash watcher:

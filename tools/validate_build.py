@@ -89,10 +89,11 @@ check("gain transition hot path has no AGC printf",
       "[AGC:GAIN]" not in all_c)
 check("periodic runtime telemetry disabled",
       bool(re.search(r"PERIODIC_TELEMETRY\s+0", all_c)))
-check("video standard defaults to AUTO detector",
+check("video standard defaults to AUTO semantic detector",
       "VIDEO_STD_MODE_AUTO" in all_c and
-      "video_standard_observe" in all_c and
-      "phase5_pair_is_sync" in all_c)
+      "video_semantic_observe" in all_c and
+      "phase5_pair_is_sync" in all_c and
+      "fresh_sync = sync_quality >= 70" in all_c)
 check("menu resolves detected PAL/NTSC before raster start",
       "s_video_std = resolved_menu_standard();" in all_c)
 
@@ -159,6 +160,22 @@ check("fixed-gain BW40/BW20 A/B probe present",
 check("Q4 IQ-centering metrics present",
       "dc_i_x100" in all_c and "dc_q_x100" in all_c and
       "iq_skew_permille" in all_c and "iq_cross_permille" in all_c)
+check("shadow exact-adjacent endpoint winding observer present",
+      "demod_phase5_endpoint_loses_winding" in all_c and
+      "winding_permille" in all_c and
+      "winding_triplets" in all_c and
+      "production_first" in all_c and
+      "strong_winding_permille" in all_c and
+      "DEMOD_STRONG_POWER_MIN" in read(MAIN / "demod_quality.h"))
+check("semantic CVBS sync score requires pulse width plus line period",
+      "video_semantic_observe" in all_c and
+      "s_last_sync_quality" in all_c and
+      "fresh_sync = sync_quality >= 70" in all_c and
+      "width_score" in all_c and "best_period_score" in all_c)
+check("range trials penalize endpoint winding instead of amplitude-only scoring",
+      "demod_winding_penalty" in read(MAIN / "range_control.h") and
+      "DEMOD_STATIC_HEAVY_WINDING_PM" in read(MAIN / "demod_quality.h") and
+      "sync_quality_avg >= 70" in read(MAIN / "range_control.h"))
 check("lag correlation covers any tracked PHY write",
       "near_phy_event_count" in all_c and
       "s_last_phy_write_us" in all_c and
@@ -227,11 +244,14 @@ check("web flasher selects the application image explicitly",
       "!name.includes('merged')" in web_app)
 check("full firmware fallback rejects incomplete release assets",
       "Incomplete full firmware package" in web_app)
-check("PR builds remain explicit, warned, and never outrank normal releases",
+check("PR builds have a separate warned flasher tab",
       "PR_BUILD_TAG_PATTERN" in web_app and
-      "Experimental PR builds" in web_app and
+      "githubPrBuilds = prBuilds" in web_app and
+      "activeSource === 'pr'" in web_app and
       "window.confirm(" in web_app and
-      "githubReleases = [...productionReleases, ...prBuilds]" in web_app)
+      'id="tabPr"' in read(ROOT / "web" / "index.html") and
+      'id="panePr"' in read(ROOT / "web" / "index.html") and
+      'id="selectPrBuild"' in read(ROOT / "web" / "index.html"))
 check("same-repo PR firmware is published only as an explicit prerelease",
       "publish-pr-build:" in workflow and
       "github.event.pull_request.head.repo.full_name == github.repository" in workflow and
@@ -243,14 +263,25 @@ check("release build is gated by architectural validation",
 check("firmware CI does not create Pages deployments",
       "actions/deploy-pages" not in workflow and
       "Deploy Web Flasher to GitHub Pages" not in workflow)
-check("web deployment is isolated and path-filtered",
+check("web deployment is isolated, path-filtered and GitHub Pages-only",
       'paths:' in web_workflow and
       '"web/**"' in web_workflow and
       "workflow_dispatch:" in web_workflow and
-      "actions/deploy-pages@v4" in web_workflow)
-check("README uses canonical production flasher URL",
-      readme.count("https://c5vrx.com/") >= 3 and
-      "GitHub Pages mirror" in readme)
+      "actions/deploy-pages@v4" in web_workflow and
+      "Pages Mirror" not in web_workflow and
+      "Pages mirror" not in web_workflow)
+check("README documents GitHub Pages as the only production flasher host",
+      readme.count("https://twotoz.github.io/C5VRX/") >= 3 and
+      "hosted entirely by **GitHub Pages**" in readme and
+      "There is no VPS" in readme and
+      "c5vrx.com" not in readme)
+agents = read(ROOT / "AGENTS.md")
+check("AGENTS documents release, PR-build and Pages flow",
+      "## Releases, PR builds, and web flasher deployment" in agents and
+      "pr-<PR_NUMBER>" in agents and
+      "PR Builds" in agents and
+      "GitHub Pages" in agents and
+      "do not create a PR-specific Pages" in agents)
 
 check("gain transient classifier present",
       "gain_quality_drop_count" in all_c and

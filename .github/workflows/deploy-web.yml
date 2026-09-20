@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy GitHub Pages Mirror
+    name: Deploy GitHub Pages Site
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -38,6 +38,6 @@ jobs:
         with:
           path: web/
 
-      - name: Deploy GitHub Pages mirror
+      - name: Deploy GitHub Pages site
         id: deployment
         uses: actions/deploy-pages@v4
