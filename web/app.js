@@ -17,6 +17,8 @@ const selectRelease = document.getElementById('selectRelease');
 const btnRefreshReleases = document.getElementById('btnRefreshReleases');
 const selectPackageType = document.getElementById('selectPackageType');
 const releaseDetails = document.getElementById('releaseDetails');
+const prBuildWarning = document.getElementById('prBuildWarning');
+const prBuildNumber = document.getElementById('prBuildNumber');
 const infoReleaseName = document.getElementById('infoReleaseName');
 const infoReleaseDate = document.getElementById('infoReleaseDate');
 const infoReleaseTag = document.getElementById('infoReleaseTag');
@@ -73,6 +75,12 @@ const FALLBACK_RELEASES = [
 ];
 
 const VERSION_TAG_PATTERN = /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const PR_BUILD_TAG_PATTERN = /^pr-(\d+)$/;
+
+function getPrBuildNumber(rel) {
+  const match = PR_BUILD_TAG_PATTERN.exec(rel?.tag_name || '');
+  return match ? parseInt(match[1], 10) : null;
+}
 
 // Terminal output helper
 function log(msg, type = 'info') {
@@ -114,7 +122,13 @@ tabGithub.addEventListener('click', () => {
   tabLocal.classList.remove('active');
   paneGithub.classList.add('active');
   paneLocal.classList.remove('active');
-  sourceBadge.textContent = 'GitHub';
+  const idx = parseInt(selectRelease.value, 10);
+  if (Number.isInteger(idx)) {
+    onReleaseSelected(idx);
+  } else {
+    sourceBadge.textContent = 'GitHub';
+    sourceBadge.className = 'badge';
+  }
   updateFlashButtonState();
 });
 
@@ -125,6 +139,7 @@ tabLocal.addEventListener('click', () => {
   paneLocal.classList.add('active');
   paneGithub.classList.remove('active');
   sourceBadge.textContent = 'Local File';
+  sourceBadge.className = 'badge badge-secondary';
   updateFlashButtonState();
 });
 
@@ -182,24 +197,29 @@ function handleLocalFile(file) {
 async function fetchReleases() {
   selectRelease.innerHTML = '<option value="">Fetching releases from GitHub...</option>';
   try {
-    const res = await fetch('https://api.github.com/repos/Twotoz/C5VRX/releases', {
+    const res = await fetch('https://api.github.com/repos/Twotoz/C5VRX/releases?per_page=100', {
       headers: { 'Accept': 'application/vnd.github.v3+json' }
     });
     if (!res.ok) throw new Error(`GitHub API HTTP ${res.status}`);
     const data = await res.json();
     if (!Array.isArray(data) || data.length === 0) throw new Error('No releases found');
 
-    // Ignore the old mutable "main" release/tag and legacy naming. The web
-    // flasher only consumes immutable semantic-version releases.
-    githubReleases = data
+    // Production releases always stay first and remain the default selection.
+    // PR builds are explicit prereleases tagged pr-<number>.
+    let productionReleases = data
       .filter(rel => VERSION_TAG_PATTERN.test(rel.tag_name || ''))
       .sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0));
+    const prBuilds = data
+      .filter(rel => rel.prerelease && PR_BUILD_TAG_PATTERN.test(rel.tag_name || ''))
+      .sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0));
 
-    if (githubReleases.length === 0) {
-      throw new Error('No semantic-version releases found');
+    if (productionReleases.length === 0) {
+      log('Warning: No versioned release returned by GitHub. Keeping the cached production release as the safe default.');
+      productionReleases = FALLBACK_RELEASES;
     }
 
-    log(`Successfully fetched ${githubReleases.length} versioned releases from GitHub.`);
+    githubReleases = [...productionReleases, ...prBuilds];
+    log(`Fetched ${productionReleases.length} versioned release(s) and ${prBuilds.length} experimental PR build(s).`);
   } catch (err) {
     log(`Warning: Failed to fetch versioned releases (${err.message}). Using cached release index.`);
     githubReleases = FALLBACK_RELEASES;
@@ -209,22 +229,40 @@ async function fetchReleases() {
 }
 function populateReleaseDropdown() {
   selectRelease.innerHTML = '';
+
+  const releaseGroup = document.createElement('optgroup');
+  releaseGroup.label = 'Versioned releases';
+  const prGroup = document.createElement('optgroup');
+  prGroup.label = '⚠ Experimental PR builds';
+
   githubReleases.forEach((rel, index) => {
     const opt = document.createElement('option');
     opt.value = index;
     const tag = rel.tag_name || rel.name;
-    const isLatest = index === 0;
+    const prNumber = getPrBuildNumber(rel);
 
-    if (rel.prerelease) {
-      opt.textContent = `${tag} [Pre-release]${isLatest ? ' (Latest available)' : ''}`;
-    } else {
-      opt.textContent = `${tag}${isLatest ? ' (Latest - Recommended)' : ''}`;
+    if (prNumber !== null) {
+      opt.textContent = `PR #${prNumber} [EXPERIMENTAL / UNMERGED]`;
+      prGroup.appendChild(opt);
+      return;
     }
-    selectRelease.appendChild(opt);
+
+    const isLatestProduction = releaseGroup.children.length === 0;
+    if (rel.prerelease) {
+      opt.textContent = `${tag} [Pre-release]${isLatestProduction ? ' (Latest available)' : ''}`;
+    } else {
+      opt.textContent = `${tag}${isLatestProduction ? ' (Latest - Recommended)' : ''}`;
+    }
+    releaseGroup.appendChild(opt);
   });
 
+  if (releaseGroup.children.length > 0) selectRelease.appendChild(releaseGroup);
+  if (prGroup.children.length > 0) selectRelease.appendChild(prGroup);
+
+  // Normal releases are stored before PR builds, so index 0 is never a PR
+  // build when a versioned release (or the cached safe release) exists.
   if (githubReleases.length > 0) {
-    selectRelease.value = 0;
+    selectRelease.value = '0';
     onReleaseSelected(0);
   }
 }
@@ -245,6 +283,18 @@ function onReleaseSelected(index) {
   infoReleaseName.textContent = rel.name || rel.tag_name;
   infoReleaseDate.textContent = rel.published_at ? new Date(rel.published_at).toLocaleDateString() : 'N/A';
   infoReleaseTag.textContent = rel.tag_name;
+
+  const prNumber = getPrBuildNumber(rel);
+  if (prNumber !== null) {
+    prBuildNumber.textContent = `#${prNumber}`;
+    prBuildWarning.style.display = 'block';
+    sourceBadge.textContent = `PR #${prNumber}`;
+    sourceBadge.className = 'badge badge-danger';
+  } else {
+    prBuildWarning.style.display = 'none';
+    sourceBadge.textContent = 'GitHub';
+    sourceBadge.className = 'badge';
+  }
 
   const assetNames = (rel.assets || []).map(a => a.name).join(', ') || 'No binary assets attached';
   infoReleaseAssets.textContent = assetNames;
@@ -374,6 +424,22 @@ async function disconnectDevice() {
 // Flashing Handler
 btnFlash.addEventListener('click', async () => {
   if (!isConnected || !esploader || isFlashing) return;
+
+  if (activeSource === 'github') {
+    const selectedRelease = githubReleases[parseInt(selectRelease.value, 10)];
+    const prNumber = getPrBuildNumber(selectedRelease);
+    if (prNumber !== null) {
+      const accepted = window.confirm(
+        `WARNING: PR #${prNumber} is an experimental, unmerged test build.\n\n` +
+        'It may be unstable, fail to boot, corrupt settings, or produce broken video. ' +
+        'Only continue if you intentionally want to test this PR build.\n\nFlash it anyway?'
+      );
+      if (!accepted) {
+        log(`Cancelled experimental PR #${prNumber} flash.`);
+        return;
+      }
+    }
+  }
 
   isFlashing = true;
   btnFlash.disabled = true;
