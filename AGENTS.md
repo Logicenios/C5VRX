@@ -37,6 +37,13 @@ findings that explain its failure.
 - The standalone menu raster is always emitted through the byte-oriented
   `6BIT@40` TX geometry. On menu exit, recreate the live TX unit for the
   selected output mode before restarting the flight BitScrambler.
+- Do not move the full menu GDMA scatter chain back into static BSS. PAL needs
+  up to 6,348 12-byte AHB-DMA descriptors (~76 KiB), but that chain is used
+  only while the standalone menu owns TX. Count the active raster first,
+  allocate exactly that many descriptors from
+  `MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL`, and free them only after
+  live TX has been restarted and GDMA no longer references the menu chain.
+  This is what keeps the widened menu inside the ESP32-C5 static DRAM limit.
 
 
 ## Releases, PR builds, and web flasher deployment
