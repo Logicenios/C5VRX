@@ -24,6 +24,7 @@ idf_component_register(
         esp_hw_support
 )
 
-# Proven default plus opt-in experimental 4-bit@80 packer.
+# Proven default plus opt-in experimental demod/output paths.
 target_bitscrambler_add_src("fm.bsasm")
 target_bitscrambler_add_src("fm4.bsasm")
+target_bitscrambler_add_src("fm_traj.bsasm")

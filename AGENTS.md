@@ -29,6 +29,21 @@ findings that explain its failure.
 - Keep USB/debug outside realtime pacing.
 - Do not silently change the tested XIAO D4..D9 DAC pin order or the physical
   8.2k/3.9k/2k/1k/470R/240R plus 200R network.
+- Keep live output compatibility explicit: GOLDEN supports both `6BIT@40` and
+  experimental `4BIT@80`; TRAJ V2 currently supports only `6BIT@40`.
+  Selecting TRAJ V2 must auto-select `6BIT@40`; selecting `4BIT@80` while
+  TRAJ V2 is selected must auto-return the demodulator to GOLDEN rather than
+  making the 4-bit mode unreachable.
+- The standalone menu raster is always emitted through the byte-oriented
+  `6BIT@40` TX geometry. On menu exit, recreate the live TX unit for the
+  selected output mode before restarting the flight BitScrambler.
+- Do not move the full menu GDMA scatter chain back into static BSS. PAL needs
+  up to 6,348 12-byte AHB-DMA descriptors (~76 KiB), but that chain is used
+  only while the standalone menu owns TX. Count the active raster first,
+  allocate exactly that many descriptors from
+  `MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL`, and free them only after
+  live TX has been restarted and GDMA no longer references the menu chain.
+  This is what keeps the widened menu inside the ESP32-C5 static DRAM limit.
 
 
 ## Releases, PR builds, and web flasher deployment
@@ -71,18 +86,40 @@ commit prefixes intentionally.
 
 ### PR firmware publication
 
-For a same-repository pull request targeting `main`:
+Same-repository PR firmware must work for both ordinary PRs targeting `main`
+and stacked development PRs. Production CI therefore listens for PRs targeting
+`main`, `feat/**`, `fix/**`, and `codex/**`.
+
+The **pull_request workflow is the sole owner** of the mutable PR firmware
+channel. Do not add a second push-based publisher: a normal head commit already
+emits `pull_request:synchronize`, and two publishers racing to delete/recreate
+the same `pr-N` release is fragile.
+
+For every same-repository PR `opened`, `synchronize`, or `reopened` event:
 
 1. CI validates the architecture/DSP contract.
-2. CI builds the firmware and creates the normal release artifacts, including
-   `c5vrx3.bin`, `c5vrx3_merged.bin`, bootloader, partition table,
+2. CI builds the exact PR head and creates the normal firmware artifacts,
+   including `c5vrx3.bin`, `c5vrx3_merged.bin`, bootloader, partition table,
    `flasher_args.json`, and checksums.
-3. `publish-pr-build` creates a GitHub **prerelease** tagged
-   `pr-<PR_NUMBER>` and targets it at the current PR head SHA.
-4. Every new PR commit recreates that mutable `pr-<number>` prerelease so its
-   assets always correspond to the latest tested PR head.
+3. `publish-pr-build` recreates a GitHub **prerelease** tagged
+   `pr-<PR_NUMBER>`, targeted at
+   `github.event.pull_request.head.sha`.
+4. Every later PR commit therefore replaces that mutable prerelease with assets
+   from the newly tested head.
 5. When the PR closes or merges, `cleanup-pr-build` deletes the temporary
    prerelease and tag.
+
+The important stacked-PR rule is the trigger filter itself:
+
+```yaml
+pull_request:
+  branches: [main, "feat/**", "fix/**", "codex/**"]
+  types: [opened, synchronize, reopened, closed]
+```
+
+A previous `branches: [main]` filter meant PR #46 (targeting
+`feat/range-v2`) built on branch pushes but never received a PR publication
+event, so no `pr-46` prerelease could exist in the web flasher.
 
 Fork PRs must not receive write-capable release publication. Keep the
 same-repository guard on `publish-pr-build`.
@@ -114,6 +151,28 @@ firmware releases plus all currently active PR prereleases.
 A web UI change made in a PR is still not deployed until merged into `main`.
 PR firmware can trigger a Pages **mirror refresh**, but that refresh checks out
 `main` and therefore cannot deploy unmerged PR HTML/JavaScript.
+
+### Debugging a PR build missing from the web flasher
+
+Do not assume a green branch build means the PR firmware is available in the
+flasher. Verify the whole chain in order:
+
+1. The exact PR head has a successful Production CI build.
+2. `Publish Experimental PR Build` did not merely report success with its
+   download/publish steps skipped.
+3. A GitHub prerelease named `pr-<number>` exists and contains at least
+   `c5vrx3.bin`, `c5vrx3_merged.bin`, bootloader, partition table,
+   `flasher_args.json`, and checksums.
+4. The successful Production CI completion triggered `Deploy Web Flasher`.
+5. The Pages job's **Build same-origin firmware mirror** log contains
+   `-> pr-<number>`.
+6. The uploaded Pages artifact contains
+   `firmware/pr-<number>/...`; this also means the generated
+   `firmware/releases.json` can expose that PR in the **PR Builds** tab.
+
+If step 3 is missing, fix PR publication; refreshing Pages cannot invent a
+release. If step 3 exists but steps 4-6 are missing, fix the Pages mirror
+refresh rather than changing browser CORS/download logic.
 
 
 ### CI concurrency on merge

@@ -4,7 +4,9 @@ on:
   push:
     branches: [main, "codex/**", "feat/**", "fix/**"]
   pull_request:
-    branches: [main]
+    # Include stacked development PRs so their mutable pr-N firmware channel
+    # is created just like a PR targeting main.
+    branches: [main, "feat/**", "fix/**", "codex/**"]
     types: [opened, synchronize, reopened, closed]
 
 # A merged PR emits both pull_request:closed and push:main. GitHub reports
@@ -151,6 +153,10 @@ jobs:
           /tmp/test_range_control
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_fusion_receiver.c -o /tmp/test_fusion_receiver
           /tmp/test_fusion_receiver
+          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_menu_raster.c main/menu_raster.c -lm -o /tmp/test_menu_raster
+          /tmp/test_menu_raster
+          python3 tools/train_trajectory_v2.py --write --self-test
+          git diff --exit-code -- main/fm_traj.bsasm main/trajectory_v2_lut.h
           python3 tools/range_demod_bench.py --self-test
 
   build:
@@ -235,8 +241,6 @@ jobs:
           set -euo pipefail
           tag="pr-${PR_NUMBER}"
 
-          # PR releases are deliberately mutable test channels. Recreate the
-          # prerelease on every PR update so its assets always match head SHA.
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag
           fi

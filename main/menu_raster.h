@@ -5,17 +5,18 @@
 /* Standalone CVBS menu raster at 40 MHz.
  *
  * The modern UI is 384 x 56 logical pixels. Horizontal coordinates use a
- * sharp 189/50 sample scale and each logical Y row is emitted
- * on three consecutive video lines. This gives a ~36.3 us wide, 168-line-tall UI
- * while keeping the DMA chain at one SRAM segment per UI scanline.
+ * 208/50 sample scale and each logical Y row is emitted on three consecutive
+ * video lines. This makes the menu about 10% wider than the previous 189/50
+ * geometry (~39.9 us versus ~36.3 us) while keeping one SRAM segment per UI
+ * scanline.
  */
 #define MENU_FONT_HEIGHT 8u
 #define MENU_UI_WIDTH 384u
 #define MENU_UI_LINES 56u
-#define MENU_UI_X_SCALE_NUM 189u
+#define MENU_UI_X_SCALE_NUM 208u
 #define MENU_UI_X_SCALE_DEN 50u
 #define MENU_UI_Y_REPEAT 3u
-#define MENU_UI_BYTES 1452u
+#define MENU_UI_BYTES 1600u
 
 #define MENU_PREFIX_BYTES 448u
 #define MENU_TAIL_BYTES (2560u - MENU_PREFIX_BYTES)

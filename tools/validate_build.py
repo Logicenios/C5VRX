@@ -31,8 +31,8 @@ def read(path):
 
 # ---- BitScrambler checks ----
 bsasm_files = list(MAIN.glob("*.bsasm"))
-check("two .bsasm programs (default + experimental)",
-      {f.name for f in bsasm_files} == {"fm.bsasm", "fm4.bsasm"},
+check("three .bsasm programs (Golden + output experiment + Trajectory v2)",
+      {f.name for f in bsasm_files} == {"fm.bsasm", "fm4.bsasm", "fm_traj.bsasm"},
       f"found {[f.name for f in bsasm_files]}")
 
 for bsasm_file in bsasm_files:
@@ -70,7 +70,10 @@ check("no RF dump engine in production", "continuous_iq" not in all_c and "s_rf_
       "RF dump subsystem must not be present")
 check("no startup_trace in production", "startup_trace" not in all_c)
 check("no snapshot infrastructure", "live_snapshot" not in all_c)
-check("no trajectory in production", "trajectory" not in all_c)
+check("legacy trajectory/M2M code stays out of production",
+      "c5vrx2_wbfm_q4_trajectory" not in all_c and
+      "trajectory_reference" not in all_c and
+      "BITSCRAMBLER_ATTACH_MEM2MEM" not in all_c)
 check("no true40 in production", "true40" not in all_c)
 check("no wbfm_q4.h in production", "wbfm_q4.h" not in all_c)
 
@@ -100,9 +103,10 @@ check("menu resolves detected PAL/NTSC before raster start",
 check("modern menu raster is SRAM-safe 384x56 logical pixels at 3x vertical scale",
       "MENU_UI_WIDTH 384u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_LINES 56u" in read(MAIN / "menu_raster.h") and
-      "MENU_UI_X_SCALE_NUM 189u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_X_SCALE_NUM 208u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_X_SCALE_DEN 50u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_Y_REPEAT 3u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_BYTES 1600u" in read(MAIN / "menu_raster.h") and
       "MENU_MAX_NODES 6348u" in read(MAIN / "menu_raster.h") and
       "s_menu_raster.ui" in all_c)
 check("native menu enabled with safe defaults",
@@ -112,8 +116,26 @@ check("native menu enabled with safe defaults",
 check("experimental BW auto and 4-bit@80 remain opt-in",
       "AUTO EXP" in all_c and "VIDEO_OUTPUT_4BIT_80" in all_c and
       "DAC4_RATE_HZ     80000000u" in all_c)
+check("4BIT@80 remains reachable with a valid GOLDEN pairing",
+      's_output_mode = s_output_mode == VIDEO_OUTPUT_6BIT_40 ?' in all_c and
+      "s_demod_mode == DEMOD_MODE_TRAJECTORY_V2" in all_c and
+      "s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;" in all_c and
+      "DEMOD -> GOLDEN" in all_c and
+      "selecting 4BIT@80" in all_c)
+check("TRAJ V2 keeps its required 6BIT@40 pairing",
+      "if (s_demod_mode == DEMOD_MODE_TRAJECTORY_V2)" in all_c and
+      "s_output_mode = VIDEO_OUTPUT_6BIT_40;" in all_c and
+      "start_flight_demodulator" in all_c)
 check("menu lifecycle does not double-disable BitScrambler",
       all_c.count("bitscrambler_disable(s_flight_bs)") == 1)
+check("large menu descriptor chain is transient DMA heap, not static BSS",
+      "dma_descriptor_t s_menu_nodes[MENU_MAX_NODES]" not in all_c and
+      "static dma_descriptor_t *s_menu_nodes;" in all_c and
+      "menu_count_segment" in all_c and
+      "heap_caps_aligned_alloc" in all_c and
+      "MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL" in all_c and
+      "menu_free_nodes();" in all_c and
+      "s_menu_node_capacity" in all_c)
 check("legacy seven-line text menu removed",
       "MENU_TEXT_BYTES" not in all_c and "MENU_ROWS" not in all_c)
 check("lag diagnostics poll PARLIO GDMA and BitScrambler",
@@ -216,14 +238,80 @@ check("Range v2 exposes centering and vendor-AGC characterization probes",
 check("offline demod benchmark gates adjacent/PLL experiments",
       (ROOT / "tools/range_demod_bench.py").exists() and
       "phase5_endpoint_winding_disagree_permille" in read(ROOT / "tools/range_demod_bench.py") and
+      "trajectory_v2_hard_ge16_permille" in read(ROOT / "tools/range_demod_bench.py") and
+      "pll_lite_pair_codes" in read(ROOT / "tools/range_demod_bench.py") and
       "pll_demod" in read(ROOT / "tools/range_demod_bench.py"))
 
-check("fusion profile stays supervisory over the proven realtime demod",
+traj_asm = read(MAIN / "fm_traj.bsasm")
+traj_gen = read(ROOT / "tools" / "train_trajectory_v2.py")
+check("Trajectory v2 preserves no-rewrap adjacent trajectory target",
+      "groups[address].append((previous, scale_rad(d0 + d1)))" in traj_gen and
+      "target is the clean two-adjacent trajectory d0+d1" in
+          read(MAIN / "trajectory_v2_lut.h") and
+      "no second wrap" in read(MAIN / "trajectory_v2_lut.h"))
+check("Trajectory v2 live loop stays two-bundle and quiet 20M->40M",
+      "trajectory:" in traj_asm and
+      "emit:" in traj_asm and
+      "jmp trajectory" in traj_asm and
+      "write 16" in traj_asm and
+      "cfg eof_on downstream" in traj_asm and
+      "cfg trailing_bytes 0" in traj_asm)
+check("Trajectory v2 is opt-in and Golden remains boot default",
+      "DEMOD_MODE_GOLDEN_PHASE5 = 0" in all_c and
+      "DEMOD_MODE_TRAJECTORY_V2 = 1" in all_c and
+      "s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5" in all_c and
+      "s_fm_traj_program" in all_c)
+check("Trajectory v2 initial hardware A/B keeps the 6BIT@40 contract",
+      "s_demod_mode == DEMOD_MODE_TRAJECTORY_V2" in all_c and
+      "s_output_mode = VIDEO_OUTPUT_6BIT_40" in all_c and
+      "Selecting TRAJ V2 therefore moves the DAC back" in all_c and
+      "DEMOD -> GOLDEN" in all_c)
+check("Trajectory v2 supervisor mirrors two-stage token LUT and uncertainty",
+      "trajectory_v2_stage1_address" in all_c and
+      "trajectory_v2_stage2_address" in all_c and
+      "trajectory_v2_code" in all_c and
+      "trajectory_uncertainty_permille" in all_c and
+      "c5vrx_trajectory_v2_token" in all_c and
+      "c5vrx_trajectory_v2_confidence" in all_c and
+      "traj_uncert_pm=%d" in all_c and
+      "pll_slip_pm=%d" in all_c)
+check("Trajectory v2 live two-stage address contract is mirrored everywhere",
+      "middle_raw >> 7u" in all_c and
+      "set 24 7" in traj_asm and
+      "set 25 O30" in traj_asm and
+      "set 21 L6" in traj_asm and
+      "set 25 L15" in traj_asm and
+      "middle raw-I sign" in traj_gen and
+      "middle_raw >> 7" in read(ROOT / "tools/range_demod_bench.py") and
+      "c5vrx_trajectory_v2_token" in read(MAIN / "trajectory_v2_lut.h"))
+check("demod A/B switch resets semantic lock state",
+      "cycle_demod_mode" in all_c and
+      "video_standard_detector_reset();" in all_c and
+      "receive_generation also makes the controller relearn cleanly" in all_c)
+check("demod mode persists, migrates v3 and defaults safely to Golden",
+      "SETTINGS_VERSION 4u" in all_c and
+      ".demod_mode = (uint8_t)s_demod_mode" in all_c and
+      "legacy_v3 = settings.version == 3u" in all_c and
+      "sizeof(persisted_settings_t) == 14u" in all_c and
+      "settings.demod_mode < DEMOD_MODE_COUNT" in all_c and
+      "s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5" in all_c)
+check("Trajectory-only uncertainty does not contaminate Golden A/B",
+      "active_demod_shadow" in all_c and
+      "s_demod_mode != DEMOD_MODE_TRAJECTORY_V2" in all_c and
+      "shadow.trajectory_uncertainty_permille = 0" in all_c)
+check("PLL-lite remains observation-only and risk-gated",
+      "pll_predictor_delta" in fusion_header and
+      "pll_lite_slip_permille" in fusion_header and
+      "pll_lite_hold_permille" in fusion_header and
+      "catastrophic_risk" in fusion_header)
+
+check("Fusion/Range supervisor remains independent from selectable realtime demod",
       "RX_PROFILE_FUSION_EXP" in all_c and
+      "RX_PROFILE_RANGE_V2_EXP" in all_c and
       "fusion_optimizer_tick" in all_c and
       "fusion_make_observation" in all_c and
       'target_bitscrambler_add_src("fm.bsasm")' in read(MAIN / "CMakeLists.txt") and
-      'target_bitscrambler_add_src("fm4.bsasm")' in read(MAIN / "CMakeLists.txt"))
+      'target_bitscrambler_add_src("fm_traj.bsasm")' in read(MAIN / "CMakeLists.txt"))
 check("lag correlation covers any tracked PHY write",
       "near_phy_event_count" in all_c and
       "s_last_phy_write_us" in all_c and
@@ -268,6 +356,10 @@ check("RF menu preserves BW control and adds two-second profile selector",
       "LONG:BW  2S:PROFILE" in all_c and
       "btn_ticks >= 40" in all_c and
       "cycle_rx_profile();" in all_c)
+check("VIDEO menu exposes explicit two-second demod selector",
+      "LONG:DAC  2S:DEMOD" in all_c and
+      "cycle_demod_mode();" in all_c and
+      "btn_demod_fired" in all_c)
 check("experimental PHY environment reads stay out of the range default",
       "s_rx_profile == RX_PROFILE_AUTO_EXP && ++phy_metric_ticks >= 5" in all_c and
       "rf_try_get_noise_floor_dbm" in all_c and
@@ -335,6 +427,16 @@ check("same-repo PR firmware is published only as an explicit prerelease",
       "--prerelease" in workflow and
       'tag="pr-${PR_NUMBER}"' in workflow and
       "cleanup-pr-build:" in workflow)
+check("stacked development PRs publish webflasher firmware from PR events only",
+      'branches: [main, "feat/**", "fix/**", "codex/**"]' in workflow and
+      'types: [opened, synchronize, reopened, closed]' in workflow and
+      "Publish Experimental PR Build" in workflow and
+      "github.event_name == 'pull_request'" in workflow and
+      "github.event.action != 'closed'" in workflow and
+      "github.event.pull_request.head.repo.full_name == github.repository" in workflow and
+      "github.event.pull_request.head.sha" in workflow and
+      "gh pr list" not in workflow and
+      "pull-requests: read" not in workflow)
 check("CI concurrency separates merge push from PR-close cleanup",
       "github.event_name" in workflow and
       "github.event.pull_request.number || github.ref" in workflow and
@@ -365,7 +467,11 @@ check("AGENTS documents release, PR-build and trusted Pages mirror flow",
       "GitHub Pages" in agents and
       "always checks out trusted" in agents and
       "firmware/releases.json" in agents and
-      "same-origin" in agents)
+      "same-origin" in agents and
+      "Debugging a PR build missing from the web flasher" in agents and
+      "pull_request workflow is the sole owner" in agents and
+      'branches: [main, "feat/**", "fix/**", "codex/**"]' in agents and
+      "selecting `4BIT@80` while" in agents)
 
 check("gain transient classifier present",
       "gain_quality_drop_count" in all_c and
@@ -400,8 +506,8 @@ check("no periodic telemetry or timer tasks in production",
 # Default + experimental BS programs
 cmake_main = read(MAIN / "CMakeLists.txt")
 bs_srcs = re.findall(r'target_bitscrambler_add_src\("([^"]+)"\)', cmake_main)
-check("default + experimental BitScrambler programs in CMakeLists",
-      bs_srcs == ["fm.bsasm", "fm4.bsasm"], f"found: {bs_srcs}")
+check("Golden, 4-bit output and Trajectory v2 BitScrambler programs in CMakeLists",
+      bs_srcs == ["fm.bsasm", "fm4.bsasm", "fm_traj.bsasm"], f"found: {bs_srcs}")
 
 # ---- Summary ----
 print(f"\n{'='*50}")

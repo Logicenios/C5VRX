@@ -40,6 +40,18 @@ int main(void)
     m = fusion_shadow_finish(&s);
     assert(m.low_confidence_permille == 1000);
 
+    /* PLL-lite learns a clean local slope, then coasts through a low-envelope
+     * branch event instead of learning the click as the new frequency. */
+    fusion_shadow_reset(&s);
+    fusion_shadow_push(&s, 0, 80);
+    fusion_shadow_push(&s, 2, 80);
+    fusion_shadow_push(&s, 4, 80);
+    fusion_shadow_push(&s, 14, 2);
+    fusion_shadow_push(&s, 24, 2);
+    m = fusion_shadow_finish(&s);
+    assert(m.pll_lite_slip_permille > 0);
+    assert(m.pll_lite_hold_permille > 0);
+
     fusion_observation_t clean = make_obs(FUSION_CONTEXT_CLEAN);
     fusion_observation_t weak = make_obs(FUSION_CONTEXT_WEAK);
     fusion_observation_t no_carrier = make_obs(FUSION_CONTEXT_NO_CARRIER);
@@ -48,6 +60,13 @@ int main(void)
     assert(no_carrier.context == FUSION_CONTEXT_NO_CARRIER);
     assert(clean.quality > weak.quality);
     assert(clean.catastrophic_risk < weak.catastrophic_risk);
+
+    fusion_shadow_metrics_t uncertain_shadow = {0};
+    uncertain_shadow.trajectory_uncertainty_permille = 900;
+    fusion_observation_t uncertain = fusion_make_observation(
+        24, 78, 0, 20, 50, 10, 20, 20, 95, uncertain_shadow);
+    assert(uncertain.catastrophic_risk > clean.catastrophic_risk);
+    assert(uncertain.quality < clean.quality);
 
     fusion_temporal_t temporal;
     fusion_temporal_reset(&temporal);
@@ -85,6 +104,6 @@ int main(void)
         (void)fusion_optimizer_tick(&opt, &overload, &tm);
     assert(fusion_optimizer_gain(&opt) < 34);
 
-    puts("Fusion receiver: temporal IQ fusion + risk-aware local learner passed");
+    puts("Fusion receiver: temporal IQ fusion + Trajectory/PLL-lite risk learner passed");
     return 0;
 }

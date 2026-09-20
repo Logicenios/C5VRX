@@ -102,24 +102,36 @@ tolerance and decoder compatibility require physical validation.
 Shared porch/blank buffers and a dedicated modern UI raster avoid a full PAL
 framebuffer. The production UI is **384 x 56 logical pixels**:
 
-- horizontal coordinates use 189/50 DAC samples (1452 samples / 36.3 us UI width);
+- horizontal coordinates use 208/50 DAC samples; the allocated UI segment is
+  1600 samples / 40.0 us wide, about 10.2% wider than the previous
+  1452-sample / 36.3 us geometry;
 - one logical Y row = three physical video lines (168-line UI height);
 - exact six-bit DAC shades only; no alpha, anti-aliasing or browser-style scaling;
 - persistent status bar + navigation rail + page content, rendered from the existing
   8x8 bitmap font and small built-in icons.
 
-The UI backing store is 81,312 bytes because vertical scaling reuses each
+The UI backing store is 89,600 bytes because vertical scaling reuses each
 logical row from the same SRAM buffer. Together with sync/burst/blank templates,
-`menu_raster_t` is 90,016 bytes. The first 400x72x4 implementation was rejected
+`menu_raster_t` is 98,304 bytes (96 KiB). The first 400x72x4 implementation was rejected
 by the production linker because it overflowed ESP32-C5 SRAM by 39,408 bytes.
-The compact 384x56x3 layout keeps the same modern status/sidebar/page structure
-while adding only about 7.2 KiB over the old menu raster.
+The compact 384x56x3 layout keeps the same modern status/sidebar/page structure.
+The later ~10% horizontal widening adds 8,288 bytes to the UI backing store
+without increasing the DMA node count.
 
 The scatter chain still uses one UI segment per displayed scanline, so the DMA
-node count does not grow with glyph complexity. Its capacity is 6,348 nodes to
-cover the 3x PAL raster. Only `raster.ui` changes while
-the standalone menu is running; timing templates and descriptor links change
-only with TX stopped.
+node count does not grow with glyph complexity. PAL currently needs 6,348 nodes
+and NTSC 5,548. A `dma_descriptor_t` is 12 bytes on ESP32-C5, so a static PAL
+chain alone costs 76,176 bytes.
+
+The widened 1600-byte UI rows initially pushed static `.dram0.bss` 7,488 bytes
+past the C5 linker limit. The fix is not to shrink the menu again: menu
+descriptors are now counted from the resolved raster and allocated only while
+the standalone menu owns TX using
+`MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL`. The chain is freed after live
+TX has restarted and no GDMA link can reference it. This removes the large
+descriptor array from static BSS and avoids reserving the PAL maximum for NTSC.
+Only `raster.ui` changes while the standalone menu is running; timing templates
+and descriptor links change only with TX stopped.
 
 ### Controls, console and validation
 

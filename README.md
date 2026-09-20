@@ -26,6 +26,7 @@ The current Range v2 work is documented in:
 - `docs/range-v2.md` — implementation and validation overview;
 - `docs/range-v2-knowledge.md` — preserved control/demod engineering knowledge;
 - `docs/range-v2-research-notes.md` — RF research hypotheses and hardware test plan.
+- `docs/trajectory-v2.md` — two-bundle adjacent-trajectory demod, confidence model and PLL-lite validation plan.
 
 ## Web Flasher (Zero-Install Browser Flashing)
 
