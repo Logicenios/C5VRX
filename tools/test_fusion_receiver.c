@@ -71,6 +71,20 @@ int main(void)
     fusion_observation_t overload = make_obs(FUSION_CONTEXT_OVERLOAD);
     assert(fusion_optimizer_tick(&opt, &overload, &tm) <= 54);
 
+    /* Conservative FUSION can retain a G34 floor while RANGE V2 uses the
+     * same learner with full near-field headroom down to G2. */
+    fusion_optimizer_reset(&opt, 62);
+    fusion_optimizer_set_gain_floor(&opt, 34);
+    for (unsigned i = 0; i < 20; ++i)
+        (void)fusion_optimizer_tick(&opt, &overload, &tm);
+    assert(fusion_optimizer_gain(&opt) >= 34);
+
+    fusion_optimizer_reset(&opt, 62);
+    fusion_optimizer_set_gain_floor(&opt, 2);
+    for (unsigned i = 0; i < 20; ++i)
+        (void)fusion_optimizer_tick(&opt, &overload, &tm);
+    assert(fusion_optimizer_gain(&opt) < 34);
+
     puts("Fusion receiver: temporal IQ fusion + risk-aware local learner passed");
     return 0;
 }
