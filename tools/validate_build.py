@@ -128,6 +128,14 @@ check("TRAJ V2 keeps its required 6BIT@40 pairing",
       "start_flight_demodulator" in all_c)
 check("menu lifecycle does not double-disable BitScrambler",
       all_c.count("bitscrambler_disable(s_flight_bs)") == 1)
+check("large menu descriptor chain is transient DMA heap, not static BSS",
+      "dma_descriptor_t s_menu_nodes[MENU_MAX_NODES]" not in all_c and
+      "static dma_descriptor_t *s_menu_nodes;" in all_c and
+      "menu_count_segment" in all_c and
+      "heap_caps_aligned_alloc" in all_c and
+      "MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL" in all_c and
+      "menu_free_nodes();" in all_c and
+      "s_menu_node_capacity" in all_c)
 check("legacy seven-line text menu removed",
       "MENU_TEXT_BYTES" not in all_c and "MENU_ROWS" not in all_c)
 check("lag diagnostics poll PARLIO GDMA and BitScrambler",
