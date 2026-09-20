@@ -31,8 +31,8 @@ def read(path):
 
 # ---- BitScrambler checks ----
 bsasm_files = list(MAIN.glob("*.bsasm"))
-check("two .bsasm programs (default + experimental)",
-      {f.name for f in bsasm_files} == {"fm.bsasm", "fm4.bsasm"},
+check("three .bsasm programs (Golden + output experiment + Trajectory v2)",
+      {f.name for f in bsasm_files} == {"fm.bsasm", "fm4.bsasm", "fm_traj.bsasm"},
       f"found {[f.name for f in bsasm_files]}")
 
 for bsasm_file in bsasm_files:
@@ -70,7 +70,10 @@ check("no RF dump engine in production", "continuous_iq" not in all_c and "s_rf_
       "RF dump subsystem must not be present")
 check("no startup_trace in production", "startup_trace" not in all_c)
 check("no snapshot infrastructure", "live_snapshot" not in all_c)
-check("no trajectory in production", "trajectory" not in all_c)
+check("legacy trajectory/M2M code stays out of production",
+      "c5vrx2_wbfm_q4_trajectory" not in all_c and
+      "trajectory_reference" not in all_c and
+      "BITSCRAMBLER_ATTACH_MEM2MEM" not in all_c)
 check("no true40 in production", "true40" not in all_c)
 check("no wbfm_q4.h in production", "wbfm_q4.h" not in all_c)
 
@@ -216,14 +219,49 @@ check("Range v2 exposes centering and vendor-AGC characterization probes",
 check("offline demod benchmark gates adjacent/PLL experiments",
       (ROOT / "tools/range_demod_bench.py").exists() and
       "phase5_endpoint_winding_disagree_permille" in read(ROOT / "tools/range_demod_bench.py") and
+      "trajectory_v2_hard_ge16_permille" in read(ROOT / "tools/range_demod_bench.py") and
+      "pll_lite_pair_codes" in read(ROOT / "tools/range_demod_bench.py") and
       "pll_demod" in read(ROOT / "tools/range_demod_bench.py"))
 
-check("fusion profile stays supervisory over the proven realtime demod",
+traj_asm = read(MAIN / "fm_traj.bsasm")
+traj_gen = read(ROOT / "tools" / "train_trajectory_v2.py")
+check("Trajectory v2 preserves exact-adjacent branch semantics",
+      "d0 + d1" in traj_gen and
+      "DO NOT wrap this sum" in traj_gen and
+      "NO second wrap" in read(MAIN / "trajectory_v2_lut.h"))
+check("Trajectory v2 live loop stays two-bundle and quiet 20M->40M",
+      "trajectory:" in traj_asm and
+      "emit:" in traj_asm and
+      "jmp trajectory" in traj_asm and
+      "write 16" in traj_asm and
+      "cfg eof_on downstream" in traj_asm and
+      "cfg trailing_bytes 0" in traj_asm)
+check("Trajectory v2 is opt-in and Golden remains boot default",
+      "DEMOD_MODE_GOLDEN_PHASE5 = 0" in all_c and
+      "DEMOD_MODE_TRAJECTORY_V2 = 1" in all_c and
+      "s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5" in all_c and
+      "s_fm_traj_program" in all_c)
+check("Trajectory v2 initial hardware A/B is locked to 6BIT@40",
+      "TRAJ V2 is locked to 6BIT@40" in all_c and
+      "s_demod_mode == DEMOD_MODE_TRAJECTORY_V2" in all_c and
+      "s_output_mode = VIDEO_OUTPUT_6BIT_40" in all_c)
+check("Trajectory v2 supervisor scores actual LUT sync and uncertainty",
+      "trajectory_v2_code" in all_c and
+      "trajectory_uncertainty_permille" in all_c and
+      "c5vrx_trajectory_v2_confidence" in all_c)
+check("PLL-lite remains observation-only and risk-gated",
+      "pll_predictor_delta" in fusion_header and
+      "pll_lite_slip_permille" in fusion_header and
+      "pll_lite_hold_permille" in fusion_header and
+      "catastrophic_risk" in fusion_header)
+
+check("Fusion/Range supervisor remains independent from selectable realtime demod",
       "RX_PROFILE_FUSION_EXP" in all_c and
+      "RX_PROFILE_RANGE_V2_EXP" in all_c and
       "fusion_optimizer_tick" in all_c and
       "fusion_make_observation" in all_c and
       'target_bitscrambler_add_src("fm.bsasm")' in read(MAIN / "CMakeLists.txt") and
-      'target_bitscrambler_add_src("fm4.bsasm")' in read(MAIN / "CMakeLists.txt"))
+      'target_bitscrambler_add_src("fm_traj.bsasm")' in read(MAIN / "CMakeLists.txt"))
 check("lag correlation covers any tracked PHY write",
       "near_phy_event_count" in all_c and
       "s_last_phy_write_us" in all_c and
@@ -268,6 +306,10 @@ check("RF menu preserves BW control and adds two-second profile selector",
       "LONG:BW  2S:PROFILE" in all_c and
       "btn_ticks >= 40" in all_c and
       "cycle_rx_profile();" in all_c)
+check("VIDEO menu exposes explicit two-second demod selector",
+      "LONG:DAC  2S:DEMOD" in all_c and
+      "cycle_demod_mode();" in all_c and
+      "btn_demod_fired" in all_c)
 check("experimental PHY environment reads stay out of the range default",
       "s_rx_profile == RX_PROFILE_AUTO_EXP && ++phy_metric_ticks >= 5" in all_c and
       "rf_try_get_noise_floor_dbm" in all_c and
@@ -400,8 +442,8 @@ check("no periodic telemetry or timer tasks in production",
 # Default + experimental BS programs
 cmake_main = read(MAIN / "CMakeLists.txt")
 bs_srcs = re.findall(r'target_bitscrambler_add_src\("([^"]+)"\)', cmake_main)
-check("default + experimental BitScrambler programs in CMakeLists",
-      bs_srcs == ["fm.bsasm", "fm4.bsasm"], f"found: {bs_srcs}")
+check("Golden, 4-bit output and Trajectory v2 BitScrambler programs in CMakeLists",
+      bs_srcs == ["fm.bsasm", "fm4.bsasm", "fm_traj.bsasm"], f"found: {bs_srcs}")
 
 # ---- Summary ----
 print(f"\n{'='*50}")
