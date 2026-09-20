@@ -61,6 +61,19 @@ void rf_get_phy_snapshot(rf_phy_snapshot_t *snapshot);
 void rf_set_fft_scale_force(bool force, int8_t value);
 
 /**
+ * Experimental PHY observability/control used only by explicit RX profiles.
+ * These wrappers keep undocumented symbols isolated in rf.c.
+ *
+ * Hardware AGC mode is opt-in and reversible. Normal C5VRX operation keeps
+ * Espressif packet AGC disabled and uses the fixed-gain C5VRX controller.
+ */
+bool rf_try_get_noise_floor_dbm(int *dbm);
+bool rf_try_get_wideband_rssi_dbm(int *dbm);
+bool rf_set_experimental_hw_agc(bool enable, uint8_t max_gain);
+bool rf_get_experimental_hw_agc(void);
+uint8_t rf_get_experimental_agc_max_gain(void);
+
+/**
  * FPV Channel and Carrier Frequency Fine-Tuning:
  */
 typedef struct {
