@@ -69,6 +69,8 @@ def _parse_header_array(path: Path, name: str) -> List[int]:
 GOLDEN_LUT = _parse_asm_lut(ROOT / "main" / "fm.bsasm")
 TRAJECTORY_V2_DAC = _parse_header_array(
     ROOT / "main" / "trajectory_v2_lut.h", "c5vrx_trajectory_v2_dac")
+TRAJECTORY_V2_TOKEN = _parse_header_array(
+    ROOT / "main" / "trajectory_v2_lut.h", "c5vrx_trajectory_v2_token")
 TRAJECTORY_V2_CONFIDENCE = _parse_header_array(
     ROOT / "main" / "trajectory_v2_lut.h", "c5vrx_trajectory_v2_confidence")
 
@@ -140,15 +142,26 @@ def golden_code(previous_raw: int, current_raw: int) -> int:
     return GOLDEN_LUT[address] & 63
 
 
-def trajectory_v2_address(previous_raw: int, middle_raw: int, current_raw: int) -> int:
-    return (PHASE5[previous_raw] |
-            (((middle_raw >> 7) & 1) << 5) |
-            ((PHASE5[current_raw] >> 1) << 6))
+def trajectory_v2_stage1_address(
+    previous_raw: int, middle_raw: int, current_raw: int
+) -> int:
+    previous_phase5 = PHASE5[previous_raw]
+    return (
+        current_raw
+        | (((middle_raw >> 7) & 1) << 8)
+        | (((previous_phase5 >> 4) & 1) << 9)
+    )
+
+
+def trajectory_v2_stage2_address(previous_raw: int, token: int) -> int:
+    return PHASE5[previous_raw] | ((token & 31) << 5)
 
 
 def trajectory_v2_code(previous_raw: int, middle_raw: int, current_raw: int) -> int:
+    stage1 = trajectory_v2_stage1_address(previous_raw, middle_raw, current_raw)
+    token = TRAJECTORY_V2_TOKEN[stage1]
     return TRAJECTORY_V2_DAC[
-        trajectory_v2_address(previous_raw, middle_raw, current_raw)]
+        trajectory_v2_stage2_address(previous_raw, token)]
 
 
 def exact_adjacent_pair_code(previous_raw: int, middle_raw: int, current_raw: int) -> int:
@@ -258,7 +271,8 @@ def trajectory_metrics(data: bytes, parity: int) -> TrajectoryMetrics:
         out.trajectory_ge8 += te >= 8
         out.trajectory_ge16 += te >= 16
         out.trajectory_ge32 += te >= 32
-        conf = TRAJECTORY_V2_CONFIDENCE[trajectory_v2_address(p, m, c)]
+        conf = TRAJECTORY_V2_CONFIDENCE[
+            trajectory_v2_stage1_address(p, m, c)]
         out.confidence_sum += conf
         out.confidence_lt64 += conf < 64
     return out
@@ -502,6 +516,7 @@ def synthetic_self_test() -> None:
     assert trajectory_hard < golden_hard, (trajectory_hard, golden_hard)
     assert trajectory_abs < golden_abs, (trajectory_abs, golden_abs)
     assert len(TRAJECTORY_V2_DAC) == 1024
+    assert len(TRAJECTORY_V2_TOKEN) == 1024
     assert len(TRAJECTORY_V2_CONFIDENCE) == 1024
 
     print(
