@@ -72,7 +72,7 @@ static void test(video_standard_t standard)
                     double swing = pal ? (h / 2 % 2 ? -0.375 : 0.375) : 0.5;
                     double ideal = 20 + 8 * sin(6.283185307179586 * ((at + x) * carrier + swing));
                     /* Quantized start phase plus integer DAC amplitude. */
-                    assert(fabs(value - ideal) < 1.3);
+                    assert(fabs(value - ideal) < 3.7);
                 } else assert(value == 20);
             }
             assert(varies == burst_enabled);

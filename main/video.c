@@ -47,6 +47,7 @@
 #include "esp_attr.h"
 #include "esp_cache.h"
 #include "esp_log.h"
+#include "nvs.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -85,7 +86,7 @@ enum {
     LAG_EVT_BS_EOF_OVERLOAD  = 1u << 5,
 };
 
-#define LAG_EVENT_LOG_SIZE 16u
+#define LAG_EVENT_LOG_SIZE 12u
 #define GDMA_IN_FAULT_MASK  0xfcu /* ERR_EOF, DSCR_ERR/EMPTY, FIFO OVF/UDF, AHB response */
 #define GDMA_OUT_FAULT_MASK 0x7cu /* DSCR_ERR, TOTAL_EOF, FIFO OVF/UDF, AHB response */
 
@@ -313,8 +314,7 @@ static esp_err_t replace_tx_unit(video_output_mode_t mode)
 
 static esp_err_t prepare_tx(void)
 {
-    /* Safe boot default remains the proven 6-bit@40 path. */
-    esp_err_t err = create_tx_unit(VIDEO_OUTPUT_6BIT_40);
+    esp_err_t err = create_tx_unit(s_output_mode);
     if (err != ESP_OK) return err;
 
     const bitscrambler_config_t bs_cfg = {
@@ -745,12 +745,102 @@ static volatile uint8_t s_current_gain = 52u;   /* Physical RF gain applied */
 static volatile uint8_t s_shadow_gain = 52u;    /* Controller recommended gain */
 static volatile int s_last_p_median = 25;
 static volatile int s_last_q_phase = 0;
+static volatile int s_signal_strength = 0;
 static volatile int s_last_n_clip = 0;
 static volatile int s_last_n_origin = 0;
 static volatile int s_last_clip_permille = 0;
 static volatile int s_last_origin_permille = 0;
 static volatile uint32_t s_gain_transition_count = 0;
 static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in kHz */
+static volatile bool s_channel_scan_active;
+static volatile unsigned s_channel_scan_progress;
+
+#define SETTINGS_VERSION 1u
+#define SETTINGS_NAMESPACE "c5vrx"
+#define SETTINGS_KEY "settings"
+
+typedef struct {
+    uint8_t version;
+    uint8_t channel_index;
+    uint8_t rf_bw_mode;
+    uint8_t afc_mode;
+    uint8_t output_mode;
+    uint8_t video_std_mode;
+    uint8_t agc_mode;
+    uint8_t manual_gain;
+    int16_t frequency_offset_khz;
+    uint8_t menu_boot_btn_enabled;
+    uint8_t reserved[3];
+} persisted_settings_t;
+
+static int signal_strength_score(const control_metrics_t *m, uint8_t gain)
+{
+    if (m->q_phase < 18 || m->origin_permille > 850) return 0;
+    int coherence = (m->q_phase - 18) * 100 / 62;
+    int power = (m->p_median - 6) * 100 / 28;
+    int gain_headroom = (62 - (int)gain) * 100 / 50;
+    if (coherence < 0) coherence = 0; else if (coherence > 100) coherence = 100;
+    if (power < 0) power = 0; else if (power > 100) power = 100;
+    if (gain_headroom < 0) gain_headroom = 0; else if (gain_headroom > 100) gain_headroom = 100;
+    return (coherence * 2 + power + gain_headroom) / 4;
+}
+
+static void settings_save(void)
+{
+    persisted_settings_t settings = {
+        .version = SETTINGS_VERSION,
+        .channel_index = (uint8_t)rf_get_channel_index(),
+        .rf_bw_mode = (uint8_t)s_rf_bw_mode,
+        .afc_mode = (uint8_t)s_afc_mode,
+        .output_mode = (uint8_t)s_output_mode,
+        .video_std_mode = (uint8_t)s_video_std_mode,
+        .agc_mode = (uint8_t)s_agc_mode,
+        .manual_gain = s_current_gain,
+        .frequency_offset_khz = (int16_t)rf_get_frequency_offset_khz(),
+        .menu_boot_btn_enabled = s_menu_boot_btn_enabled ? 1u : 0u,
+    };
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(handle, SETTINGS_KEY, &settings, sizeof(settings));
+        if (err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    if (err != ESP_OK) ESP_LOGW(TAG, "Could not save settings: %s", esp_err_to_name(err));
+}
+
+static void settings_load(void)
+{
+    persisted_settings_t settings = {0};
+    size_t length = sizeof(settings);
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_OK) {
+        err = nvs_get_blob(handle, SETTINGS_KEY, &settings, &length);
+        nvs_close(handle);
+    }
+    if (err != ESP_OK || length != sizeof(settings) || settings.version != SETTINGS_VERSION) return;
+
+    if (settings.channel_index < rf_get_channel_count()) (void)rf_set_channel(settings.channel_index);
+    if (settings.rf_bw_mode <= RF_BW_MODE_AUTO) s_rf_bw_mode = (rf_bw_mode_t)settings.rf_bw_mode;
+    apply_rf_bandwidth(s_rf_bw_mode != RF_BW_MODE_BW20);
+    if (settings.afc_mode <= AFC_MODE_OFF) s_afc_mode = (afc_mode_t)settings.afc_mode;
+    if (settings.output_mode <= VIDEO_OUTPUT_4BIT_80) s_output_mode = (video_output_mode_t)settings.output_mode;
+    if (settings.video_std_mode <= VIDEO_STD_MODE_PAL) s_video_std_mode = (video_standard_mode_t)settings.video_std_mode;
+    if (s_video_std_mode == VIDEO_STD_MODE_PAL) s_video_std = VIDEO_STD_PAL;
+    else if (s_video_std_mode == VIDEO_STD_MODE_NTSC) s_video_std = VIDEO_STD_NTSC;
+    if (settings.agc_mode <= ANALOG_AGC_MANUAL) s_agc_mode = (analog_agc_mode_t)settings.agc_mode;
+    if (s_agc_mode == ANALOG_AGC_MANUAL && settings.manual_gain >= 2u && settings.manual_gain <= 62u) {
+        s_current_gain = settings.manual_gain;
+        s_shadow_gain = settings.manual_gain;
+        rf_set_rx_gain(true, s_current_gain);
+    }
+    s_menu_boot_btn_enabled = settings.menu_boot_btn_enabled != 0;
+    if (s_afc_mode == AFC_MODE_HOLD) rf_set_frequency_offset_khz(settings.frequency_offset_khz);
+    else if (s_afc_mode == AFC_MODE_OFF) rf_set_frequency_offset_khz(0);
+    ESP_LOGI(TAG, "Restored settings: channel=%u BW=%s output=%s",
+             settings.channel_index, rf_bw_mode_name(), output_mode_name());
+}
 
 static void record_transport_event(uint32_t flags)
 {
@@ -836,7 +926,7 @@ static void poll_transport_faults(void)
  *
  * SRAM-safe production raster: 384x56 logical pixels. One logical X pixel
  * maps to three 40 MHz DAC samples (75 ns), and every logical Y row is emitted
- * on two scanlines. This preserves the modern HDZero-like layout without the
+ * on three scanlines. This makes the on-screen controls 50% taller without the
  * oversized 400x72x4 backing store that exceeded ESP32-C5 DRAM.
  */
 enum {
@@ -867,7 +957,9 @@ static const char *const s_menu_nav[6] = {
 static inline void menu_ui_pixel(int x, int y, uint8_t code)
 {
     if ((unsigned)x >= MENU_UI_WIDTH || (unsigned)y >= MENU_UI_LINES) return;
-    memset(&s_menu_raster.ui[y][x * MENU_UI_X_REPEAT], code, MENU_UI_X_REPEAT);
+    unsigned x0 = (unsigned)x * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
+    unsigned x1 = (unsigned)(x + 1) * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
+    memset(&s_menu_raster.ui[y][x0], code, x1 - x0);
 }
 
 static void menu_ui_rect(int x, int y, int w, int h, uint8_t code)
@@ -879,8 +971,9 @@ static void menu_ui_rect(int x, int y, int w, int h, uint8_t code)
     int y1 = y + h > (int)MENU_UI_LINES ? (int)MENU_UI_LINES : y + h;
     if (x1 <= x0 || y1 <= y0) return;
     for (int yy = y0; yy < y1; ++yy) {
-        memset(&s_menu_raster.ui[yy][x0 * MENU_UI_X_REPEAT],
-               code, (size_t)(x1 - x0) * MENU_UI_X_REPEAT);
+        unsigned sx0 = (unsigned)x0 * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
+        unsigned sx1 = (unsigned)x1 * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
+        memset(&s_menu_raster.ui[yy][sx0], code, sx1 - sx0);
     }
 }
 
@@ -1048,7 +1141,7 @@ static void menu_draw_shell(void)
     snprintf(buf, sizeof(buf), "G%u", s_current_gain);
     menu_ui_text(buf, 208, 0, UI_WHITE);
     menu_ui_text(agc_state_name(), 244, 0, UI_MUTED);
-    menu_ui_signal_bars(320, 0, s_last_q_phase);
+    menu_ui_signal_bars(320, 0, s_signal_strength);
     menu_ui_text(s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC", 344, 0, UI_WHITE);
 
     menu_ui_rect(0, 8, 92, MENU_UI_LINES - 8, UI_ROOT);
@@ -1095,7 +1188,7 @@ static void menu_draw_channel_page(void)
 {
     const fpv_channel_t *ch = rf_get_current_channel();
     char buf[24];
-    menu_draw_page_title("CHANNEL", "ANALOG 5.8G");
+    menu_draw_page_title("CHANNEL", s_channel_scan_active ? "SCANNING" : "LONG: NEXT / HOLD: SCAN");
 
     menu_ui_rect(100, 22, 108, 23, UI_PANEL_2);
     menu_ui_vline(100, 22, 23, UI_WHITE);
@@ -1109,8 +1202,10 @@ static void menu_draw_channel_page(void)
     menu_ui_text("MHZ", 304, 36, UI_MUTED);
 
     menu_ui_text("SIGNAL", 100, 47, UI_MUTED);
-    menu_ui_meter(156, 48, 100, s_last_q_phase, 100);
-    snprintf(buf, sizeof(buf), "Q%u", (unsigned)(s_last_q_phase < 0 ? 0 : s_last_q_phase));
+    menu_ui_meter(156, 48, 100,
+                  s_channel_scan_active ? (int)s_channel_scan_progress : s_signal_strength, 100);
+    snprintf(buf, sizeof(buf), s_channel_scan_active ? "%u%%" : "S%u",
+             s_channel_scan_active ? s_channel_scan_progress : (unsigned)s_signal_strength);
     menu_ui_text(buf, 264, 47, UI_WHITE);
     snprintf(buf, sizeof(buf), "G%u", s_current_gain);
     menu_ui_text_right(buf, 376, 47, UI_WHITE);
@@ -1311,6 +1406,7 @@ static void menu_cycle_standard_mode(void)
         menu_init_buffers();
         start_menu_tx();
     }
+    settings_save();
 }
 
 static void init_boot_button(void)
@@ -1325,6 +1421,55 @@ static void init_boot_button(void)
     gpio_config(&cfg);
 }
 
+static void channel_auto_search(void)
+{
+    static uint8_t scan_buf[CONTROL_SAMPLE_BYTES];
+    const size_t original_channel = rf_get_channel_index();
+    const uint8_t original_gain = s_current_gain;
+    const size_t channel_count = rf_get_channel_count();
+    size_t best_channel = original_channel;
+    int best_rank = -1;
+    int best_quality = 0;
+
+    s_channel_scan_active = true;
+    s_channel_scan_progress = 0;
+    rf_set_rx_gain(true, 52u); /* Compare every channel at the same RF gain. */
+
+    for (size_t channel = 0; channel < channel_count; ++channel) {
+        if (rf_set_channel(channel) != ESP_OK) continue;
+        vTaskDelay(pdMS_TO_TICKS(90));
+        uint8_t *src = get_completed_rx_sample_window(CONTROL_SAMPLE_BYTES);
+        sync_dma_m2c(src, CONTROL_SAMPLE_BYTES);
+        memcpy(scan_buf, src, sizeof(scan_buf));
+        control_metrics_t metrics = analyze_control_window(scan_buf, sizeof(scan_buf));
+        int quality = signal_strength_score(&metrics, 52u);
+        int rank = metrics.q_phase * 4 + metrics.p_median + quality;
+        if (metrics.q_phase >= 22 && rank > best_rank) {
+            best_rank = rank;
+            best_channel = channel;
+            best_quality = quality;
+        }
+        s_channel_scan_progress = (unsigned)((channel + 1u) * 100u / channel_count);
+        menu_render_menu();
+    }
+
+    if (best_rank < 0) best_channel = original_channel;
+    (void)rf_set_channel(best_channel);
+    rf_set_rx_gain(true, original_gain);
+    s_signal_strength = best_rank < 0 ? 0 : best_quality;
+    s_channel_scan_active = false;
+    s_channel_scan_progress = 0;
+    s_cfo_khz = 0;
+    s_agc_state = AGC_STATE_SEARCH;
+    video_standard_detector_reset();
+    settings_save();
+    menu_render_menu();
+    printf("[AUTO SEARCH] %s -> %s (%u MHz), signal=%d\n",
+           best_rank < 0 ? "No carrier; restored" : "Selected",
+           rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz,
+           s_signal_strength);
+}
+
 static void handle_button_short_click(void)
 {
     if (s_menu_active) {
@@ -1337,6 +1482,7 @@ static void handle_button_short_click(void)
         s_cfo_khz = 0;
         s_agc_state = AGC_STATE_SEARCH;
         video_standard_detector_reset();
+        settings_save();
         const fpv_channel_t *ch = rf_get_current_channel();
         printf("[BTN: SHORT] Channel switched to %s (%u MHz) in %s\n",
                ch->name, ch->freq_mhz, rf_get_band_name(rf_get_current_band()));
@@ -1365,6 +1511,7 @@ static void handle_button_long_click(void)
             s_cfo_khz = 0;
             s_agc_state = AGC_STATE_SEARCH;
             video_standard_detector_reset();
+            settings_save();
             printf("[MENU: BAND] Switched to %s\n", rf_get_band_name(rf_get_current_band()));
             break;
         case 1: /* CHANNEL */
@@ -1372,11 +1519,13 @@ static void handle_button_long_click(void)
             s_cfo_khz = 0;
             s_agc_state = AGC_STATE_SEARCH;
             video_standard_detector_reset();
+            settings_save();
             printf("[MENU: CHANNEL] Switched to %s (%u MHz)\n",
                    rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz);
             break;
         case 2: /* RF BANDWIDTH */
             cycle_rf_bandwidth_mode();
+            settings_save();
             printf("[MENU: RF BW] Mode -> %s (active %s)\n",
                    rf_bw_mode_name(), s_current_bw40 ? "BW40" : "BW20");
             break;
@@ -1390,14 +1539,17 @@ static void handle_button_long_click(void)
                 s_afc_mode = AFC_MODE_AUTO;
             }
             printf("[MENU: AFC] Mode -> %d\n", s_afc_mode);
+            settings_save();
             break;
         case 4: /* VIDEO OUTPUT */
             s_output_mode = s_output_mode == VIDEO_OUTPUT_6BIT_40 ?
                             VIDEO_OUTPUT_4BIT_80 : VIDEO_OUTPUT_6BIT_40;
             printf("[MENU: OUTPUT] -> %s%s\n", output_mode_name(),
                    s_output_mode == VIDEO_OUTPUT_4BIT_80 ? " (EXPERIMENTAL)" : "");
+            settings_save();
             break;
         case 5: /* SAVE & EXIT */
+            settings_save();
             video_set_menu_mode(false);
             printf("[BTN: LONG] Menu Closed -> Live Video!\n");
             return;
@@ -1423,9 +1575,11 @@ static void analog_agc_task(void *arg)
     int learn_adjust_counter = 0;
     int search_probe_ticks = 0;
     int telemetry_ticks = 0;
+    int menu_refresh_ticks = 0;
     uint8_t target_gain = 52u;
     int btn_ticks = 0;
     bool btn_long_fired = false;
+    bool btn_scan_fired = false;
     bool was_locked = false;
     static uint8_t sample_buf[CONTROL_SAMPLE_BYTES];
 
@@ -1444,7 +1598,10 @@ static void analog_agc_task(void *arg)
                 if (MENU_RUNTIME_ENABLED) menu_cycle_standard_mode();
                 else printf("[MENU] Video-standard control unavailable while menu is disabled\n");
             } else if (command == 'O') {
-                if (MENU_RUNTIME_ENABLED) s_menu_boot_btn_enabled = !s_menu_boot_btn_enabled;
+                if (MENU_RUNTIME_ENABLED) {
+                    s_menu_boot_btn_enabled = !s_menu_boot_btn_enabled;
+                    settings_save();
+                }
                 else printf("[MENU] BOOT menu trigger is temporarily disabled\n");
             } else if (s_menu_active && (command == ' ' || command == 'n' || command == '\t'))
                 handle_button_short_click();
@@ -1455,6 +1612,7 @@ static void analog_agc_task(void *arg)
             boot_grace_ticks--;
             btn_ticks = 0;
             btn_long_fired = false;
+            btn_scan_fired = false;
         } else {
             int btn_level = gpio_get_level(BOOT_BTN_GPIO);
             if (btn_level == 0) {
@@ -1463,22 +1621,29 @@ static void analog_agc_task(void *arg)
                     btn_long_fired = true;
                     handle_button_long_click();
                 }
+                if (btn_ticks >= 40 && s_menu_active && s_menu_cursor == 1 && !btn_scan_fired) {
+                    btn_scan_fired = true;
+                    channel_auto_search();
+                    s_menu_timeout_ticks = 0;
+                }
             } else {
                 if (btn_ticks > 0) {
                     if (!btn_long_fired && btn_ticks >= 2) handle_button_short_click();
                     btn_ticks = 0;
                     btn_long_fired = false;
+                    btn_scan_fired = false;
                 }
             }
         }
 
-        if (s_menu_active) {
+        bool menu_was_active = s_menu_active;
+        if (menu_was_active) {
             s_menu_timeout_ticks++;
             if (s_menu_timeout_ticks >= 240) {
+                settings_save();
                 video_set_menu_mode(false);
                 printf("[MENU] Inactivity timeout (12s) -> Live Video\n");
             }
-            continue;
         }
 
         poll_transport_faults();
@@ -1505,6 +1670,17 @@ static void analog_agc_task(void *arg)
         s_last_n_origin = n_origin;
         s_last_clip_permille = clip_permille;
         s_last_origin_permille = origin_permille;
+        int instant_strength = signal_strength_score(&metrics, s_current_gain);
+        s_signal_strength = (s_signal_strength * 3 + instant_strength + 2) / 4;
+
+        if (menu_was_active) {
+            if (++menu_refresh_ticks >= 5) {
+                menu_refresh_ticks = 0;
+                menu_render_menu();
+            }
+            continue; /* Keep AGC/AFC frozen while the independent menu raster runs. */
+        }
+        menu_refresh_ticks = 0;
 
         /* Issue #28 classifier: if raw carrier coherence collapses within
          * 200 ms of a new gain state while no transport fault is required to
@@ -1758,6 +1934,7 @@ static void console_diag_task(void *arg)
                         rf_set_rx_gain(true, s_current_gain);
                         ++s_gain_transition_count;
                     }
+                    settings_save();
                     printf("[MANUAL GAIN] = %u (reg=0x%08lx)\n", s_current_gain, (unsigned long)rf_get_rx_gain_reg());
                 } else if (c == '-' || c == 'j') {
                     s_agc_mode = ANALOG_AGC_MANUAL;
@@ -1767,15 +1944,19 @@ static void console_diag_task(void *arg)
                         rf_set_rx_gain(true, s_current_gain);
                         ++s_gain_transition_count;
                     }
+                    settings_save();
                     printf("[MANUAL GAIN] = %u (reg=0x%08lx)\n", s_current_gain, (unsigned long)rf_get_rx_gain_reg());
                 } else if (c == 'a') {
                     s_agc_mode = ANALOG_AGC_ACTIVE;
+                    settings_save();
                     printf("[AGC MODE] -> ACTIVE (Self-Calibrating Adaptive Gain Controller ACTIVE)\n");
                 } else if (c == 's') {
                     s_agc_mode = ANALOG_AGC_SHADOW;
+                    settings_save();
                     printf("[AGC MODE] -> SHADOW (Dry-run: RF gain frozen at %u, computing recommendations)\n", s_current_gain);
                 } else if (c == 'm') {
                     s_agc_mode = ANALOG_AGC_MANUAL;
+                    settings_save();
                     printf("[AGC MODE] -> MANUAL (Fixed gain=%u)\n", s_current_gain);
                 } else if (c == 'c') {
                     rf_cycle_channel_in_band();
@@ -1783,6 +1964,7 @@ static void console_diag_task(void *arg)
                     s_cfo_khz = 0;
                     s_agc_state = AGC_STATE_SEARCH;
                     video_standard_detector_reset();
+                    settings_save();
                     printf("[CHANNEL] Switched to %s (%u MHz) in %s\n",
                            ch->name, ch->freq_mhz, rf_get_band_name(rf_get_current_band()));
                 } else if (c == 'C') {
@@ -1791,6 +1973,7 @@ static void console_diag_task(void *arg)
                     s_cfo_khz = 0;
                     s_agc_state = AGC_STATE_SEARCH;
                     video_standard_detector_reset();
+                    settings_save();
                     printf("[BAND] Switched to %s - Channel %s (%u MHz)\n",
                            rf_get_band_name(rf_get_current_band()), ch->name, ch->freq_mhz);
                 } else if (c == 'f') {
@@ -1805,20 +1988,24 @@ static void console_diag_task(void *arg)
                         s_afc_mode = AFC_MODE_AUTO;
                         printf("[AFC] -> AUTO EXPERIMENTAL (uncalibrated WBFM bias estimator)\n");
                     }
+                    settings_save();
                 } else if (c == ',' || c == '<') {
                     rf_step_frequency_offset_khz(-50);
+                    settings_save();
                     int off = rf_get_frequency_offset_khz();
                     int tot = (int)rf_get_current_channel()->freq_mhz * 1000 + off;
                     printf("[FINE TUNE] Offset = %+d kHz (Tuned: %d.%03d MHz)\n",
                            off, tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)));
                 } else if (c == '.' || c == '>') {
                     rf_step_frequency_offset_khz(+50);
+                    settings_save();
                     int off = rf_get_frequency_offset_khz();
                     int tot = (int)rf_get_current_channel()->freq_mhz * 1000 + off;
                     printf("[FINE TUNE] Offset = %+d kHz (Tuned: %d.%03d MHz)\n",
                            off, tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)));
                 } else if (c == '0') {
                     rf_set_frequency_offset_khz(0);
+                    settings_save();
                     printf("[FINE TUNE] Offset reset to +0 kHz\n");
                 } else if (c == 'e') {
                     PARL_IO.rx_clk_cfg.rx_clk_i_inv = !PARL_IO.rx_clk_cfg.rx_clk_i_inv;
@@ -1955,6 +2142,8 @@ esp_err_t video_start(void)
     /* Menu control is serialized with BOOT handling in the AGC task. */
     s_menu_commands = xQueueCreate(16, sizeof(int));
     if (!s_menu_commands) return ESP_ERR_NO_MEM;
+
+    settings_load();
 
     /* Zero the ring before starting. Flush to DMA-visible SRAM. */
     memset(s_raw_ring, 0, sizeof(s_raw_ring));

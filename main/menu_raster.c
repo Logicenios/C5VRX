@@ -45,7 +45,9 @@ bool menu_raster_emit(const menu_raster_t *r, video_standard_t standard,
     const unsigned eq = pal ? 5 : 6;
     /* Eight fields: PAL colour sequence and two NTSC colour sequences. */
     const unsigned total_halves = field_halves * 8;
-    const unsigned text_start = pal ? 90 : 70;
+    /* Keep the taller menu centered at the same vertical position as the old
+     * 112-line raster while staying clear of the vertical blanking interval. */
+    const unsigned text_start = pal ? 62 : 42;
     for (unsigned h = 0; h < total_halves;) {
         /* PAL line 1 starts with broad sync; its five pre-equalizing
          * half-lines belong to the end of the preceding field. NTSC line 1
@@ -70,7 +72,8 @@ bool menu_raster_emit(const menu_raster_t *r, video_standard_t standard,
         unsigned halves = pos + 1 < field_halves ? 2 : 1;
         length = menu_half_sample(standard, h + halves) - start;
         /* Carrier phase from absolute sample time, including at loop wrap.
-         * 32 phase bins limit burst phase quantization to 5.625 degrees. */
+         * Phase bins quantize only the burst start phase; samples within each
+         * burst retain the exact PAL/NTSC carrier frequency. */
         double cycles = pal ? (double)start * 709379.0 / 6400000.0 :
                               (double)start * 477750.0 / 5338668.0;
         cycles += pal ? ((h / 2) & 1u ? -0.375 : 0.375) : 0.5;
@@ -86,8 +89,8 @@ bool menu_raster_emit(const menu_raster_t *r, video_standard_t standard,
         if (!emit(ctx, prefix, MENU_PREFIX_BYTES)) return false;
         unsigned line = pos / 2;
         unsigned remaining = length - MENU_PREFIX_BYTES;
-        if (line >= text_start && line < text_start + 2 * MENU_UI_LINES) {
-            if (!emit(ctx, r->ui[(line - text_start) / 2], MENU_UI_BYTES)) return false;
+        if (line >= text_start && line < text_start + MENU_UI_Y_REPEAT * MENU_UI_LINES) {
+            if (!emit(ctx, r->ui[(line - text_start) / MENU_UI_Y_REPEAT], MENU_UI_BYTES)) return false;
             remaining -= MENU_UI_BYTES;
         }
         if (!emit(ctx, r->blank, remaining)) return false;
