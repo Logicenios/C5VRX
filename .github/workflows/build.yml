@@ -243,7 +243,7 @@ jobs:
             # Same-repo PR updates always also emit a push for the head branch.
             # Resolve the open PR here so synchronize events do not race the
             # push run while publishing the same mutable pr-N release.
-            pr_number="$(gh pr list               --repo "${GITHUB_REPOSITORY}"               --state open               --head "${GITHUB_REPOSITORY_OWNER}:${GITHUB_REF_NAME}"               --json number               --jq '.[0].number // empty')"
+            pr_number="$(gh pr list               --repo "${GITHUB_REPOSITORY}"               --state open               --head "${GITHUB_REF_NAME}"               --json number               --jq '.[0].number // empty')"
             pr_head_sha="${GITHUB_SHA}"
           fi
 
