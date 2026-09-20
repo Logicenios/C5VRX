@@ -4,6 +4,13 @@ Range v2 separates **RF sensitivity**, **FM threshold**, and **usable CVBS
 survival**. The goal is to stop treating every loss of picture as "not enough
 gain".
 
+Long-form engineering knowledge is preserved in:
+
+- `docs/range-v2-knowledge.md` — architecture, Fusion behavior, control theory,
+  demodulation findings, numerical references and known limitations.
+- `docs/range-v2-research-notes.md` — RF-chain research, BW/AFC/LNA/diversity
+  hypotheses, validation discipline and the next hardware test sequence.
+
 This branch is built on the PR #43 Fusion Engine. The proven 40 MS/s live
 MODEM_DIAG -> PARLIO -> BitScrambler -> DAC path stays intact unless a new
 demodulator has first passed offline and hardware throughput gates.
