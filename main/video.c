@@ -2156,6 +2156,13 @@ static void console_diag_task(void *arg)
             if (usb_serial_jtag_ll_read_rxfifo(&byte, 1) == 0) break;
             int c = byte;
             if (c != EOF && c > 0) {
+                if (s_gain_sweep.active &&
+                    c != 'g' && c != 'l' && c != 'L' && c != '\r' && c != '\n') {
+                    printf("C5VRX_GAIN_SWEEP_BUSY command=0x%02x action=ignored\n", (unsigned)c);
+                    continue;
+                }
+                if (s_gain_sweep.active && (c == '\r' || c == '\n')) continue;
+
                 if (c == 'l' || c == 'L') {
                     int64_t now = esp_timer_get_time();
                     s_last_user_lag_mark_us = now;
@@ -2363,6 +2370,8 @@ static void console_diag_task(void *arg)
                            MENU_RUNTIME_ENABLED ?
                            (s_menu_active ? "OPEN" : "CLOSED") :
                            "TEMPORARILY DISABLED (live video only)");
+                    printf(" Lab Status:                 quiet=%u gain_sweep=%u\n",
+                           s_lab_quiet ? 1u : 0u, s_gain_sweep.active ? 1u : 0u);
                     printf(" Keys:\n");
                     printf("  'a'/'s'/'m': AGC mode (active / shadow / manual)\n");
                     printf("  'b':         Enter quiet MANUAL/BW40/AFC-off baseline + reset counters\n");
