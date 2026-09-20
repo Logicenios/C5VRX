@@ -251,8 +251,16 @@ check("fusion profile is the experimental default and other RX profiles remain e
       "RX_PROFILE_AUTO_EXP" in all_c and
       "RX_PROFILE_HW_AGC_EXP" in all_c and
       "RX_PROFILE_FUSION_EXP" in all_c and
+      "RX_PROFILE_RANGE_V2_EXP" in all_c and
       "s_rx_profile = RX_PROFILE_FUSION_EXP" in all_c and
       "s_rf_bw_mode = RF_BW_MODE_BW40" in all_c)
+check("Range v2 combines Fusion with acquisition-only BW/AFC",
+      "RX_PROFILE_RANGE_V2_EXP" in all_c and
+      'return "RANGE V2"' in all_c and
+      "s_rf_bw_mode = RF_BW_MODE_AUTO" in all_c and
+      "s_last_fusion_risk >= 450" in all_c and
+      "goto profile_post_gain" in all_c)
+
 check("RF menu preserves BW control and adds two-second profile selector",
       "LONG:BW  2S:PROFILE" in all_c and
       "btn_ticks >= 40" in all_c and
