@@ -90,30 +90,36 @@ Same-repository PR firmware must work for both ordinary PRs targeting `main`
 and stacked development PRs. Production CI therefore listens for PRs targeting
 `main`, `feat/**`, `fix/**`, and `codex/**`.
 
-Publication deliberately has a **single owner per update**:
+The **pull_request workflow is the sole owner** of the mutable PR firmware
+channel. Do not add a second push-based publisher: a normal head commit already
+emits `pull_request:synchronize`, and two publishers racing to delete/recreate
+the same `pr-N` release is fragile.
+
+For every same-repository PR `opened`, `synchronize`, or `reopened` event:
 
 1. CI validates the architecture/DSP contract.
-2. CI builds the firmware and creates the normal release artifacts, including
-   `c5vrx3.bin`, `c5vrx3_merged.bin`, bootloader, partition table,
+2. CI builds the exact PR head and creates the normal firmware artifacts,
+   including `c5vrx3.bin`, `c5vrx3_merged.bin`, bootloader, partition table,
    `flasher_args.json`, and checksums.
-3. For a normal commit pushed to an already-open same-repository PR, the
-   **push run** publishes the mutable PR channel. It resolves the open PR from
-   the head branch with `gh pr list --head "${GITHUB_REF_NAME}"`.
-4. The simultaneous `pull_request:synchronize` run may validate/build, but it
-   must **not also recreate the same release**; that caused release races.
-5. For `pull_request:opened` or `reopened`, where no extra head push is
-   required, the PR run may publish the initial channel directly.
-6. `publish-pr-build` creates a GitHub **prerelease** tagged
-   `pr-<PR_NUMBER>` and targets it at the exact tested PR head SHA.
-7. Every later PR head commit recreates that mutable `pr-<number>` prerelease
-   so its assets always correspond to the latest tested head.
-8. When the PR closes or merges, `cleanup-pr-build` deletes the temporary
+3. `publish-pr-build` recreates a GitHub **prerelease** tagged
+   `pr-<PR_NUMBER>`, targeted at
+   `github.event.pull_request.head.sha`.
+4. Every later PR commit therefore replaces that mutable prerelease with assets
+   from the newly tested head.
+5. When the PR closes or merges, `cleanup-pr-build` deletes the temporary
    prerelease and tag.
 
-For same-repository branches, keep the `gh pr list --head` argument as the
-plain branch ref (for example `feat/trajectory-v2`). In GitHub Actions,
-`--head owner:branch` failed to resolve this stacked PR even though the REST
-API accepted that notation.
+The important stacked-PR rule is the trigger filter itself:
+
+```yaml
+pull_request:
+  branches: [main, "feat/**", "fix/**", "codex/**"]
+  types: [opened, synchronize, reopened, closed]
+```
+
+A previous `branches: [main]` filter meant PR #46 (targeting
+`feat/range-v2`) built on branch pushes but never received a PR publication
+event, so no `pr-46` prerelease could exist in the web flasher.
 
 Fork PRs must not receive write-capable release publication. Keep the
 same-repository guard on `publish-pr-build`.
