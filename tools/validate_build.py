@@ -159,6 +159,20 @@ check("fixed-gain BW40/BW20 A/B probe present",
 check("Q4 IQ-centering metrics present",
       "dc_i_x100" in all_c and "dc_q_x100" in all_c and
       "iq_skew_permille" in all_c and "iq_cross_permille" in all_c)
+check("shadow exact-adjacent endpoint winding observer present",
+      "demod_phase5_endpoint_loses_winding" in all_c and
+      "winding_permille" in all_c and
+      "strong_winding_permille" in all_c and
+      "DEMOD_STRONG_POWER_MIN" in read(MAIN / "demod_quality.h"))
+check("semantic CVBS sync score requires pulse width plus line period",
+      "video_semantic_observe" in all_c and
+      "s_last_sync_quality" in all_c and
+      "fresh_sync = sync_quality >= 60" in all_c and
+      "width_score" in all_c and "best_period_score" in all_c)
+check("range trials penalize endpoint winding instead of amplitude-only scoring",
+      "demod_winding_penalty" in read(MAIN / "range_control.h") and
+      "DEMOD_STATIC_HEAVY_WINDING_PM" in read(MAIN / "demod_quality.h") and
+      "sync_quality_avg >= 60" in read(MAIN / "range_control.h"))
 check("lag correlation covers any tracked PHY write",
       "near_phy_event_count" in all_c and
       "s_last_phy_write_us" in all_c and
