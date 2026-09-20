@@ -33,6 +33,8 @@
 #include "menu_raster.h"
 #include "range_control.h"
 #include "demod_quality.h"
+#include "fusion_receiver.h"
+#include "fusion_optimizer.h"
 #include "hal/parlio_ll.h"
 #include "hal/usb_serial_jtag_ll.h"
 
@@ -218,6 +220,7 @@ typedef enum {
     RX_PROFILE_RECOVERY_EXP,
     RX_PROFILE_AUTO_EXP,
     RX_PROFILE_HW_AGC_EXP,
+    RX_PROFILE_FUSION_EXP,
     RX_PROFILE_COUNT,
 } rx_profile_t;
 
@@ -225,7 +228,7 @@ static volatile rf_bw_mode_t s_rf_bw_mode = RF_BW_MODE_BW40;
 static volatile bool s_current_bw40 = true;
 static volatile video_output_mode_t s_output_mode = VIDEO_OUTPUT_6BIT_40;
 static video_output_mode_t s_tx_unit_mode = VIDEO_OUTPUT_6BIT_40;
-static volatile rx_profile_t s_rx_profile = RX_PROFILE_RANGE_EXP;
+static volatile rx_profile_t s_rx_profile = RX_PROFILE_FUSION_EXP;
 static volatile uint32_t s_profile_generation;
 static volatile bool s_profile_fft_forced;
 static volatile bool s_fft_q4_effect_known;
@@ -720,6 +723,7 @@ typedef struct {
     int strong_winding_events;
     int strong_winding_triplets;
     int strong_winding_permille;
+    fusion_shadow_metrics_t fusion_shadow;
 } control_metrics_t;
 
 static control_metrics_t analyze_control_window(const uint8_t *sample, size_t bytes,
@@ -731,6 +735,8 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
     int8_t prev_i = 0, prev_q = 0;
     uint8_t prev_phase = 0, prev2_phase = 0;
     int prev_power = 0, prev2_power = 0;
+    fusion_shadow_t fusion_shadow;
+    fusion_shadow_reset(&fusion_shadow);
 
     for (size_t i = 0; i < bytes; ++i) {
         uint8_t byte = sample[i];
@@ -749,6 +755,7 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
         int p = i2 + q2;
         const int raw_power = p;
         const uint8_t phase = s_phase5_state_lut[byte];
+        fusion_shadow_push(&fusion_shadow, phase, raw_power);
         if (p <= 4) ++m.n_origin;
         if (p > 128) p = 128;
         ++hist[p];
@@ -823,6 +830,7 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
         m.iq_skew_permille = (skew * 1000) / iq_power;
         m.iq_cross_permille = (cross * 2000) / iq_power;
     }
+    m.fusion_shadow = fusion_shadow_finish(&fusion_shadow);
     return m;
 }
 
@@ -873,6 +881,7 @@ static const char *rx_profile_name(void)
     case RX_PROFILE_RECOVERY_EXP: return "RECOVERY";
     case RX_PROFILE_AUTO_EXP:     return "AUTO EXP";
     case RX_PROFILE_HW_AGC_EXP:   return "HW AGC EXP";
+    case RX_PROFILE_FUSION_EXP:   return "FUSION EXP";
     default:                      return "BALANCED";
     }
 }
@@ -883,6 +892,7 @@ static uint8_t profile_gain_min(void)
     case RX_PROFILE_RANGE_EXP:   return 2u; /* Allow recovery from a nearby strong VTX. */
     case RX_PROFILE_BLOCKER_EXP: return 8u;
     case RX_PROFILE_RECOVERY_EXP:return 20u;
+    case RX_PROFILE_FUSION_EXP:  return 34u;
     default:                     return 2u;
     }
 }
@@ -979,6 +989,14 @@ static volatile int s_last_iq_skew_permille = 0;
 static volatile int s_last_iq_cross_permille = 0;
 static volatile int s_last_winding_permille = 0;
 static volatile int s_last_strong_winding_permille = 0;
+static volatile int s_last_fusion_quality = 0;
+static volatile int s_last_fusion_confidence = 0;
+static volatile int s_last_fusion_context = FUSION_CONTEXT_NO_CARRIER;
+static volatile int s_last_fusion_low_confidence_pm = 0;
+static volatile int s_last_fusion_lag2_pm = 0;
+static volatile int s_last_fusion_lag4_pm = 0;
+static volatile int s_last_fusion_consensus_pm = 0;
+static volatile int s_last_fusion_slope_x100 = 0;
 static volatile uint32_t s_gain_transition_count = 0;
 static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in kHz */
 static volatile bool s_channel_scan_active;
@@ -1010,7 +1028,7 @@ static volatile int8_t s_lab_fft_value;
 
 static const int8_t s_lab_fft_values[] = {16, 24, 32, 40};
 
-#define SETTINGS_VERSION 2u
+#define SETTINGS_VERSION 3u
 #define SETTINGS_NAMESPACE "c5vrx"
 #define SETTINGS_KEY "settings"
 
@@ -1111,7 +1129,7 @@ static void settings_load(void)
         nvs_close(handle);
     }
     if (err != ESP_OK || length != sizeof(settings) || settings.version != SETTINGS_VERSION) {
-        s_rx_profile = RX_PROFILE_RANGE_EXP;
+        s_rx_profile = RX_PROFILE_FUSION_EXP;
         s_rf_bw_mode = RF_BW_MODE_BW40;
         s_afc_mode = AFC_MODE_OFF;
         s_agc_mode = ANALOG_AGC_ACTIVE;
@@ -1134,9 +1152,10 @@ static void settings_load(void)
     } else {
         s_rx_profile = RX_PROFILE_RANGE_EXP;
     }
-    if (s_rx_profile == RX_PROFILE_RANGE_EXP) {
-        /* RANGE has one deterministic RF shape across reboot: the proven
-         * full-video filter, with no acquisition-time filter or AFC writes. */
+    if (s_rx_profile == RX_PROFILE_RANGE_EXP ||
+        s_rx_profile == RX_PROFILE_FUSION_EXP) {
+        /* RANGE/FUSION have one deterministic RF shape across reboot: the
+         * proven full-video filter, with no acquisition-time filter or AFC writes. */
         s_rf_bw_mode = RF_BW_MODE_BW40;
         s_afc_mode = AFC_MODE_OFF;
         apply_rf_bandwidth(true);
@@ -1152,6 +1171,7 @@ static void settings_load(void)
         case RX_PROFILE_BLOCKER_EXP:  s_current_gain = 36u; break;
         case RX_PROFILE_RECOVERY_EXP: s_current_gain = 52u; break;
         case RX_PROFILE_AUTO_EXP:     s_current_gain = 52u; break;
+        case RX_PROFILE_FUSION_EXP:   s_current_gain = 62u; break;
         default:                      s_current_gain = 52u; break;
         }
         s_current_gain = profile_gain_clamp(s_current_gain);
@@ -1307,6 +1327,8 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            "nf_valid=%u nf_dbm=%d rssi_valid=%u rssi_dbm=%d "
            "dc_i_x100=%d dc_q_x100=%d iq_skew_pm=%d iq_cross_pm=%d "
            "winding_pm=%d strong_winding_pm=%d sync_q=%d sync_width=%u "
+           "fusion_ctx=%d fusion_q=%d fusion_conf=%d fusion_lowiq_pm=%d "
+           "fusion_lag2_pm=%d fusion_lag4_pm=%d fusion_consensus_pm=%d fusion_slope_x100=%d "
            "fft_forced=%u fft=%d filter_mode=%u adc_sel=%u filter_reg=0x%08lx "
            "adc_reg=0x%08lx source_mux=0x%08lx "
            "tx_empty=%lu rx_ovf=%lu tx_eof=%lu gdma_in=%lu gdma_out=%lu "
@@ -1324,6 +1346,9 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            s_last_iq_skew_permille, s_last_iq_cross_permille,
            s_last_winding_permille, s_last_strong_winding_permille,
            s_last_sync_quality, (unsigned)s_last_sync_width_20m,
+           s_last_fusion_context, s_last_fusion_quality, s_last_fusion_confidence,
+           s_last_fusion_low_confidence_pm, s_last_fusion_lag2_pm,
+           s_last_fusion_lag4_pm, s_last_fusion_consensus_pm, s_last_fusion_slope_x100,
            s_lab_fft_forced ? 1u : 0u, (int)s_lab_fft_value,
            (unsigned)phy.rx_filter_mode, (unsigned)phy.adc_rate_sel,
            (unsigned long)phy.rx_filter_reg, (unsigned long)phy.adc_rate_reg,
@@ -1741,6 +1766,15 @@ static void apply_rx_profile(rx_profile_t profile)
             rf_set_fft_scale_force(true, s_fft_best_value);
             s_profile_fft_forced = true;
         }
+        break;
+
+    case RX_PROFILE_FUSION_EXP:
+        s_agc_mode = ANALOG_AGC_ACTIVE;
+        s_rf_bw_mode = RF_BW_MODE_BW40;
+        apply_rf_bandwidth(true);
+        s_afc_mode = AFC_MODE_OFF;
+        if (rf_get_frequency_offset_khz() != 0) apply_frequency_offset_khz_tracked(0);
+        apply_rx_gain_tracked(62u);
         break;
 
     case RX_PROFILE_HW_AGC_EXP:
@@ -2340,9 +2374,14 @@ static void channel_auto_search(void)
                                    sizeof(s_control_sample_buf),
                                    scan_ring_offset);
         int quality = signal_strength_score(&metrics, 52u);
-        int rank = metrics.q_phase * 4 + metrics.p_median + quality -
-                   demod_winding_penalty(metrics.winding_permille);
-        if (metrics.q_phase >= 22 && rank > best_rank) {
+        fusion_observation_t scan_fusion = fusion_make_observation(
+            metrics.p_median, metrics.q_phase, metrics.clip_permille,
+            metrics.origin_permille, metrics.winding_permille,
+            metrics.strong_winding_permille, metrics.iq_skew_permille,
+            metrics.iq_cross_permille, 0, metrics.fusion_shadow);
+        int rank = scan_fusion.quality + quality * 2;
+        if (scan_fusion.context != FUSION_CONTEXT_NO_CARRIER &&
+            metrics.q_phase >= 22 && rank > best_rank) {
             best_rank = rank;
             best_channel = channel;
             best_quality = quality;
@@ -2488,6 +2527,8 @@ static void analog_agc_task(void *arg)
     bool was_locked = false;
     range_control_t range_controller;
     range_control_reset(&range_controller, s_current_gain);
+    fusion_optimizer_t fusion_optimizer;
+    fusion_optimizer_reset(&fusion_optimizer, s_current_gain);
     uint32_t receive_generation = s_receive_generation;
     int boot_grace_ticks = 20;
 
@@ -2573,6 +2614,7 @@ static void analog_agc_task(void *arg)
             range_probe_index = 0;
             sync_age_ticks = 40;
             learn_timeout_ticks = 0;
+            fusion_optimizer_reset(&fusion_optimizer, s_current_gain);
         }
 
         if (menu_was_active) {
@@ -2683,6 +2725,29 @@ static void analog_agc_task(void *arg)
         else if (sync_age_ticks < 100) ++sync_age_ticks;
         bool recent_sync = sync_age_ticks < 20;
 
+        fusion_observation_t fusion_obs = fusion_make_observation(
+            p_median, q_phase, clip_permille, origin_permille,
+            metrics.winding_permille, metrics.strong_winding_permille,
+            metrics.iq_skew_permille, metrics.iq_cross_permille,
+            sync_quality, metrics.fusion_shadow);
+        s_last_fusion_quality = fusion_obs.quality;
+        s_last_fusion_confidence = fusion_obs.confidence;
+        s_last_fusion_context = (int)fusion_obs.context;
+        s_last_fusion_low_confidence_pm = metrics.fusion_shadow.low_confidence_permille;
+        s_last_fusion_lag2_pm = metrics.fusion_shadow.lag2_disagreement_permille;
+        s_last_fusion_lag4_pm = metrics.fusion_shadow.lag4_disagreement_permille;
+        s_last_fusion_consensus_pm = metrics.fusion_shadow.consensus_outlier_permille;
+        s_last_fusion_slope_x100 = metrics.fusion_shadow.slope_residual_x100;
+
+        if (s_rx_profile == RX_PROFILE_FUSION_EXP && s_agc_mode == ANALOG_AGC_ACTIVE) {
+            target_gain = fusion_optimizer_tick(&fusion_optimizer, &fusion_obs);
+            s_shadow_gain = target_gain;
+            s_agc_state = fusion_obs.context == FUSION_CONTEXT_CLEAN &&
+                          fusion_obs.quality >= 700 ? AGC_STATE_TRACK : AGC_STATE_LEARN;
+            if (target_gain != s_current_gain) apply_rx_gain_tracked(target_gain);
+            settle_ticks = 0;
+            goto control_tail;
+        }
 
         if (s_rx_profile == RX_PROFILE_HW_AGC_EXP && rf_get_experimental_hw_agc()) {
             /* Vendor AGC owns gain only in this explicitly experimental mode.
@@ -3214,6 +3279,13 @@ static void console_diag_task(void *arg)
                            s_last_p_median, s_last_q_phase,
                            s_last_clip_permille / 10, s_last_clip_permille % 10,
                            s_last_origin_permille / 10, s_last_origin_permille % 10);
+                    printf(" IQ Fusion:                  ctx=%s quality=%d confidence=%d lowIQ=%dpm lag2=%dpm lag4=%dpm consensus=%dpm slope=%d.%02d\n",
+                           fusion_context_name((fusion_context_t)s_last_fusion_context),
+                           s_last_fusion_quality, s_last_fusion_confidence,
+                           s_last_fusion_low_confidence_pm, s_last_fusion_lag2_pm,
+                           s_last_fusion_lag4_pm, s_last_fusion_consensus_pm,
+                           s_last_fusion_slope_x100 / 100,
+                           fusion_abs(s_last_fusion_slope_x100 % 100));
                     printf(" IQ Frontend Metrics:        DC I=%+.2f Q=%+.2f, skew=%d.%d%% cross=%d.%d%%\n",
                            (double)s_last_dc_i_x100 / 100.0, (double)s_last_dc_q_x100 / 100.0,
                            s_last_iq_skew_permille / 10, s_last_iq_skew_permille % 10,

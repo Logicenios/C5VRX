@@ -1,0 +1,65 @@
+#include "fusion_receiver.h"
+#include "fusion_optimizer.h"
+#include <assert.h>
+#include <stdio.h>
+
+static fusion_observation_t make_obs(fusion_context_t wanted)
+{
+    fusion_shadow_metrics_t shadow = {0};
+    switch (wanted) {
+    case FUSION_CONTEXT_NO_CARRIER:
+        return fusion_make_observation(4, 8, 0, 850, 300, 0, 40, 30, 0, shadow);
+    case FUSION_CONTEXT_WEAK:
+        return fusion_make_observation(10, 38, 0, 280, 120, 20, 40, 30, 20, shadow);
+    case FUSION_CONTEXT_BLOCKER:
+        return fusion_make_observation(34, 28, 0, 80, 260, 80, 40, 30, 20, shadow);
+    case FUSION_CONTEXT_OVERLOAD:
+        return fusion_make_observation(50, 65, 100, 20, 30, 10, 40, 30, 90, shadow);
+    case FUSION_CONTEXT_CLEAN:
+    default:
+        return fusion_make_observation(24, 78, 0, 20, 50, 10, 20, 20, 95, shadow);
+    }
+}
+
+int main(void)
+{
+    assert(fusion_robust_delta3(2, 3, 15) == 3);
+
+    fusion_shadow_t s;
+    fusion_shadow_reset(&s);
+    fusion_shadow_push(&s, 0, 80);
+    fusion_shadow_push(&s, 10, 80);
+    fusion_shadow_push(&s, 20, 80);
+    fusion_shadow_metrics_t m = fusion_shadow_finish(&s);
+    assert(m.lag2_disagreement_permille > 0);
+    assert(m.low_confidence_permille == 0);
+
+    fusion_shadow_reset(&s);
+    fusion_shadow_push(&s, 0, 2);
+    fusion_shadow_push(&s, 1, 2);
+    m = fusion_shadow_finish(&s);
+    assert(m.low_confidence_permille == 1000);
+
+    fusion_observation_t clean = make_obs(FUSION_CONTEXT_CLEAN);
+    fusion_observation_t weak = make_obs(FUSION_CONTEXT_WEAK);
+    fusion_observation_t no_carrier = make_obs(FUSION_CONTEXT_NO_CARRIER);
+    assert(clean.context == FUSION_CONTEXT_CLEAN);
+    assert(weak.context == FUSION_CONTEXT_WEAK);
+    assert(no_carrier.context == FUSION_CONTEXT_NO_CARRIER);
+    assert(clean.quality > weak.quality);
+
+    fusion_optimizer_t opt;
+    fusion_optimizer_reset(&opt, 50);
+    for (unsigned i = 0; i < 30; ++i) fusion_optimizer_tick(&opt, &no_carrier);
+    assert(fusion_optimizer_gain(&opt) == 62);
+
+    fusion_optimizer_reset(&opt, 54);
+    for (unsigned i = 0; i < 200; ++i) assert(fusion_optimizer_tick(&opt, &clean) == 54);
+
+    fusion_optimizer_reset(&opt, 62);
+    fusion_observation_t overload = make_obs(FUSION_CONTEXT_OVERLOAD);
+    assert(fusion_optimizer_tick(&opt, &overload) <= 54);
+
+    puts("Fusion receiver: multi-estimator shadow IQ + safe contextual learner passed");
+    return 0;
+}

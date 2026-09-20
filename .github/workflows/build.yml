@@ -149,6 +149,8 @@ jobs:
           /tmp/test_demod_quality
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_range_control.c -o /tmp/test_range_control
           /tmp/test_range_control
+          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_fusion_receiver.c -o /tmp/test_fusion_receiver
+          /tmp/test_fusion_receiver
 
   build:
     name: Build Production Firmware (ESP32-C5)
