@@ -4,7 +4,7 @@
 #include "fusion_receiver.h"
 #include "fusion_temporal.h"
 
-#define FUSION_OPT_STATE_COUNT 8u
+#define FUSION_OPT_STATE_COUNT 13u
 #define FUSION_OPT_SETTLE_TICKS 10u
 #define FUSION_OPT_EVAL_TICKS 8u
 #define FUSION_OPT_DECISION_TICKS 40u
@@ -29,7 +29,7 @@ typedef struct {
 typedef struct {
     fusion_bandit_cell_t cell[FUSION_CONTEXT_COUNT][FUSION_OPT_STATE_COUNT];
     fusion_edge_cell_t edge[FUSION_CONTEXT_COUNT][FUSION_OPT_STATE_COUNT - 1u];
-    uint8_t state, previous_state, trial_state;
+    uint8_t state, previous_state, trial_state, max_state;
     fusion_context_t context, trial_context;
     unsigned settle, cooldown, decision_age, trial_samples;
     int trial_sum, trial_risk_sum, baseline_quality, baseline_risk;
@@ -38,7 +38,7 @@ typedef struct {
 } fusion_optimizer_t;
 
 static const uint8_t s_fusion_gain_states[FUSION_OPT_STATE_COUNT] = {
-    62u, 58u, 54u, 50u, 46u, 42u, 38u, 34u
+    62u, 58u, 54u, 50u, 46u, 42u, 38u, 34u, 28u, 22u, 16u, 8u, 2u
 };
 
 static inline uint8_t fusion_optimizer_state_for_gain(uint8_t gain)
@@ -64,9 +64,22 @@ static inline void fusion_optimizer_reset(fusion_optimizer_t *o, uint8_t gain)
     o->state = fusion_optimizer_state_for_gain(gain);
     o->previous_state = o->state;
     o->trial_state = o->state;
+    o->max_state = FUSION_OPT_STATE_COUNT - 1u;
     o->settle = FUSION_OPT_SETTLE_TICKS;
     o->context = FUSION_CONTEXT_NO_CARRIER;
     o->trial_context = FUSION_CONTEXT_NO_CARRIER;
+}
+
+static inline void fusion_optimizer_set_gain_floor(fusion_optimizer_t *o,
+                                                    uint8_t minimum_gain)
+{
+    /* max_state is the lowest physical gain this profile may enter. The
+     * ordered table remains shared so RANGE V2 can recover from near-VTX
+     * overload without changing the conservative FUSION baseline. */
+    o->max_state = fusion_optimizer_state_for_gain(minimum_gain);
+    if (o->state > o->max_state) o->state = o->max_state;
+    if (o->previous_state > o->max_state) o->previous_state = o->max_state;
+    if (o->trial_state > o->max_state) o->trial_state = o->max_state;
 }
 
 static inline void fusion_bandit_update(fusion_bandit_cell_t *c,
@@ -122,8 +135,10 @@ static inline int fusion_risk_prior(fusion_context_t ctx)
     }
 }
 
-static inline bool fusion_state_allowed(fusion_context_t ctx, unsigned state)
+static inline bool fusion_state_allowed(const fusion_optimizer_t *o,
+                                        fusion_context_t ctx, unsigned state)
 {
+    if (state > o->max_state) return false;
     switch (ctx) {
     case FUSION_CONTEXT_NO_CARRIER: return state == 0u;
     case FUSION_CONTEXT_WEAK: return state <= 3u;
@@ -185,7 +200,7 @@ static inline uint8_t fusion_best_candidate(const fusion_optimizer_t *o,
     unsigned best = o->state;
     int best_value = -100000;
     for (unsigned s = 0; s < FUSION_OPT_STATE_COUNT; ++s) {
-        if (!fusion_state_allowed(ctx, s)) continue;
+        if (!fusion_state_allowed(o, ctx, s)) continue;
         int distance = (int)s - (int)o->state;
         if (distance < 0) distance = -distance;
         /* Gain is an ordered physical chain, but not assumed monotonic.
@@ -242,7 +257,7 @@ static inline uint8_t fusion_optimizer_tick(
 
     if (obs->clip_permille >= 80) {
         unsigned next = (unsigned)o->state + 2u;
-        if (next >= FUSION_OPT_STATE_COUNT) next = FUSION_OPT_STATE_COUNT - 1u;
+        if (next > o->max_state) next = o->max_state;
         o->trial_active = false;
         o->state = (uint8_t)next;
         o->settle = FUSION_OPT_SETTLE_TICKS;
