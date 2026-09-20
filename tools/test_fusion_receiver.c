@@ -47,19 +47,30 @@ int main(void)
     assert(weak.context == FUSION_CONTEXT_WEAK);
     assert(no_carrier.context == FUSION_CONTEXT_NO_CARRIER);
     assert(clean.quality > weak.quality);
+    assert(clean.catastrophic_risk < weak.catastrophic_risk);
+
+    fusion_temporal_t temporal;
+    fusion_temporal_reset(&temporal);
+    fusion_temporal_metrics_t tm = {0};
+    for (unsigned i = 0; i < 32; ++i)
+        tm = fusion_temporal_update(&temporal, &clean);
+    for (unsigned i = 0; i < 8; ++i)
+        tm = fusion_temporal_update(&temporal, &weak);
+    assert(tm.fade_score > 0);
+    assert(tm.quality_delta < 0);
 
     fusion_optimizer_t opt;
     fusion_optimizer_reset(&opt, 50);
-    for (unsigned i = 0; i < 30; ++i) fusion_optimizer_tick(&opt, &no_carrier);
+    for (unsigned i = 0; i < 30; ++i) fusion_optimizer_tick(&opt, &no_carrier, &tm);
     assert(fusion_optimizer_gain(&opt) == 62);
 
     fusion_optimizer_reset(&opt, 54);
-    for (unsigned i = 0; i < 200; ++i) assert(fusion_optimizer_tick(&opt, &clean) == 54);
+    for (unsigned i = 0; i < 200; ++i) assert(fusion_optimizer_tick(&opt, &clean, &tm) == 54);
 
     fusion_optimizer_reset(&opt, 62);
     fusion_observation_t overload = make_obs(FUSION_CONTEXT_OVERLOAD);
-    assert(fusion_optimizer_tick(&opt, &overload) <= 54);
+    assert(fusion_optimizer_tick(&opt, &overload, &tm) <= 54);
 
-    puts("Fusion receiver: multi-estimator shadow IQ + safe contextual learner passed");
+    puts("Fusion receiver: temporal IQ fusion + risk-aware local learner passed");
     return 0;
 }
