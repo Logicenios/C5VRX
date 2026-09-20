@@ -124,6 +124,25 @@ check("lag events correlate against gain writes",
       "near_gain_event_count" in all_c and
       "s_last_gain_write_us = esp_timer_get_time();" in all_c)
 
+check("issue 27 fixed-gain characterization sweep present",
+      "C5VRX_GAIN_SWEEP_BEGIN" in all_c and
+      "C5VRX_LAB_ROW" in all_c and
+      "LAB_GAIN_SETTLE_MS 700u" in all_c and
+      "LAB_GAIN_DWELL_MS  1000u" in all_c and
+      "lab_gain_sweep_tick" in all_c)
+check("issue 28 quiet fixed baseline and reset present",
+      "C5VRX_LAB_BASELINE_READY" in all_c and
+      "lab_reset_correlation" in all_c and
+      "s_lab_quiet" in all_c and
+      "ANALOG_AGC_MANUAL" in all_c and
+      "RF_BW_MODE_BW40" in all_c and
+      "AFC_MODE_OFF" in all_c)
+check("vendor PHY timer inventory is reachable on demand",
+      "rf_dump_tracked_timers();" in all_c)
+check("manual gain cannot step below production lower bound",
+      "s_current_gain > LAB_GAIN_MIN" in all_c and
+      "LAB_GAIN_MIN       2u" in all_c)
+
 # ---- Web flasher / release safety ----
 web_app = read(ROOT / "web" / "app.js")
 workflow = read(ROOT / ".github" / "workflows" / "build.yml")
