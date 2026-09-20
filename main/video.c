@@ -224,6 +224,7 @@ typedef enum {
     RX_PROFILE_AUTO_EXP,
     RX_PROFILE_HW_AGC_EXP,
     RX_PROFILE_FUSION_EXP,
+    RX_PROFILE_RANGE_V2_EXP,
     RX_PROFILE_COUNT,
 } rx_profile_t;
 
@@ -952,6 +953,7 @@ static const char *rx_profile_name(void)
     case RX_PROFILE_AUTO_EXP:     return "AUTO EXP";
     case RX_PROFILE_HW_AGC_EXP:   return "HW AGC EXP";
     case RX_PROFILE_FUSION_EXP:   return "FUSION EXP";
+    case RX_PROFILE_RANGE_V2_EXP: return "RANGE V2";
     default:                      return "BALANCED";
     }
 }
@@ -963,6 +965,7 @@ static uint8_t profile_gain_min(void)
     case RX_PROFILE_BLOCKER_EXP: return 8u;
     case RX_PROFILE_RECOVERY_EXP:return 20u;
     case RX_PROFILE_FUSION_EXP:  return 34u;
+    case RX_PROFILE_RANGE_V2_EXP:return 34u;
     default:                     return 2u;
     }
 }
@@ -1252,6 +1255,7 @@ static void settings_load(void)
         case RX_PROFILE_RECOVERY_EXP: s_current_gain = 52u; break;
         case RX_PROFILE_AUTO_EXP:     s_current_gain = 52u; break;
         case RX_PROFILE_FUSION_EXP:   s_current_gain = 62u; break;
+        case RX_PROFILE_RANGE_V2_EXP: s_current_gain = 62u; break;
         default:                      s_current_gain = 52u; break;
         }
         s_current_gain = profile_gain_clamp(s_current_gain);
@@ -1988,6 +1992,16 @@ static void apply_rx_profile(rx_profile_t profile)
         apply_rf_bandwidth(true);
         s_afc_mode = AFC_MODE_OFF;
         if (rf_get_frequency_offset_khz() != 0) apply_frequency_offset_khz_tracked(0);
+        apply_rx_gain_tracked(62u);
+        break;
+
+    case RX_PROFILE_RANGE_V2_EXP:
+        /* Fusion learner plus acquisition-only gearbox/AFC. Both are already
+         * hard-frozen in TRACK, so clean video remains a zero-PHY-write zone. */
+        s_agc_mode = ANALOG_AGC_ACTIVE;
+        s_rf_bw_mode = RF_BW_MODE_AUTO;
+        apply_rf_bandwidth(true);
+        s_afc_mode = AFC_MODE_AUTO;
         apply_rx_gain_tracked(62u);
         break;
 
@@ -2960,15 +2974,20 @@ static void analog_agc_task(void *arg)
         s_last_fusion_stability = fusion_tm.stability;
         s_last_fusion_fast_samples = fusion_tm.samples;
 
-        if (s_rx_profile == RX_PROFILE_FUSION_EXP && s_agc_mode == ANALOG_AGC_ACTIVE) {
+        if ((s_rx_profile == RX_PROFILE_FUSION_EXP ||
+             s_rx_profile == RX_PROFILE_RANGE_V2_EXP) &&
+            s_agc_mode == ANALOG_AGC_ACTIVE) {
             const fusion_temporal_metrics_t *tm_ptr =
                 fusion_tm.samples >= 8u ? &fusion_tm : NULL;
             target_gain = fusion_optimizer_tick(&fusion_optimizer, &fusion_obs, tm_ptr);
             s_shadow_gain = target_gain;
             s_agc_state = fusion_obs.context == FUSION_CONTEXT_CLEAN &&
-                          fusion_obs.quality >= 700 ? AGC_STATE_TRACK : AGC_STATE_LEARN;
+                          fusion_obs.quality >= 700 &&
+                          fusion_obs.catastrophic_risk < 250 ?
+                          AGC_STATE_TRACK : AGC_STATE_LEARN;
             if (target_gain != s_current_gain) apply_rx_gain_tracked(target_gain);
             settle_ticks = 0;
+            if (s_rx_profile == RX_PROFILE_RANGE_V2_EXP) goto profile_post_gain;
             goto control_tail;
         }
 
@@ -3220,6 +3239,10 @@ profile_post_gain:
                     int snr = s_last_phy_rssi_dbm - s_last_noise_floor_dbm;
                     auto_range_weak = auto_range_weak || (snr < 9 && q_phase < 55);
                 }
+                if (s_rx_profile == RX_PROFILE_RANGE_V2_EXP) {
+                    auto_range_weak = auto_range_weak ||
+                        (s_last_fusion_risk >= 450 && s_last_fusion_fade >= 250);
+                }
                 if (auto_range_weak) {
                     if (++bw_deep_fade_ticks >= 4) {
                         apply_rf_bandwidth(false);
@@ -3231,7 +3254,13 @@ profile_post_gain:
                     bw_deep_fade_ticks = 0;
                 }
             } else {
-                if (p_median >= 22 && q_phase >= 80) {
+                bool strong_recovery = p_median >= 22 && q_phase >= 80;
+                if (s_rx_profile == RX_PROFILE_RANGE_V2_EXP)
+                    strong_recovery = strong_recovery &&
+                        s_last_fusion_risk < 250 &&
+                        (s_last_fusion_recovery >= 200 ||
+                         s_last_fusion_stability >= 700);
+                if (strong_recovery) {
                     if (++bw_recovery_ticks >= 20) {
                         apply_rf_bandwidth(true);
                         bw_recovery_ticks = 0;
@@ -3587,7 +3616,7 @@ static void console_diag_task(void *arg)
                     printf("  'g':         Start/abort G2..G62 production-state gain sweep\n");
                     printf("  'F'/'W':     FFT-scale Q4 probe / fixed-gain BW40-vs-BW20 probe\n");
                     printf("  'A'/'H':     AFC centering sweep / vendor-AGC register oracle\n");
-                    printf("  'X':         Cycle RX profile (Balanced/Range/Blocker/Recovery/Auto/HW AGC/Fusion)\n");
+                    printf("  'X':         Cycle RX profile (Balanced/Range/Blocker/Recovery/Auto/HW AGC/Fusion/Range V2)\n");
                     printf("  'p'/'r':     Machine-readable PHY/Q4 snapshot / reset lag counters\n");
                     printf("  't'/'q':     Vendor timer inventory / quiet unsolicited lock message\n");
                     printf("  'l':         Mark a visible lag/freeze for correlation\n");
