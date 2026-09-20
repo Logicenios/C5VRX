@@ -258,6 +258,10 @@ check("same-repo PR firmware is published only as an explicit prerelease",
       "--prerelease" in workflow and
       'tag="pr-${PR_NUMBER}"' in workflow and
       "cleanup-pr-build:" in workflow)
+check("CI concurrency separates merge push from PR-close cleanup",
+      "github.event_name" in workflow and
+      "github.event.pull_request.number || github.ref" in workflow and
+      "cancel-in-progress: true" in workflow)
 check("release build is gated by architectural validation",
       "needs: [version, validate]" in workflow)
 check("firmware CI does not create Pages deployments",
