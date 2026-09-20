@@ -1,0 +1,98 @@
+#pragma once
+#include <stdbool.h>
+#include <stdint.h>
+
+/* 20 Hz supervisory controller; never paces or buffers live video.
+ * Scores are relative heuristics, not calibrated SNR or measured dBm. */
+typedef struct {
+    unsigned samples, syncs, hold, age, cooldown, failures, no_video;
+    int quality_sum, power_sum, clip_sum;
+    int baseline;
+    uint8_t gain, previous;
+    bool trial, locked, reverse;
+} range_control_t;
+
+static inline void range_control_reset(range_control_t *c, uint8_t gain)
+{
+    *c = (range_control_t){.gain = gain, .hold = 10};
+}
+
+static inline uint8_t range_control_move(range_control_t *c, int gain)
+{
+    if (gain < 2) gain = 2;
+    if (gain > 62) gain = 62;
+    if (gain != c->gain) {
+        c->gain = (uint8_t)gain;
+        c->hold = 10;
+        c->age = c->samples = c->syncs = 0;
+        c->quality_sum = c->power_sum = c->clip_sum = 0;
+        c->locked = false;
+    }
+    return c->gain;
+}
+
+static inline uint8_t range_control_tick(range_control_t *c, bool sync,
+                                         int power, int coherence, int clip,
+                                         int origin)
+{
+    ++c->age;
+    if (c->cooldown) --c->cooldown;
+    /* Strong evidence of overload takes priority over learned preferences.
+     * Allow 100 ms after a write before another emergency reduction. */
+    if (clip >= 80 && c->age >= 2 && c->gain > 2) {
+        c->trial = false;
+        c->no_video = 0;
+        return range_control_move(c, c->gain - 4);
+    }
+    if (c->hold) { --c->hold; return c->gain; }
+    ++c->samples;
+    c->syncs += sync;
+    c->power_sum += power;
+    c->clip_sum += clip;
+    c->quality_sum += coherence - clip / 2 - origin / 20;
+    if (c->samples < 10) return c->gain;
+
+    int p = c->power_sum / 10;
+    int clipping = c->clip_sum / 10;
+    int score = c->quality_sum / 10 + (int)c->syncs * 20;
+    bool video = c->syncs >= 2;
+    c->locked = video && clipping < 20;
+    c->samples = c->syncs = 0;
+    c->power_sum = c->clip_sum = c->quality_sum = 0;
+    c->no_video = video ? 0 : c->no_video + 1;
+
+    if (clipping >= 20 && c->gain > 2) {
+        c->trial = false;
+        return range_control_move(c, c->gain - 2);
+    }
+    if (c->trial) {
+        c->trial = false;
+        /* Require a margin: random window variation is not an improvement. */
+        if (score < c->baseline + 20) {
+            if (c->failures < 4) ++c->failures;
+            c->cooldown = 40u << c->failures; /* 4..32 seconds */
+            c->reverse = !c->reverse;
+            return range_control_move(c, c->previous);
+        }
+        c->failures = 0;
+        c->cooldown = 40;
+        return c->gain;
+    }
+    /* Stable video with sufficient headroom: no optimization writes. */
+    if (video && p >= 14 && p <= 36) return c->gain;
+    /* Absence of video never parks permanently at one high-gain state.
+     * Acquisition is separate from trials; no bad baseline to restore. */
+    if (c->no_video >= 4) {
+        c->no_video = 0;
+        return range_control_move(c, c->gain <= 8 ? 62 : c->gain - 8);
+    }
+    if (!video || c->cooldown) return c->gain;
+    int direction = p < 14 ? 2 : -2;
+    if (c->reverse) direction = -direction;
+    int candidate = c->gain + direction;
+    if (candidate < 2 || candidate > 62) return c->gain;
+    c->previous = c->gain;
+    c->baseline = score;
+    c->trial = true;
+    return range_control_move(c, candidate);
+}

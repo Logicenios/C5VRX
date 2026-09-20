@@ -227,6 +227,17 @@ check("web flasher selects the application image explicitly",
       "!name.includes('merged')" in web_app)
 check("full firmware fallback rejects incomplete release assets",
       "Incomplete full firmware package" in web_app)
+check("PR builds remain explicit, warned, and never outrank normal releases",
+      "PR_BUILD_TAG_PATTERN" in web_app and
+      "Experimental PR builds" in web_app and
+      "window.confirm(" in web_app and
+      "githubReleases = [...productionReleases, ...prBuilds]" in web_app)
+check("same-repo PR firmware is published only as an explicit prerelease",
+      "publish-pr-build:" in workflow and
+      "github.event.pull_request.head.repo.full_name == github.repository" in workflow and
+      "--prerelease" in workflow and
+      'tag="pr-${PR_NUMBER}"' in workflow and
+      "cleanup-pr-build:" in workflow)
 check("release build is gated by architectural validation",
       "needs: [version, validate]" in workflow)
 check("firmware CI does not create Pages deployments",

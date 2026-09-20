@@ -84,10 +84,15 @@
               </div>
             </div>
 
+            <div id="prBuildWarning" class="warning-box" style="display: none;">
+              <strong>⚠ Experimental PR build <span id="prBuildNumber"></span></strong>
+              <span>This firmware is unmerged test code and may be unstable, fail to boot, reset settings, or produce broken video. Use it only for intentional testing. You will be asked to confirm again before flashing.</span>
+            </div>
+
             <div class="form-group">
               <label for="selectPackageType">Firmware Package:</label>
               <select id="selectPackageType" class="form-control">
-                <option value="merged">Full Production (Bootloader + Partitions + App @ 0x0)</option>
+                <option value="merged">Full Firmware (Bootloader + Partitions + App @ 0x0)</option>
                 <option value="app_only">App Only (c5vrx3.bin @ 0x10000)</option>
               </select>
             </div>

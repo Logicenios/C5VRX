@@ -31,6 +31,7 @@
 #include "rf.h"
 #include "menu_font.h"
 #include "menu_raster.h"
+#include "range_control.h"
 #include "hal/parlio_ll.h"
 #include "hal/usb_serial_jtag_ll.h"
 
@@ -568,8 +569,11 @@ static inline bool phase5_pair_is_sync(uint8_t previous, uint8_t current)
     return (s_phase5_sync_mask[index >> 3u] & (1u << (index & 7u))) != 0u;
 }
 
+static uint32_t s_receive_generation;
+
 static void video_standard_detector_reset(void)
 {
+    ++s_receive_generation;
     s_video_std_pal_score = 0;
     s_video_std_ntsc_score = 0;
     s_detected_video_std_valid = false;
@@ -602,12 +606,12 @@ static void video_standard_vote(video_standard_t standard, uint16_t period)
  * odd byte of each 16-bit read, so this mirrors the same 20 MS/s sample
  * cadence. Valid H-sync low runs are about 94 samples wide. Their start-to-
  * start period is ~1271 samples for NTSC and exactly 1280 for PAL. */
-static void video_standard_observe(const uint8_t *raw, size_t bytes, size_t ring_offset)
+static bool video_standard_observe(const uint8_t *raw, size_t bytes, size_t ring_offset)
 {
-    if (!raw || bytes < 3000u) return;
+    if (!raw || bytes < 3000u) return false;
 
     const size_t first = (ring_offset & 1u) ? 0u : 1u;
-    if (first + 2u >= bytes) return;
+    if (first + 2u >= bytes) return false;
 
     uint8_t previous = s_phase5_state_lut[raw[first]];
     bool in_sync = false;
@@ -640,15 +644,19 @@ static void video_standard_observe(const uint8_t *raw, size_t bytes, size_t ring
         }
     }
 
+    bool valid_sync = false;
     for (unsigned i = 1; i < start_count; ++i) {
         unsigned period = starts[i] - starts[i - 1u];
         /* Keep a dead zone between standards so one noisy edge cannot flip it. */
         if (period >= 1266u && period <= 1275u) {
+            valid_sync = true;
             video_standard_vote(VIDEO_STD_NTSC, (uint16_t)period);
         } else if (period >= 1277u && period <= 1284u) {
+            valid_sync = true;
             video_standard_vote(VIDEO_STD_PAL, (uint16_t)period);
         }
     }
+    return valid_sync;
 }
 
 typedef struct {
@@ -795,7 +803,7 @@ static const char *rx_profile_name(void)
 static uint8_t profile_gain_min(void)
 {
     switch (s_rx_profile) {
-    case RX_PROFILE_RANGE_EXP:   return 24u; /* range-biased, but close-range overload still escapes */
+    case RX_PROFILE_RANGE_EXP:   return 2u; /* Allow recovery from a nearby strong VTX. */
     case RX_PROFILE_BLOCKER_EXP: return 8u;
     case RX_PROFILE_RECOVERY_EXP:return 20u;
     default:                     return 2u;
@@ -2381,12 +2389,18 @@ static void analog_agc_task(void *arg)
     int menu_refresh_ticks = 0;
     int phy_metric_ticks = 0;
     uint32_t seen_profile_generation = s_profile_generation;
-    uint8_t target_gain = 52u;
+    uint8_t target_gain = s_current_gain;
+    int sync_age_ticks = 40;
+    int learn_timeout_ticks = 0;
+    unsigned range_probe_index = 0;
     int btn_ticks = 0;
     bool btn_long_fired = false;
     bool btn_scan_fired = false;
     bool btn_profile_fired = false;
     bool was_locked = false;
+    range_control_t range_controller;
+    range_control_reset(&range_controller, s_current_gain);
+    uint32_t receive_generation = s_receive_generation;
     int boot_grace_ticks = 20;
 
     for (;;) {
@@ -2468,6 +2482,9 @@ static void analog_agc_task(void *arg)
             settle_ticks = GAIN_SETTLE_TICKS;
             drift_counter = lost_counter = overload_counter = 0;
             learn_adjust_counter = search_probe_ticks = search_carrier_ticks = 0;
+            range_probe_index = 0;
+            sync_age_ticks = 40;
+            learn_timeout_ticks = 0;
         }
 
         if (menu_was_active) {
@@ -2497,12 +2514,6 @@ static void analog_agc_task(void *arg)
         int n_origin = metrics.n_origin;
         int clip_permille = metrics.clip_permille;
         int origin_permille = metrics.origin_permille;
-        bool range_soft_overload =
-            s_rx_profile == RX_PROFILE_RANGE_EXP && p_median >= 24 &&
-            (metrics.dc_i_x100 > 150 || metrics.dc_i_x100 < -150 ||
-             metrics.dc_q_x100 > 150 || metrics.dc_q_x100 < -150 ||
-             metrics.iq_skew_permille > 320 ||
-             metrics.iq_cross_permille > 320);
 
         s_last_p_median = p_median;
         s_last_q_phase = q_phase;
@@ -2567,10 +2578,15 @@ static void analog_agc_task(void *arg)
             s_cfo_khz = (s_cfo_khz * 7 + instant_cfo) / 8;
         }
 
-        if (settle_ticks == 0 && q_phase >= 70 && p_median >= 12 && clip_permille < 20) {
-            video_standard_observe(s_control_sample_buf,
-                                   sizeof(s_control_sample_buf), ring_offset);
+        bool fresh_sync = false;
+        if (settle_ticks == 0) {
+            fresh_sync = video_standard_observe(s_control_sample_buf,
+                                               sizeof(s_control_sample_buf), ring_offset);
         }
+        if (fresh_sync) sync_age_ticks = 0;
+        else if (sync_age_ticks < 100) ++sync_age_ticks;
+        bool recent_sync = sync_age_ticks < 20;
+
 
         if (s_rx_profile == RX_PROFILE_HW_AGC_EXP && rf_get_experimental_hw_agc()) {
             /* Vendor AGC owns gain only in this explicitly experimental mode.
@@ -2592,12 +2608,35 @@ static void analog_agc_task(void *arg)
             goto apply_target;
         }
 
-        if (settle_ticks > 0) {
-            --settle_ticks;
-            goto control_tail;
+        if (s_rx_profile == RX_PROFILE_RANGE_EXP) {
+            if (receive_generation != s_receive_generation ||
+                range_controller.gain != s_current_gain) {
+                receive_generation = s_receive_generation;
+                range_control_reset(&range_controller, s_current_gain);
+            }
+            if (s_agc_mode == ANALOG_AGC_ACTIVE) {
+                target_gain = range_control_tick(&range_controller, fresh_sync,
+                    p_median, q_phase, clip_permille, origin_permille);
+                s_agc_state = range_controller.locked ? AGC_STATE_TRACK :
+                              AGC_STATE_LEARN;
+                s_shadow_gain = target_gain;
+                if (target_gain != s_current_gain) apply_rx_gain_tracked(target_gain);
+                /* The controller owns settling. Observe sync throughout;
+                 * its hold excludes post-write observations from decisions. */
+                settle_ticks = 0;
+                goto control_tail;
+            }
         }
 
-        if (clip_permille >= 80 && p_median > 24) {
+        /* Allow severe clipping protection after two observation ticks even
+         * while ordinary gain decisions are held for settling. */
+        if (settle_ticks > 0) {
+            --settle_ticks;
+            if (!(clip_permille >= 80 &&
+                  settle_ticks <= GAIN_SETTLE_TICKS - 2)) goto control_tail;
+        }
+
+        if (clip_permille >= 80) {
             target_gain = profile_gain_clamp((int)target_gain - 4);
             s_agc_state = AGC_STATE_LEARN;
             overload_counter = 0;
@@ -2606,7 +2645,7 @@ static void analog_agc_task(void *arg)
             lost_counter = 0;
             goto apply_target;
         }
-        if ((clip_permille >= 20 && p_median > 24) || range_soft_overload) {
+        if (clip_permille >= 20) {
             ++overload_counter;
             if (overload_counter >= 2) {
                 target_gain = profile_gain_clamp((int)target_gain - 2);
@@ -2627,8 +2666,8 @@ static void analog_agc_task(void *arg)
              * particular sees plausible amplitude at G62 even with only
              * static. Require repeated phase-coherent windows before LEARN. */
             bool search_candidate = s_rx_profile == RX_PROFILE_RANGE_EXP ?
-                (q_phase >= 30 && p_median >= 8 && origin_permille < 700 &&
-                 clip_permille < 40 && !range_soft_overload) :
+                (recent_sync && q_phase >= 30 && p_median >= 8 &&
+                 origin_permille < 700 && clip_permille < 40) :
                 (q_phase >= 30 ||
                  (q_phase >= 20 && p_median >= 8 && origin_permille < 700));
             int required_carrier_ticks =
@@ -2652,7 +2691,11 @@ static void analog_agc_task(void *arg)
                 search_carrier_ticks = 0;
 
                 if (s_rx_profile == RX_PROFILE_RANGE_EXP) {
-                    target_gain = target_gain >= 60u ? 56u : 62u;
+                    /* With no confirmed video, search both weak-signal and
+                     * overload states. Stop probing once video is acquired. */
+                    static const uint8_t gains[] = {62, 56, 48, 40, 32, 24, 16, 8, 2};
+                    range_probe_index = (range_probe_index + 1u) % sizeof(gains);
+                    target_gain = gains[range_probe_index];
                 } else if (s_rx_profile == RX_PROFILE_BLOCKER_EXP) {
                     target_gain = target_gain >= 44u ? 28u : 44u;
                 } else if (s_rx_profile == RX_PROFILE_RECOVERY_EXP) {
@@ -2679,6 +2722,14 @@ static void analog_agc_task(void *arg)
         }
 
         case AGC_STATE_LEARN: {
+            /* Bounded acquisition: strong noise must not trap LEARN forever. */
+            if (s_rx_profile == RX_PROFILE_RANGE_EXP && !recent_sync) {
+                if (++learn_timeout_ticks >= 20) {
+                    s_agc_state = AGC_STATE_SEARCH;
+                    learn_timeout_ticks = search_probe_ticks = search_carrier_ticks = 0;
+                    break;
+                }
+            } else learn_timeout_ticks = 0;
             bool iq_bad = s_rx_profile == RX_PROFILE_AUTO_EXP &&
                           (metrics.iq_skew_permille > 260 ||
                            metrics.iq_cross_permille > 260 ||
@@ -2687,7 +2738,6 @@ static void analog_agc_task(void *arg)
             bool too_hot = p_median >
                                (s_rx_profile == RX_PROFILE_RANGE_EXP ? 32 : 36) ||
                            clip_permille >= 24 ||
-                           range_soft_overload ||
                            (iq_bad && p_median > 22);
             bool too_weak = (p_median < 14 || q_phase < 50) && clip_permille <= 8;
 
@@ -2710,7 +2760,8 @@ static void analog_agc_task(void *arg)
                                    metrics.iq_cross_permille < 380 &&
                                    metrics.dc_i_x100 < 175 && metrics.dc_i_x100 > -175 &&
                                    metrics.dc_q_x100 < 175 && metrics.dc_q_x100 > -175);
-                if (q_phase >= 65 && p_median >= 14 && p_median <= 36 &&
+                if ((s_rx_profile != RX_PROFILE_RANGE_EXP || recent_sync) &&
+                    q_phase >= 65 && p_median >= 14 && p_median <= 36 &&
                     clip_permille <= 16 && iq_lock_ok) {
                     s_agc_state = AGC_STATE_TRACK;
                     drift_counter = 0;
@@ -2721,7 +2772,8 @@ static void analog_agc_task(void *arg)
         }
 
         case AGC_STATE_TRACK: {
-            if (q_phase < 25 && p_median < 12) {
+            if ((s_rx_profile == RX_PROFILE_RANGE_EXP && !recent_sync) ||
+                (q_phase < 25 && p_median < 12)) {
                 if (++lost_counter >= (s_rx_profile == RX_PROFILE_RECOVERY_EXP ? 4 : 10)) {
                     s_agc_state = AGC_STATE_SEARCH;
                     lost_counter = 0;
@@ -2735,8 +2787,7 @@ static void analog_agc_task(void *arg)
                                     target_gain < profile_gain_max() && clip_permille <= 8;
             bool needs_gain_cut = p_median >
                                       (s_rx_profile == RX_PROFILE_RANGE_EXP ? 36 : 40) ||
-                                  clip_permille >= 32 ||
-                                  range_soft_overload;
+                                  clip_permille >= 32;
             if (needs_gain_boost || needs_gain_cut) {
                 if (++drift_counter >= (s_rx_profile == RX_PROFILE_RECOVERY_EXP ? 6 : 15)) {
                     s_agc_state = AGC_STATE_LEARN;

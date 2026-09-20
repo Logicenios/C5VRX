@@ -5,6 +5,7 @@ on:
     branches: [main, "codex/**", "feat/**", "fix/**"]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, closed]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,6 +14,7 @@ concurrency:
 jobs:
   version:
     name: Resolve Firmware Version
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.semver.outputs.version }}
@@ -108,6 +110,7 @@ jobs:
 
   validate:
     name: Architectural & DSP Verification
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -123,6 +126,7 @@ jobs:
 
   build:
     name: Build Production Firmware (ESP32-C5)
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     # A release or Pages deployment must never be produced from a commit that
     # failed the architectural/DSP contract checks.
     needs: [version, validate]
@@ -173,6 +177,70 @@ jobs:
           name: c5vrx3-production-firmware
           path: release/
           if-no-files-found: error
+
+  publish-pr-build:
+    name: Publish Experimental PR Build
+    needs: [build]
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Built Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: c5vrx3-production-firmware
+          path: release/
+
+      - name: Publish mutable PR prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="pr-${PR_NUMBER}"
+
+          # PR releases are deliberately mutable test channels. Recreate the
+          # prerelease on every PR update so its assets always match head SHA.
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag
+          fi
+
+          gh release create "${tag}" release/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${PR_HEAD_SHA}" \
+            --title "C5VRX PR #${PR_NUMBER} — Experimental Build" \
+            --notes "WARNING: unmerged test firmware for PR #${PR_NUMBER} (${PR_TITLE}). This mutable prerelease is intended only for explicit hardware testing; use a semantic-version release for normal flashing." \
+            --prerelease
+
+  cleanup-pr-build:
+    name: Remove Closed PR Build
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete PR prerelease and tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          tag="pr-${PR_NUMBER}"
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag
+          else
+            echo "No PR prerelease ${tag} to remove."
+          fi
 
   release-main:
     name: Publish Versioned Main Release

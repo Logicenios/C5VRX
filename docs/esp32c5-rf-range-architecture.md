@@ -63,12 +63,31 @@ no undocumented PHY polling, no hardware AGC and no forced FFT scaling.
 
 ### RANGE EXP
 
-Starts at maximum gain (G62), keeps the proven full-video BW40 filter fixed and
-leaves AFC off. During acquisition it only accepts a carrier after repeated
-phase-coherent windows; otherwise it keeps comparing G62 with G56 instead of
-mistaking high-gain static for lock. In addition to digital rail clipping, the
-range controller treats persistent high-power IQ DC/skew/cross distortion as
-soft front-end overload and escapes to lower gain when close to a VTX.
+The ACTIVE range controller in `main/range_control.h` starts from the applied
+hardware gain and holds settings during usable video with amplitude headroom.
+It scores ten settled observations using recent Phase5 H-sync evidence,
+coherence, clipping and near-origin occupancy. This is a heuristic, not a
+calibrated SNR or a measurement of visible snow.
+
+Persistent clipping reduces gain. Severe clipping can bypass normal settling
+after two 50 ms ticks. Ordinary trial changes retain a conservative 500 ms hold.
+A trial must improve its score by a margin; otherwise the previous gain is
+restored and repeated unsuccessful trials receive a 4..32 second backoff.
+The controller explores lower gain states after sustained absence of sync,
+including states near G2, rather than parking permanently at maximum gain.
+Channel/profile reset invalidates trial history. Learning is volatile and does
+not write NVS. Clean reception performs no optimization gain writes.
+
+BW40 and AFC OFF remain the default test conditions. ACTIVE RANGE bypasses the
+legacy automatic bandwidth/AFC loop. No additional undocumented PHY controls
+are enabled. IQ DC/skew/cross is diagnostic only, not proof of compression.
+
+Tests exercise clean hold, bounded clipping response, rejected trials/rollback,
+noise recovery, state reset and synthetic PAL/NTSC detection. The physical gain
+settling time, optimal sensitivity, filtered-noise rejection and visible snow
+are not proven by these tests. Measuring blanking noise and gain-transition
+waveforms remains hardware work. The score can still be affected by a changing
+RF environment during a trial; no pixel-perfect or zero-relock claim is made.
 
 ### BLOCKER EXP
 

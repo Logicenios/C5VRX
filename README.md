@@ -31,6 +31,7 @@ fallback.
 - **Automatic Latest Firmware**: Automatically selects the newest immutable semantic-version release.
 - **One-Click Flashing**: Flashes the universal merged production image (`bootloader + partitions + app` at `0x0`) over Web Serial.
 - **Selectable Releases**: Choose between versioned releases such as `v3.0.0`, `v3.0.1`, and newer.
+- **Experimental PR Builds**: Same-repository pull requests publish a temporary `pr-<number>` prerelease. These builds are listed after normal releases, are never the default selection, show a prominent warning, and require an extra confirmation before flashing.
 - **Offline / Local Execution**: You can also run the web flasher locally:
   ```bash
   python tools/open_webflasher.py
@@ -52,7 +53,7 @@ Every push or merged PR to `main` builds the production firmware and publishes a
 
 Firmware releases and website deployment are intentionally separate:
 
-- `.github/workflows/build.yml` validates and builds firmware, then publishes a versioned release after a successful push to `main`.
+- `.github/workflows/build.yml` validates and builds firmware, then publishes a versioned release after a successful push to `main`. For same-repository PRs it also maintains a clearly marked temporary prerelease (`pr-<number>`) and removes it when the PR closes.
 - `.github/workflows/deploy-web.yml` deploys only the static `web/` directory to the GitHub Pages mirror, and runs only when the web flasher itself changes (or when started manually).
 - Normal firmware and documentation commits therefore do not create unnecessary website deployments. The flasher discovers new versioned firmware releases dynamically through the GitHub API.
 
