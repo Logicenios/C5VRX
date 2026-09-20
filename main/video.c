@@ -995,7 +995,10 @@ static void settings_save(void)
         .manual_gain = s_current_gain,
         .frequency_offset_khz = (int16_t)rf_get_frequency_offset_khz(),
         .menu_boot_btn_enabled = s_menu_boot_btn_enabled ? 1u : 0u,
-        .rx_profile = (uint8_t)s_rx_profile,
+        /* HW AGC is deliberately per-boot opt-in. Never resurrect vendor
+         * gain ownership silently after reset/power-cycle. */
+        .rx_profile = (uint8_t)(s_rx_profile == RX_PROFILE_HW_AGC_EXP ?
+                                RX_PROFILE_BALANCED : s_rx_profile),
     };
     nvs_handle_t handle;
     esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &handle);
@@ -1025,26 +1028,30 @@ static void settings_load(void)
     if (settings.afc_mode <= AFC_MODE_OFF) s_afc_mode = (afc_mode_t)settings.afc_mode;
     if (settings.output_mode <= VIDEO_OUTPUT_4BIT_80) s_output_mode = (video_output_mode_t)settings.output_mode;
     if (settings.video_std_mode <= VIDEO_STD_MODE_PAL) s_video_std_mode = (video_standard_mode_t)settings.video_std_mode;
-    if (settings.rx_profile < RX_PROFILE_COUNT) s_rx_profile = (rx_profile_t)settings.rx_profile;
+    if (settings.rx_profile < RX_PROFILE_COUNT &&
+        settings.rx_profile != RX_PROFILE_HW_AGC_EXP) {
+        s_rx_profile = (rx_profile_t)settings.rx_profile;
+    } else {
+        s_rx_profile = RX_PROFILE_BALANCED;
+    }
     if (s_video_std_mode == VIDEO_STD_MODE_PAL) s_video_std = VIDEO_STD_PAL;
     else if (s_video_std_mode == VIDEO_STD_MODE_NTSC) s_video_std = VIDEO_STD_NTSC;
     if (settings.agc_mode <= ANALOG_AGC_MANUAL) s_agc_mode = (analog_agc_mode_t)settings.agc_mode;
     if (s_agc_mode == ANALOG_AGC_MANUAL && settings.manual_gain >= 2u && settings.manual_gain <= 62u) {
         s_current_gain = profile_gain_clamp(settings.manual_gain);
-        s_shadow_gain = s_current_gain;
-        rf_set_rx_gain(true, s_current_gain);
-    }
-    if (s_rx_profile == RX_PROFILE_HW_AGC_EXP) {
-        s_agc_mode = ANALOG_AGC_MANUAL;
-        s_last_phy_write_us = esp_timer_get_time();
-        s_last_phy_write_kind = PHY_WRITE_HW_AGC;
-        if (!rf_set_experimental_hw_agc(true, 62u)) {
-            s_rx_profile = RX_PROFILE_BALANCED;
-            s_agc_mode = ANALOG_AGC_ACTIVE;
-        }
     } else {
-        (void)rf_set_experimental_hw_agc(false, 62u);
+        switch (s_rx_profile) {
+        case RX_PROFILE_RANGE_EXP:    s_current_gain = 56u; break;
+        case RX_PROFILE_BLOCKER_EXP:  s_current_gain = 36u; break;
+        case RX_PROFILE_RECOVERY_EXP: s_current_gain = 52u; break;
+        case RX_PROFILE_AUTO_EXP:     s_current_gain = 52u; break;
+        default:                      s_current_gain = 52u; break;
+        }
+        s_current_gain = profile_gain_clamp(s_current_gain);
     }
+    s_shadow_gain = s_current_gain;
+    rf_set_rx_gain(true, s_current_gain);
+    (void)rf_set_experimental_hw_agc(false, 62u);
     s_menu_boot_btn_enabled = settings.menu_boot_btn_enabled != 0;
     if (s_afc_mode == AFC_MODE_HOLD) apply_frequency_offset_khz_tracked(settings.frequency_offset_khz);
     else if (s_afc_mode == AFC_MODE_OFF) apply_frequency_offset_khz_tracked(0);
