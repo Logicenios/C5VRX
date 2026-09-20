@@ -965,7 +965,7 @@ static uint8_t profile_gain_min(void)
     case RX_PROFILE_BLOCKER_EXP: return 8u;
     case RX_PROFILE_RECOVERY_EXP:return 20u;
     case RX_PROFILE_FUSION_EXP:  return 34u;
-    case RX_PROFILE_RANGE_V2_EXP:return 34u;
+    case RX_PROFILE_RANGE_V2_EXP:return 2u;
     default:                     return 2u;
     }
 }
@@ -2764,6 +2764,9 @@ static void analog_agc_task(void *arg)
     range_control_reset(&range_controller, s_current_gain);
     fusion_optimizer_t fusion_optimizer;
     fusion_optimizer_reset(&fusion_optimizer, s_current_gain);
+    fusion_optimizer_set_gain_floor(
+        &fusion_optimizer,
+        s_rx_profile == RX_PROFILE_RANGE_V2_EXP ? 2u : 34u);
     uint32_t receive_generation = s_receive_generation;
     int boot_grace_ticks = 20;
 
@@ -2850,6 +2853,9 @@ static void analog_agc_task(void *arg)
             sync_age_ticks = 40;
             learn_timeout_ticks = 0;
             fusion_optimizer_reset(&fusion_optimizer, s_current_gain);
+            fusion_optimizer_set_gain_floor(
+                &fusion_optimizer,
+                s_rx_profile == RX_PROFILE_RANGE_V2_EXP ? 2u : 34u);
         }
 
         if (menu_was_active) {
