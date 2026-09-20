@@ -89,10 +89,11 @@ check("gain transition hot path has no AGC printf",
       "[AGC:GAIN]" not in all_c)
 check("periodic runtime telemetry disabled",
       bool(re.search(r"PERIODIC_TELEMETRY\s+0", all_c)))
-check("video standard defaults to AUTO detector",
+check("video standard defaults to AUTO semantic detector",
       "VIDEO_STD_MODE_AUTO" in all_c and
-      "video_standard_observe" in all_c and
-      "phase5_pair_is_sync" in all_c)
+      "video_semantic_observe" in all_c and
+      "phase5_pair_is_sync" in all_c and
+      "fresh_sync = sync_quality >= 60" in all_c)
 check("menu resolves detected PAL/NTSC before raster start",
       "s_video_std = resolved_menu_standard();" in all_c)
 
