@@ -4,8 +4,9 @@
 Consumes raw packed Q4/I4 bytes from MODEM_DIAG captures and compares:
   * current 50 ns Phase5 endpoint discriminator;
   * exact adjacent 25 ns + 25 ns pair-sum;
-  * confidence-aware adjacent repair (offline experiment);
-  * a second-order PLL tracker (offline threshold-extension experiment).
+  * live two-bundle Trajectory v2 compressed adjacent reconstruction;
+  * confidence-aware adjacent repair / PLL-lite holdover (offline experiments);
+  * a second-order PLL tracker (offline threshold-extension upper bound).
 
 This tool is deliberately offline. It is used to prove an algorithm on the
 same capture before any realtime BitScrambler/M2M path is promoted.
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
 TAU = 2.0 * math.pi
+ROOT = Path(__file__).resolve().parents[1]
 
 # Exact Phase5 mapping mirrored from main/video.c / fm.bsasm.
 PHASE5 = [
@@ -42,6 +44,33 @@ PHASE5 = [
     14, 12, 11, 10, 10,  9,  9,  9, 23, 23, 23, 22, 22, 21, 20, 18,
     12, 10,  9,  9,  9,  8,  8,  8, 24, 24, 24, 23, 23, 23, 22, 20,
 ]
+
+
+def _parse_asm_lut(path: Path) -> List[int]:
+    import re
+    text = path.read_text()
+    match = re.search(r"^lut (.*)$", text, re.MULTILINE)
+    if not match:
+        raise RuntimeError(f"no embedded LUT in {path}")
+    return [int(v) for v in match.group(1).split()]
+
+
+def _parse_header_array(path: Path, name: str) -> List[int]:
+    import re
+    text = path.read_text()
+    start = text.find(name)
+    if start < 0:
+        raise RuntimeError(f"{name} missing from {path}")
+    begin = text.find("{", start)
+    end = text.find("};", begin)
+    return [int(v) for v in re.findall(r"\d+", text[begin + 1:end])]
+
+
+GOLDEN_LUT = _parse_asm_lut(ROOT / "main" / "fm.bsasm")
+TRAJECTORY_V2_DAC = _parse_header_array(
+    ROOT / "main" / "trajectory_v2_lut.h", "c5vrx_trajectory_v2_dac")
+TRAJECTORY_V2_CONFIDENCE = _parse_header_array(
+    ROOT / "main" / "trajectory_v2_lut.h", "c5vrx_trajectory_v2_confidence")
 
 
 def s4(v: int) -> int:
@@ -83,6 +112,40 @@ def d5(a: int, b: int) -> int:
 
 def median3(a: float, b: float, c: float) -> float:
     return sorted((a, b, c))[1]
+
+
+def iround(x: float) -> int:
+    return int(math.floor(x + 0.5)) if x >= 0 else -int(math.floor(-x + 0.5))
+
+
+def map_pair_sum_rad(rad: float) -> int:
+    """Production P20/G2 mapping. rad may exceed +/-pi: DO NOT wrap it."""
+    phase8 = iround(rad * 256.0 / TAU)
+    n = phase8 * 3
+    correction = -((-n + 2) // 4) if n < 0 else (n + 2) // 4
+    return max(0, min(63, 20 + correction))
+
+
+def golden_code(previous_raw: int, current_raw: int) -> int:
+    address = (PHASE5[previous_raw] << 5) | PHASE5[current_raw]
+    return GOLDEN_LUT[address] & 63
+
+
+def trajectory_v2_address(previous_raw: int, middle_raw: int, current_raw: int) -> int:
+    return (PHASE5[previous_raw] |
+            ((middle_raw & 1) << 5) |
+            ((PHASE5[current_raw] >> 1) << 6))
+
+
+def trajectory_v2_code(previous_raw: int, middle_raw: int, current_raw: int) -> int:
+    return TRAJECTORY_V2_DAC[
+        trajectory_v2_address(previous_raw, middle_raw, current_raw)]
+
+
+def exact_adjacent_pair_code(previous_raw: int, middle_raw: int, current_raw: int) -> int:
+    d0 = wrap(phase_rad(middle_raw) - phase_rad(previous_raw))
+    d1 = wrap(phase_rad(current_raw) - phase_rad(middle_raw))
+    return map_pair_sum_rad(d0 + d1)
 
 
 @dataclass
@@ -150,6 +213,80 @@ def phase5_pair_metrics(data: bytes, parity: int, low_power: int) -> PairMetrics
 
 
 @dataclass
+class TrajectoryMetrics:
+    pairs: int = 0
+    golden_abs_error_sum: int = 0
+    trajectory_abs_error_sum: int = 0
+    golden_ge8: int = 0
+    golden_ge16: int = 0
+    golden_ge32: int = 0
+    trajectory_ge8: int = 0
+    trajectory_ge16: int = 0
+    trajectory_ge32: int = 0
+    confidence_sum: int = 0
+    confidence_lt64: int = 0
+    golden_errors: List[int] | None = None
+    trajectory_errors: List[int] | None = None
+
+
+def trajectory_metrics(data: bytes, parity: int) -> TrajectoryMetrics:
+    out = TrajectoryMetrics(golden_errors=[], trajectory_errors=[])
+    for end in range(parity + 2, len(data), 2):
+        p, m, c = data[end - 2], data[end - 1], data[end]
+        truth = exact_adjacent_pair_code(p, m, c)
+        g = golden_code(p, c)
+        t = trajectory_v2_code(p, m, c)
+        ge = abs(g - truth)
+        te = abs(t - truth)
+        out.pairs += 1
+        out.golden_abs_error_sum += ge
+        out.trajectory_abs_error_sum += te
+        out.golden_errors.append(ge)
+        out.trajectory_errors.append(te)
+        out.golden_ge8 += ge >= 8
+        out.golden_ge16 += ge >= 16
+        out.golden_ge32 += ge >= 32
+        out.trajectory_ge8 += te >= 8
+        out.trajectory_ge16 += te >= 16
+        out.trajectory_ge32 += te >= 32
+        conf = TRAJECTORY_V2_CONFIDENCE[trajectory_v2_address(p, m, c)]
+        out.confidence_sum += conf
+        out.confidence_lt64 += conf < 64
+    return out
+
+
+def pll_lite_pair_codes(data: bytes, parity: int, low_power: int) -> List[int]:
+    """Offline PLL-lite oracle.
+
+    Adjacent deltas are exact full-Q4. A one-pole local-frequency predictor is
+    updated only from trustworthy intervals. During a near-origin outlier the
+    predictor coasts and replaces only a very large innovation. This is NOT
+    the live pixel path; its purpose is to quantify how much stateful holdover
+    could still buy beyond the two-bundle Trajectory v2 approximation.
+    """
+    phases = [phase_rad(b) for b in data]
+    powers = [power(b) for b in data]
+    predictor = 0.0
+    have_predictor = False
+    deltas: List[float] = []
+    for i in range(1, len(data)):
+        d = wrap(phases[i] - phases[i - 1])
+        low = min(powers[i - 1], powers[i]) < low_power
+        if low and have_predictor and abs(wrap(d - predictor)) >= math.pi / 2:
+            d = predictor
+        elif not low:
+            predictor = d if not have_predictor else 0.75 * predictor + 0.25 * d
+            have_predictor = True
+        deltas.append(d)
+
+    out: List[int] = []
+    for end in range(parity + 2, len(data), 2):
+        # deltas[k] is raw[k+1]-raw[k].
+        out.append(map_pair_sum_rad(deltas[end - 2] + deltas[end - 1]))
+    return out
+
+
+@dataclass
 class PllResult:
     phase_error_rms: float
     impulse_permille: float
@@ -210,6 +347,8 @@ def percentile_abs(values: Sequence[float], p: float) -> float:
 def analyze(data: bytes, args: argparse.Namespace) -> dict:
     parity = 1 if args.parity == "odd" else 0
     m = phase5_pair_metrics(data, parity, args.low_power)
+    tm = trajectory_metrics(data, parity)
+    pll_lite = pll_lite_pair_codes(data, parity, args.low_power)
     disc = discriminator(data)
     pll = pll_demod(data, args.sample_rate, args.loop_bw, args.max_deviation)
 
@@ -233,6 +372,17 @@ def analyze(data: bytes, args: argparse.Namespace) -> dict:
         "endpoint_impulse_permille": pm(m.endpoint_impulses, m.pairs),
         "adjacent_pairsum_impulse_permille": pm(m.adjacent_impulses, m.pairs),
         "confidence_repair_impulse_permille": pm(m.repaired_impulses, m.pairs),
+        "golden_vs_exact_adjacent_mae_dac": tm.golden_abs_error_sum / max(1, tm.pairs),
+        "trajectory_v2_vs_exact_adjacent_mae_dac": tm.trajectory_abs_error_sum / max(1, tm.pairs),
+        "golden_hard_ge16_permille": pm(tm.golden_ge16, tm.pairs),
+        "trajectory_v2_hard_ge16_permille": pm(tm.trajectory_ge16, tm.pairs),
+        "golden_hard_ge32_permille": pm(tm.golden_ge32, tm.pairs),
+        "trajectory_v2_hard_ge32_permille": pm(tm.trajectory_ge32, tm.pairs),
+        "trajectory_v2_error_p95_dac": percentile_abs(tm.trajectory_errors or [], 0.95),
+        "trajectory_v2_error_p99_dac": percentile_abs(tm.trajectory_errors or [], 0.99),
+        "trajectory_v2_mean_confidence": tm.confidence_sum / max(1, tm.pairs),
+        "trajectory_v2_conf_lt64_permille": pm(tm.confidence_lt64, tm.pairs),
+        "pll_lite_output_abs_p99_dac": percentile_abs([v - 20 for v in pll_lite], 0.99),
         "full_q4_discriminator_abs_p95_rad": percentile_abs(disc, 0.95),
         "full_q4_discriminator_abs_p99_rad": percentile_abs(disc, 0.99),
         "pll_loop_bw_hz": args.loop_bw,
@@ -274,10 +424,38 @@ def synthetic_self_test() -> None:
 
     m = phase5_pair_metrics(raw, 1, 8)
     assert m.pairs > 1000
+
+    # Deterministic near-threshold wide-FM sweep. This is a regression oracle,
+    # not a C5 range claim. It specifically guards the reason Trajectory v2
+    # exists: the compressed 2-bundle path must reduce the hard-error tail
+    # against the full-Q4 exact-adjacent target in a noisy high-deviation case.
+    weak_rng = random.Random(0x23C5)
+    weak_raw = bytearray()
+    weak_phase = 0.0
+    for k in range(30000):
+        inst = (0.72 * math.sin(TAU * k / 71.0) +
+                0.34 * math.sin(TAU * k / 19.0))
+        weak_phase = wrap(weak_phase + inst)
+        amp = 4.8
+        i = amp * math.cos(weak_phase) + weak_rng.gauss(0.0, 0.60)
+        q = amp * math.sin(weak_phase) + weak_rng.gauss(0.0, 0.60)
+        qi = max(-8, min(7, int(round(q)))) & 0xF
+        ii = max(-8, min(7, int(round(i)))) & 0xF
+        weak_raw.append((ii << 4) | qi)
+
+    tm = trajectory_metrics(weak_raw, 1)
+    assert tm.pairs > 10000
+    assert tm.trajectory_ge16 < tm.golden_ge16, (
+        tm.trajectory_ge16, tm.golden_ge16)
+    assert len(TRAJECTORY_V2_DAC) == 1024
+    assert len(TRAJECTORY_V2_CONFIDENCE) == 1024
+
     print(
         "range_demod_bench self-test passed: "
-        f"disc_mse={mse:.5f} pairs={m.pairs} winding_pm="
-        f"{1000.0*m.winding_disagree/max(1,m.pairs):.2f}"
+        f"disc_mse={mse:.5f} pairs={m.pairs} "
+        f"winding_pm={1000.0*m.winding_disagree/max(1,m.pairs):.2f} "
+        f"weak_ge16 golden={1000.0*tm.golden_ge16/tm.pairs:.1f}pm "
+        f"traj={1000.0*tm.trajectory_ge16/tm.pairs:.1f}pm"
     )
 
 
