@@ -72,6 +72,7 @@ typedef struct {
     uint32_t bs_eof_overload_count;
     uint32_t lag_event_count;
     uint32_t near_gain_event_count;
+    uint32_t near_phy_event_count;
     uint32_t gain_quality_drop_count;
     uint32_t user_lag_mark_count;
     uint32_t checks;
@@ -84,6 +85,14 @@ enum {
     LAG_EVT_GDMA_IN_FAULT    = 1u << 3,
     LAG_EVT_GDMA_OUT_FAULT   = 1u << 4,
     LAG_EVT_BS_EOF_OVERLOAD  = 1u << 5,
+};
+
+enum {
+    PHY_WRITE_NONE   = 0,
+    PHY_WRITE_GAIN   = 1,
+    PHY_WRITE_BW     = 2,
+    PHY_WRITE_OFFSET = 3,
+    PHY_WRITE_FFT    = 4,
 };
 
 #define LAG_EVENT_LOG_SIZE 12u
@@ -104,6 +113,8 @@ static volatile hw_transport_counters_t s_hw_counters;
 static lag_event_t s_lag_events[LAG_EVENT_LOG_SIZE];
 static volatile uint32_t s_lag_event_head;
 static volatile int64_t s_last_gain_write_us;
+static volatile int64_t s_last_phy_write_us;
+static volatile uint8_t s_last_phy_write_kind;
 static volatile int64_t s_last_transport_event_us;
 static volatile uint32_t s_last_transport_flags;
 static volatile uint32_t s_last_gain_drop_transition;
@@ -758,6 +769,8 @@ static const char *output_mode_name(void)
 
 static void apply_rf_bandwidth(bool bw40)
 {
+    s_last_phy_write_us = esp_timer_get_time();
+    s_last_phy_write_kind = PHY_WRITE_BW;
     s_current_bw40 = bw40;
     rf_set_analog_bandwidth(bw40);
 }
@@ -849,7 +862,10 @@ typedef struct {
  * correlation does not incorrectly call an AFC/fine-tune transient unrelated. */
 static void apply_frequency_offset_khz_tracked(int offset_khz)
 {
-    s_last_gain_write_us = esp_timer_get_time();
+    int64_t now = esp_timer_get_time();
+    s_last_gain_write_us = now; /* rf.c re-asserts the forced RX gain */
+    s_last_phy_write_us = now;
+    s_last_phy_write_kind = PHY_WRITE_OFFSET;
     rf_set_frequency_offset_khz(offset_khz);
     ++s_gain_transition_count;
 }
@@ -955,6 +971,10 @@ static void record_transport_event(uint32_t flags)
         int64_t dt = now - s_last_gain_write_us;
         if (dt >= 0 && dt <= 200000) ++s_hw_counters.near_gain_event_count;
     }
+    if (s_last_phy_write_us > 0) {
+        int64_t dt = now - s_last_phy_write_us;
+        if (dt >= 0 && dt <= 200000) ++s_hw_counters.near_phy_event_count;
+    }
 }
 
 static void poll_transport_faults(void)
@@ -1032,6 +1052,8 @@ static void lab_reset_correlation(void)
     s_last_transport_flags = 0;
     s_last_user_lag_mark_us = 0;
     s_last_gain_write_us = 0;
+    s_last_phy_write_us = 0;
+    s_last_phy_write_kind = PHY_WRITE_NONE;
     s_last_gain_drop_transition = s_gain_transition_count;
     lab_clear_transport_sticky();
 }
@@ -1052,6 +1074,8 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
         (long long)((now - s_last_gain_write_us) / 1000) : -1;
     long long transport_age_ms = s_last_transport_event_us > 0 ?
         (long long)((now - s_last_transport_event_us) / 1000) : -1;
+    long long phy_age_ms = s_last_phy_write_us > 0 ?
+        (long long)((now - s_last_phy_write_us) / 1000) : -1;
 
     rf_phy_snapshot_t phy = {0};
     rf_get_phy_snapshot(&phy);
@@ -1062,8 +1086,8 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            "fft_forced=%u fft=%d filter_mode=%u adc_sel=%u filter_reg=0x%08lx "
            "adc_reg=0x%08lx source_mux=0x%08lx "
            "tx_empty=%lu rx_ovf=%lu tx_eof=%lu gdma_in=%lu gdma_out=%lu "
-           "bs_empty=%lu bs_eof=%lu lag=%lu near_gain=%lu qdrop=%lu "
-           "gain_age_ms=%lld transport_age_ms=%lld last_flags=0x%02lx\n",
+           "bs_empty=%lu bs_eof=%lu lag=%lu near_gain=%lu near_phy=%lu qdrop=%lu "
+           "gain_age_ms=%lld phy_age_ms=%lld phy_kind=%u transport_age_ms=%lld last_flags=0x%02lx\n",
            kind, s_current_gain, (unsigned long)phy.gain_reg,
            s_current_bw40 ? 40u : 20u, (unsigned)s_afc_mode,
            rf_get_frequency_offset_khz(), (unsigned)s_agc_mode, (unsigned)s_agc_state,
@@ -1084,8 +1108,10 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            (unsigned long)lab_delta(current.bs_eof_overload_count, base->bs_eof_overload_count),
            (unsigned long)lab_delta(current.lag_event_count, base->lag_event_count),
            (unsigned long)lab_delta(current.near_gain_event_count, base->near_gain_event_count),
+           (unsigned long)lab_delta(current.near_phy_event_count, base->near_phy_event_count),
            (unsigned long)lab_delta(current.gain_quality_drop_count, base->gain_quality_drop_count),
-           gain_age_ms, transport_age_ms, (unsigned long)s_last_transport_flags);
+           gain_age_ms, phy_age_ms, (unsigned)s_last_phy_write_kind,
+           transport_age_ms, (unsigned long)s_last_transport_flags);
 }
 
 static void lab_apply_fixed_gain(uint8_t gain)
@@ -1095,6 +1121,8 @@ static void lab_apply_fixed_gain(uint8_t gain)
     s_current_gain = gain;
     s_shadow_gain = gain;
     s_last_gain_write_us = esp_timer_get_time();
+    s_last_phy_write_us = s_last_gain_write_us;
+    s_last_phy_write_kind = PHY_WRITE_GAIN;
     rf_set_rx_gain(true, gain);
     ++s_gain_transition_count;
 }
@@ -1273,6 +1301,8 @@ static void lab_run_fft_probe(void)
         const hw_transport_counters_t base = lab_counter_snapshot();
         s_lab_fft_value = s_lab_fft_values[i];
         s_lab_fft_forced = true;
+        s_last_phy_write_us = esp_timer_get_time();
+        s_last_phy_write_kind = PHY_WRITE_FFT;
         rf_set_fft_scale_force(true, s_lab_fft_value);
         vTaskDelay(pdMS_TO_TICKS(LAB_FFT_SETTLE_MS));
         lab_print_row("FFT_SWEEP", &base);
@@ -1281,6 +1311,8 @@ static void lab_run_fft_probe(void)
         }
     }
 
+    s_last_phy_write_us = esp_timer_get_time();
+    s_last_phy_write_kind = PHY_WRITE_FFT;
     rf_set_fft_scale_force(false, 0);
     s_lab_fft_forced = false;
     s_lab_fft_value = 0;
@@ -1970,7 +2002,7 @@ static void handle_button_long_click(void)
                 s_afc_mode = AFC_MODE_HOLD;
             } else if (s_afc_mode == AFC_MODE_HOLD) {
                 s_afc_mode = AFC_MODE_OFF;
-                rf_set_frequency_offset_khz(0);
+                apply_frequency_offset_khz_tracked(0);
             } else {
                 s_afc_mode = AFC_MODE_AUTO;
             }
@@ -2257,6 +2289,8 @@ apply_target:
         if (s_agc_mode == ANALOG_AGC_ACTIVE && target_gain != s_current_gain) {
             s_current_gain = target_gain;
             s_last_gain_write_us = esp_timer_get_time();
+            s_last_phy_write_us = s_last_gain_write_us;
+            s_last_phy_write_kind = PHY_WRITE_GAIN;
             rf_set_rx_gain(true, s_current_gain);
             ++s_gain_transition_count;
             settle_ticks = GAIN_SETTLE_TICKS;
@@ -2378,9 +2412,11 @@ static void console_diag_task(void *arg)
                         (long long)((now - s_last_gain_write_us) / 1000) : -1;
                     long long transport_age_ms = s_last_transport_event_us > 0 ?
                         (long long)((now - s_last_transport_event_us) / 1000) : -1;
-                    printf("[LAG MARK] #%lu gain_age=%lldms transport_age=%lldms flags=0x%02lx G=%u state=%u\n",
+                    long long phy_age_ms = s_last_phy_write_us > 0 ?
+                        (long long)((now - s_last_phy_write_us) / 1000) : -1;
+                    printf("[LAG MARK] #%lu gain_age=%lldms phy_age=%lldms phy_kind=%u transport_age=%lldms flags=0x%02lx G=%u state=%u\n",
                            (unsigned long)s_hw_counters.user_lag_mark_count,
-                           gain_age_ms, transport_age_ms,
+                           gain_age_ms, phy_age_ms, (unsigned)s_last_phy_write_kind, transport_age_ms,
                            (unsigned long)s_last_transport_flags,
                            s_current_gain, (unsigned)s_agc_state);
                 } else if (c == 'b') {
@@ -2408,6 +2444,8 @@ static void console_diag_task(void *arg)
                         s_current_gain = s_current_gain <= LAB_GAIN_MAX - LAB_GAIN_STEP ?
                                          (uint8_t)(s_current_gain + LAB_GAIN_STEP) : LAB_GAIN_MAX;
                         s_last_gain_write_us = esp_timer_get_time();
+                        s_last_phy_write_us = s_last_gain_write_us;
+                        s_last_phy_write_kind = PHY_WRITE_GAIN;
                         rf_set_rx_gain(true, s_current_gain);
                         ++s_gain_transition_count;
                     }
@@ -2419,6 +2457,8 @@ static void console_diag_task(void *arg)
                         s_current_gain = s_current_gain >= LAB_GAIN_MIN + LAB_GAIN_STEP ?
                                          (uint8_t)(s_current_gain - LAB_GAIN_STEP) : LAB_GAIN_MIN;
                         s_last_gain_write_us = esp_timer_get_time();
+                        s_last_phy_write_us = s_last_gain_write_us;
+                        s_last_phy_write_kind = PHY_WRITE_GAIN;
                         rf_set_rx_gain(true, s_current_gain);
                         ++s_gain_transition_count;
                     }
@@ -2551,9 +2591,10 @@ static void console_diag_task(void *arg)
                            (unsigned long)s_hw_counters.bs_eof_overload_count);
                     int64_t transport_age_ms = s_last_transport_event_us > 0 ?
                         (esp_timer_get_time() - s_last_transport_event_us) / 1000 : -1;
-                    printf(" Lag Correlation:            events=%lu near_gain_200ms=%lu gain_Qdrop=%lu marks=%lu last_flags=0x%02lx age=%lldms checks=%lu\n",
+                    printf(" Lag Correlation:            events=%lu near_gain_200ms=%lu near_phy_200ms=%lu gain_Qdrop=%lu marks=%lu last_flags=0x%02lx age=%lldms checks=%lu\n",
                            (unsigned long)s_hw_counters.lag_event_count,
                            (unsigned long)s_hw_counters.near_gain_event_count,
+                           (unsigned long)s_hw_counters.near_phy_event_count,
                            (unsigned long)s_hw_counters.gain_quality_drop_count,
                            (unsigned long)s_hw_counters.user_lag_mark_count,
                            (unsigned long)s_last_transport_flags,
