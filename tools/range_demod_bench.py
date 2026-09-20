@@ -89,7 +89,16 @@ def power(byte: int) -> int:
 
 
 def phase_rad(byte: int) -> float:
-    i, q = unpack(byte)
+    # Use the centre of the discarded 6-bit ADC bucket, matching the
+    # production Phase5/trajectory LUT geometry rather than integer Q4 codes.
+    qc = byte & 0x0F
+    ic = (byte >> 4) & 0x0F
+    q = qc * 64.0 + 31.5
+    i = ic * 64.0 + 31.5
+    if q >= 512.0:
+        q -= 1024.0
+    if i >= 512.0:
+        i -= 1024.0
     return math.atan2(q, i)
 
 
@@ -133,7 +142,7 @@ def golden_code(previous_raw: int, current_raw: int) -> int:
 
 def trajectory_v2_address(previous_raw: int, middle_raw: int, current_raw: int) -> int:
     return (PHASE5[previous_raw] |
-            ((middle_raw & 1) << 5) |
+            (((middle_raw >> 7) & 1) << 5) |
             ((PHASE5[current_raw] >> 1) << 6))
 
 
@@ -431,11 +440,13 @@ def synthetic_self_test() -> None:
     # against the full-Q4 exact-adjacent target in a noisy high-deviation case.
     weak_rng = random.Random(0x23C5)
     weak_raw = bytearray()
+    weak_truth: List[float] = []
     weak_phase = 0.0
     for k in range(30000):
         inst = (0.72 * math.sin(TAU * k / 71.0) +
                 0.34 * math.sin(TAU * k / 19.0))
         weak_phase = wrap(weak_phase + inst)
+        weak_truth.append(inst)
         amp = 4.8
         i = amp * math.cos(weak_phase) + weak_rng.gauss(0.0, 0.60)
         q = amp * math.sin(weak_phase) + weak_rng.gauss(0.0, 0.60)
@@ -443,10 +454,30 @@ def synthetic_self_test() -> None:
         ii = max(-8, min(7, int(round(i)))) & 0xF
         weak_raw.append((ii << 4) | qi)
 
-    tm = trajectory_metrics(weak_raw, 1)
-    assert tm.pairs > 10000
-    assert tm.trajectory_ge16 < tm.golden_ge16, (
-        tm.trajectory_ge16, tm.golden_ge16)
+    # The weak-signal LUT deliberately uses a clean-trajectory holdover prior
+    # when Q4 collapses near origin. Therefore the synthetic regression must
+    # compare against the known clean FM trajectory, not against the same
+    # noisy Q4 samples that the holdover is intended to repair.
+    golden_hard = 0
+    trajectory_hard = 0
+    golden_abs = 0
+    trajectory_abs = 0
+    pairs = 0
+    for end in range(3, len(weak_raw), 2):
+        truth_code = map_pair_sum_rad(weak_truth[end - 1] + weak_truth[end])
+        g = golden_code(weak_raw[end - 2], weak_raw[end])
+        t = trajectory_v2_code(weak_raw[end - 2], weak_raw[end - 1], weak_raw[end])
+        ge = abs(g - truth_code)
+        te = abs(t - truth_code)
+        golden_abs += ge
+        trajectory_abs += te
+        golden_hard += ge >= 16
+        trajectory_hard += te >= 16
+        pairs += 1
+
+    assert pairs > 10000
+    assert trajectory_hard < golden_hard, (trajectory_hard, golden_hard)
+    assert trajectory_abs < golden_abs, (trajectory_abs, golden_abs)
     assert len(TRAJECTORY_V2_DAC) == 1024
     assert len(TRAJECTORY_V2_CONFIDENCE) == 1024
 
@@ -454,8 +485,9 @@ def synthetic_self_test() -> None:
         "range_demod_bench self-test passed: "
         f"disc_mse={mse:.5f} pairs={m.pairs} "
         f"winding_pm={1000.0*m.winding_disagree/max(1,m.pairs):.2f} "
-        f"weak_ge16 golden={1000.0*tm.golden_ge16/tm.pairs:.1f}pm "
-        f"traj={1000.0*tm.trajectory_ge16/tm.pairs:.1f}pm"
+        f"weak_clean_ge16 golden={1000.0*golden_hard/pairs:.1f}pm "
+        f"traj={1000.0*trajectory_hard/pairs:.1f}pm "
+        f"mae golden={golden_abs/pairs:.2f} traj={trajectory_abs/pairs:.2f}"
     )
 
 
