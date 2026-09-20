@@ -252,6 +252,11 @@ check("PR builds have a separate warned flasher tab",
       'id="tabPr"' in read(ROOT / "web" / "index.html") and
       'id="panePr"' in read(ROOT / "web" / "index.html") and
       'id="selectPrBuild"' in read(ROOT / "web" / "index.html"))
+check("web flasher downloads release assets through GitHub API without third-party proxy",
+      "fetchReleaseAsset(" in web_app and
+      "'Accept': 'application/octet-stream'" in web_app and
+      "'X-GitHub-Api-Version': '2022-11-28'" in web_app and
+      "corsproxy.io" not in web_app)
 check("same-repo PR firmware is published only as an explicit prerelease",
       "publish-pr-build:" in workflow and
       "github.event.pull_request.head.repo.full_name == github.repository" in workflow and

@@ -540,7 +540,7 @@ btnFlash.addEventListener('click', async () => {
         const mergedAsset = assets.find(a => a.name.includes('merged'));
         if (mergedAsset) {
           log(`Downloading ${mergedAsset.name}...`);
-          const buf = await fetchBinary(mergedAsset.browser_download_url);
+          const buf = await fetchReleaseAsset(mergedAsset);
           fileArray.push({ data: new Uint8Array(buf), address: 0x0 });
         } else {
           // Standard 3-part layout
@@ -557,13 +557,13 @@ btnFlash.addEventListener('click', async () => {
           }
 
           log(`Downloading bootloader (${bootloader.name})...`);
-          const bBuf = await fetchBinary(bootloader.browser_download_url);
+          const bBuf = await fetchReleaseAsset(bootloader);
           fileArray.push({ data: new Uint8Array(bBuf), address: 0x2000 });
           log(`Downloading partition table (${ptable.name})...`);
-          const pBuf = await fetchBinary(ptable.browser_download_url);
+          const pBuf = await fetchReleaseAsset(ptable);
           fileArray.push({ data: new Uint8Array(pBuf), address: 0x8000 });
           log(`Downloading app binary (${app.name})...`);
-          const aBuf = await fetchBinary(app.browser_download_url);
+          const aBuf = await fetchReleaseAsset(app);
           fileArray.push({ data: new Uint8Array(aBuf), address: 0x10000 });
         }
       } else {
@@ -571,7 +571,7 @@ btnFlash.addEventListener('click', async () => {
         const app = findApplicationAsset(assets);
         if (!app) throw new Error('Could not find application firmware binary in release assets');
         log(`Downloading app binary (${app.name})...`);
-        const aBuf = await fetchBinary(app.browser_download_url);
+        const aBuf = await fetchReleaseAsset(app);
         fileArray.push({ data: new Uint8Array(aBuf), address: 0x10000 });
       }
     } else {
@@ -639,19 +639,50 @@ btnFlash.addEventListener('click', async () => {
   }
 });
 
-async function fetchBinary(url) {
-  // Use CORS proxy if needed or direct fetch
+async function fetchReleaseAsset(asset) {
+  if (!asset) throw new Error('Missing GitHub release asset metadata');
+
+  // Prefer GitHub's official release-asset REST endpoint. For public
+  // repositories this endpoint works without authentication and supports
+  // binary download via Accept: application/octet-stream. api.github.com also
+  // gives us a stable API/CORS surface instead of depending on a third-party
+  // proxy.
+  if (asset.url) {
+    try {
+      log(`Downloading ${asset.name} via GitHub asset API...`);
+      const apiRes = await fetch(asset.url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/octet-stream',
+          'X-GitHub-Api-Version': '2022-11-28'
+        },
+        redirect: 'follow',
+        cache: 'no-store'
+      });
+      if (!apiRes.ok) throw new Error(`GitHub asset API HTTP ${apiRes.status}`);
+      return await apiRes.arrayBuffer();
+    } catch (apiError) {
+      log(`GitHub asset API failed (${apiError.message}); trying browser download URL...`);
+    }
+  }
+
+  if (!asset.browser_download_url) {
+    throw new Error(`No downloadable URL available for ${asset.name || 'release asset'}`);
+  }
+
   try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.arrayBuffer();
-  } catch (e) {
-    // If browser blocks GitHub release redirect via CORS, try github raw or corsproxy
-    log(`Direct fetch failed (${e.message}), attempting CORS proxy...`);
-    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-    const res = await fetch(proxyUrl);
-    if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
-    return await res.arrayBuffer();
+    const directRes = await fetch(asset.browser_download_url, {
+      method: 'GET',
+      redirect: 'follow',
+      cache: 'no-store'
+    });
+    if (!directRes.ok) throw new Error(`GitHub download HTTP ${directRes.status}`);
+    return await directRes.arrayBuffer();
+  } catch (directError) {
+    throw new Error(
+      `Could not download ${asset.name || 'release asset'} from GitHub. ` +
+      `Asset API and browser download both failed: ${directError.message}`
+    );
   }
 }
 

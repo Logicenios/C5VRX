@@ -33,7 +33,7 @@ The production web flasher is hosted entirely by **GitHub Pages** at
 application server, or separate production web host in the current deployment.
 
 - **Automatic Latest Firmware**: Automatically selects the newest immutable semantic-version release.
-- **One-Click Flashing**: Flashes the universal merged production image (`bootloader + partitions + app` at `0x0`) over Web Serial.
+- **One-Click Flashing**: Flashes the universal merged production image (`bootloader + partitions + app` at `0x0`) over Web Serial. Firmware binaries are fetched directly through GitHub's release-asset API; no external CORS proxy is required.
 - **Selectable Releases**: The **Releases** tab contains only semantic-version releases such as `v3.0.0`, `v3.0.1`, and newer.
 - **Separate PR Builds Tab**: Same-repository pull requests publish a temporary `pr-<number>` GitHub prerelease. Experimental builds appear only under **PR Builds**, never in the normal Releases list, and require an explicit warning confirmation before flashing.
 - **Offline / Local Execution**: You can also run the web flasher locally:

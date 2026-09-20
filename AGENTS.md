@@ -129,3 +129,20 @@ group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_req
 Do not simplify this back to `${{ github.workflow }}-${{ github.ref }}`.
 The latter caused main release runs after merged PRs to be cancelled within
 seconds.
+
+
+### Browser download path for release assets
+
+The web flasher must not depend on a third-party CORS proxy for firmware
+downloads. Release discovery still uses GitHub's Releases API, but binary
+downloads should prefer each asset's API `url` with:
+
+```http
+Accept: application/octet-stream
+X-GitHub-Api-Version: 2022-11-28
+```
+
+Public release assets can be downloaded through this GitHub endpoint without a
+user token. The asset's `browser_download_url` may be kept only as a GitHub
+fallback. Do not reintroduce `corsproxy.io` or another external proxy into
+the production flasher.
