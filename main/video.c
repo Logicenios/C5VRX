@@ -34,6 +34,7 @@
 #include "range_control.h"
 #include "demod_quality.h"
 #include "fusion_receiver.h"
+#include "fusion_temporal.h"
 #include "fusion_optimizer.h"
 #include "hal/parlio_ll.h"
 #include "hal/usb_serial_jtag_ll.h"
@@ -138,6 +139,8 @@ BITSCRAMBLER_PROGRAM(s_fm4_program, "fm4");
 #define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
 #define MENU_RUNTIME_ENABLED 1       /* Native CVBS menu enabled after geometry rework */
 #define CONTROL_SAMPLE_BYTES 4092u  /* one complete, already-finished GDMA descriptor */
+#define FUSION_FAST_SAMPLE_BYTES 512u /* distributed shadow window; never paces live IQ */
+#define FUSION_FAST_PERIOD_MS 6u      /* ~8 observations per 50 ms actuator period */
 #define GAIN_SETTLE_TICKS 10        /* 500 ms decision hold after a physical gain write */
 #define GAIN_SEARCH_PROBE_TICKS 20  /* 1.0 s between no-carrier sensitivity probes */
 #define PERIODIC_TELEMETRY 0        /* keep live control path silent; diagnostics are on-demand */
@@ -251,6 +254,7 @@ _Static_assert(IQ_RATE_HZ == 40000000u, "IQ rate must be 40 MHz");
 _Static_assert(DAC_RATE_HZ == 40000000u, "DAC rate must be 40 MHz");
 _Static_assert(RAW_RING_BYTES == 16384u, "Ring must be exactly 16384 bytes");
 _Static_assert(CONTROL_SAMPLE_BYTES <= 4092u, "Control window must fit one GDMA descriptor");
+_Static_assert(FUSION_FAST_SAMPLE_BYTES <= 4092u, "Fusion shadow window must fit one GDMA descriptor");
 
 static const char *TAG = "c5vrx3_video";
 
@@ -834,11 +838,77 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
     return m;
 }
 
+static fusion_temporal_metrics_t fusion_temporal_read_shared(void)
+{
+    fusion_temporal_metrics_t out = {0};
+    for (unsigned retry = 0; retry < 4u; ++retry) {
+        uint32_t before = s_fusion_temporal_seq;
+        if (before & 1u) continue;
+        __sync_synchronize();
+        out = s_fusion_temporal_shared;
+        __sync_synchronize();
+        uint32_t after = s_fusion_temporal_seq;
+        if (before == after && !(after & 1u)) return out;
+    }
+    return out;
+}
+
+static void fusion_temporal_publish(const fusion_temporal_metrics_t *m)
+{
+    ++s_fusion_temporal_seq;
+    __sync_synchronize();
+    s_fusion_temporal_shared = *m;
+    __sync_synchronize();
+    ++s_fusion_temporal_seq;
+}
+
+/* Distributed observation closes a major blind spot in the old controller:
+ * one 102 us descriptor every 50 ms observed only ~0.2% of RF time. This task
+ * spreads similarly small CPU reads across the interval. It never writes PHY
+ * state and never participates in DMA pacing. */
+static void fusion_observer_task(void *arg)
+{
+    (void)arg;
+    fusion_temporal_t temporal;
+    fusion_temporal_reset(&temporal);
+    uint32_t seen_generation = s_profile_generation;
+    uint8_t sample[FUSION_FAST_SAMPLE_BYTES];
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(FUSION_FAST_PERIOD_MS));
+
+        if (seen_generation != s_profile_generation) {
+            seen_generation = s_profile_generation;
+            fusion_temporal_reset(&temporal);
+        }
+
+        uint8_t *src = get_completed_rx_sample_window(sizeof(sample));
+        size_t ring_offset =
+            (src >= s_raw_ring && src < s_raw_ring + sizeof(s_raw_ring)) ?
+            (size_t)(src - s_raw_ring) : 0u;
+        sync_dma_m2c((void *)src, sizeof(sample));
+        memcpy(sample, src, sizeof(sample));
+
+        control_metrics_t metrics =
+            analyze_control_window(sample, sizeof(sample), ring_offset);
+        fusion_observation_t obs = fusion_make_observation(
+            metrics.p_median, metrics.q_phase, metrics.clip_permille,
+            metrics.origin_permille, metrics.winding_permille,
+            metrics.strong_winding_permille, metrics.iq_skew_permille,
+            metrics.iq_cross_permille, s_last_sync_quality,
+            metrics.fusion_shadow);
+        fusion_temporal_metrics_t tm = fusion_temporal_update(&temporal, &obs);
+        fusion_temporal_publish(&tm);
+    }
+}
+
 /* =========================================================================
  * Receiver Modes, Slow-Transition AGC, Fixed BW40, and AFC State
  *
- * Control metrics come from one complete 4092-byte finished RX descriptor
- * (~102.3 us of Q4/I4) every 50 ms.  TRACK performs zero gain writes.
+ * The physical actuator still evaluates one complete 4092-byte descriptor
+ * every 50 ms, while a separate 512-byte shadow observer samples every 6 ms
+ * to estimate fades/recovery without increasing PHY writes. TRACK performs
+ * zero gain writes.
  *
  * SEARCH requires phase coherence; power alone is not accepted as a carrier.
  * With no lock it slowly probes G52/G62 instead of parking at maximum gain.
@@ -997,6 +1067,16 @@ static volatile int s_last_fusion_lag2_pm = 0;
 static volatile int s_last_fusion_lag4_pm = 0;
 static volatile int s_last_fusion_consensus_pm = 0;
 static volatile int s_last_fusion_slope_x100 = 0;
+static volatile int s_last_fusion_risk = 0;
+static volatile int s_last_fusion_fade = 0;
+static volatile int s_last_fusion_recovery = 0;
+static volatile int s_last_fusion_stability = 0;
+static volatile uint32_t s_last_fusion_fast_samples = 0;
+
+/* Fast observer publishes temporal state with a tiny sequence lock. It only
+ * reads completed DMA data; the 40 MS/s hardware path never waits on it. */
+static volatile uint32_t s_fusion_temporal_seq;
+static fusion_temporal_metrics_t s_fusion_temporal_shared;
 static volatile uint32_t s_gain_transition_count = 0;
 static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in kHz */
 static volatile bool s_channel_scan_active;
@@ -1329,6 +1409,7 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            "winding_pm=%d strong_winding_pm=%d sync_q=%d sync_width=%u "
            "fusion_ctx=%d fusion_q=%d fusion_conf=%d fusion_lowiq_pm=%d "
            "fusion_lag2_pm=%d fusion_lag4_pm=%d fusion_consensus_pm=%d fusion_slope_x100=%d "
+           "fusion_risk=%d fusion_fade=%d fusion_recovery=%d fusion_stability=%d fusion_fast_n=%lu "
            "fft_forced=%u fft=%d filter_mode=%u adc_sel=%u filter_reg=0x%08lx "
            "adc_reg=0x%08lx source_mux=0x%08lx "
            "tx_empty=%lu rx_ovf=%lu tx_eof=%lu gdma_in=%lu gdma_out=%lu "
@@ -2738,9 +2819,18 @@ static void analog_agc_task(void *arg)
         s_last_fusion_lag4_pm = metrics.fusion_shadow.lag4_disagreement_permille;
         s_last_fusion_consensus_pm = metrics.fusion_shadow.consensus_outlier_permille;
         s_last_fusion_slope_x100 = metrics.fusion_shadow.slope_residual_x100;
+        s_last_fusion_risk = fusion_obs.catastrophic_risk;
+
+        fusion_temporal_metrics_t fusion_tm = fusion_temporal_read_shared();
+        s_last_fusion_fade = fusion_tm.fade_score;
+        s_last_fusion_recovery = fusion_tm.recovery_score;
+        s_last_fusion_stability = fusion_tm.stability;
+        s_last_fusion_fast_samples = fusion_tm.samples;
 
         if (s_rx_profile == RX_PROFILE_FUSION_EXP && s_agc_mode == ANALOG_AGC_ACTIVE) {
-            target_gain = fusion_optimizer_tick(&fusion_optimizer, &fusion_obs);
+            const fusion_temporal_metrics_t *tm_ptr =
+                fusion_tm.samples >= 8u ? &fusion_tm : NULL;
+            target_gain = fusion_optimizer_tick(&fusion_optimizer, &fusion_obs, tm_ptr);
             s_shadow_gain = target_gain;
             s_agc_state = fusion_obs.context == FUSION_CONTEXT_CLEAN &&
                           fusion_obs.quality >= 700 ? AGC_STATE_TRACK : AGC_STATE_LEARN;
@@ -3279,13 +3369,18 @@ static void console_diag_task(void *arg)
                            s_last_p_median, s_last_q_phase,
                            s_last_clip_permille / 10, s_last_clip_permille % 10,
                            s_last_origin_permille / 10, s_last_origin_permille % 10);
-                    printf(" IQ Fusion:                  ctx=%s quality=%d confidence=%d lowIQ=%dpm lag2=%dpm lag4=%dpm consensus=%dpm slope=%d.%02d\n",
+                    printf(" IQ Fusion:                  ctx=%s quality=%d confidence=%d risk=%d lowIQ=%dpm lag2=%dpm lag4=%dpm consensus=%dpm slope=%d.%02d\n",
                            fusion_context_name((fusion_context_t)s_last_fusion_context),
-                           s_last_fusion_quality, s_last_fusion_confidence,
+                           s_last_fusion_quality, s_last_fusion_confidence, s_last_fusion_risk,
                            s_last_fusion_low_confidence_pm, s_last_fusion_lag2_pm,
                            s_last_fusion_lag4_pm, s_last_fusion_consensus_pm,
                            s_last_fusion_slope_x100 / 100,
                            fusion_abs(s_last_fusion_slope_x100 % 100));
+                    printf(" Fusion Temporal:            fade=%d recovery=%d stability=%d fast_samples=%lu period=%ums window=%u\n",
+                           s_last_fusion_fade, s_last_fusion_recovery,
+                           s_last_fusion_stability,
+                           (unsigned long)s_last_fusion_fast_samples,
+                           FUSION_FAST_PERIOD_MS, FUSION_FAST_SAMPLE_BYTES);
                     printf(" IQ Frontend Metrics:        DC I=%+.2f Q=%+.2f, skew=%d.%d%% cross=%d.%d%%\n",
                            (double)s_last_dc_i_x100 / 100.0, (double)s_last_dc_q_x100 / 100.0,
                            s_last_iq_skew_permille / 10, s_last_iq_skew_permille % 10,
@@ -3460,10 +3555,13 @@ esp_err_t video_start(void)
     if (s_tx_dma_ch >= 0) AHB_DMA.out_intr[s_tx_dma_ch].clr.val = UINT32_MAX;
     BITSCRAMBLER.state[BITSCRAMBLER_DIR_TX].val = 1u << 31;
 
+    /* Distributed shadow observer: read-only, no PHY writes and no DMA pacing. */
+    xTaskCreate(fusion_observer_task, "fusion_obs", 4096, NULL, 2, NULL);
+
     /* Start interactive console for on-demand diagnostics (zero periodic CPU/bus traffic) */
     xTaskCreate(console_diag_task, "console_diag", 3072, NULL, 1, NULL);
 
-    /* Start dedicated Analog Video AGC engine (P_median in [20, 30], fast attack) */
+    /* Start dedicated Analog Video AGC engine (slow physical actuator). */
     xTaskCreate(analog_agc_task, "analog_agc", 8192, NULL, 3, NULL);
 
 
