@@ -6,7 +6,7 @@
  *   MODEM_DIAG full Q4/I4 @ 40 MS/s
  *     -> PARLIO RX POS edge @ 40 MHz
  *     -> 16 KiB cyclic raw DMA ring (HP SRAM)
- *     -> PARLIO TX @ 40 MHz + Phase5 TX BitScrambler (fm.bsasm)
+ *     -> PARLIO TX + selectable Golden Phase5 / Trajectory v2 BitScrambler
  *     -> [D,D] 6-bit CVBS @ 20 MS/s unique / 40 MHz DAC clock
  *     -> 6-bit resistor DAC
  *
@@ -594,7 +594,7 @@ static inline unsigned trajectory_v2_address(uint8_t previous_phase5,
                                              uint8_t current_phase5)
 {
     return (unsigned)previous_phase5 |
-           (((unsigned)middle_raw & 1u) << 5u) |
+           ((((unsigned)middle_raw >> 7u) & 1u) << 5u) |
            (((unsigned)current_phase5 >> 1u) << 6u);
 }
 
@@ -1079,6 +1079,11 @@ static void cycle_demod_mode(void)
      * proven DAC path. Do not mix a new demodulator with 4-bit quantization. */
     if (s_demod_mode == DEMOD_MODE_TRAJECTORY_V2)
         s_output_mode = VIDEO_OUTPUT_6BIT_40;
+
+    /* Semantic sync interpretation changes with the demod LUT. Do not carry
+     * PAL/NTSC votes or lock age from the previous demodulator across an A/B
+     * switch. receive_generation also makes the controller relearn cleanly. */
+    video_standard_detector_reset();
 }
 
 static void apply_rf_bandwidth(bool bw40)
