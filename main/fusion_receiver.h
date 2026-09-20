@@ -27,6 +27,9 @@ typedef struct {
     uint32_t lag4_total, lag4_disagree;
     uint32_t slope_total, slope_residual_sum;
     uint32_t consensus_total, consensus_outliers;
+    int pll_predictor_delta;
+    bool have_pll_predictor;
+    uint32_t pll_lite_total, pll_lite_slips, pll_lite_holds;
 } fusion_shadow_t;
 
 typedef struct {
@@ -36,6 +39,9 @@ typedef struct {
     int lag4_disagreement_permille;
     int slope_residual_x100;
     int consensus_outlier_permille;
+    int pll_lite_slip_permille;
+    int pll_lite_hold_permille;
+    int trajectory_uncertainty_permille;
 } fusion_shadow_metrics_t;
 
 typedef struct {
@@ -72,13 +78,19 @@ static inline void fusion_shadow_reset(fusion_shadow_t *s)
 
 static inline void fusion_shadow_push(fusion_shadow_t *s, uint8_t phase, int power)
 {
+    int current_delta = 0;
+    bool have_current_delta = false;
+    bool current_low_confidence = false;
+
     if (s->history) {
-        int d = demod_phase5_signed_delta(s->phase[s->history - 1u], phase);
+        current_delta = demod_phase5_signed_delta(s->phase[s->history - 1u], phase);
+        have_current_delta = true;
+        current_low_confidence = power < 8 || s->power[s->history - 1u] < 8;
         ++s->transitions;
-        if (power < 8 || s->power[s->history - 1u] < 8) ++s->low_confidence;
+        if (current_low_confidence) ++s->low_confidence;
         if (s->have_previous_delta)
-            s->phase_jitter_sum += (uint32_t)fusion_abs(d - s->previous_delta);
-        s->previous_delta = d;
+            s->phase_jitter_sum += (uint32_t)fusion_abs(current_delta - s->previous_delta);
+        s->previous_delta = current_delta;
         s->have_previous_delta = true;
     }
 
@@ -99,9 +111,26 @@ static inline void fusion_shadow_push(fusion_shadow_t *s, uint8_t phase, int pow
         unsigned n = s->history;
         int d0 = demod_phase5_signed_delta(s->phase[n - 3u], s->phase[n - 2u]);
         int d1 = demod_phase5_signed_delta(s->phase[n - 2u], s->phase[n - 1u]);
+        int endpoint = demod_phase5_signed_delta(s->phase[n - 3u], s->phase[n - 1u]);
+        int pair_sum = d0 + d1;
         ++s->lag2_total;
-        if (d0 + d1 != demod_phase5_signed_delta(s->phase[n - 3u], s->phase[n - 1u]))
-            ++s->lag2_disagree;
+        if (pair_sum != endpoint) ++s->lag2_disagree;
+
+        if (s->have_pll_predictor) {
+            ++s->pll_lite_total;
+            bool low_pair = s->power[n - 3u] < 8 ||
+                            s->power[n - 2u] < 8 ||
+                            s->power[n - 1u] < 8;
+            int expected_pair = s->pll_predictor_delta * 2;
+            int innovation = fusion_abs(pair_sum - expected_pair);
+            /* PLL-lite is observation-only: it marks a likely click/slip when
+             * endpoint winding disagreement coincides with low envelope and a
+             * large innovation versus the last clean local slope. */
+            if (low_pair && pair_sum != endpoint && innovation >= 8)
+                ++s->pll_lite_slips;
+            if (low_pair && fusion_abs(d1 - s->pll_predictor_delta) >= 8)
+                ++s->pll_lite_holds;
+        }
     }
 
     if (s->history >= 4u) {
@@ -125,6 +154,18 @@ static inline void fusion_shadow_push(fusion_shadow_t *s, uint8_t phase, int pow
         if (adjacent != demod_phase5_signed_delta(s->phase[0], s->phase[4]))
             ++s->lag4_disagree;
     }
+
+    /* Update the tiny frequency predictor only from trustworthy adjacent
+     * samples. During a low-envelope event it coasts instead of learning the
+     * click -- the fixed-point analogue of a very small PLL holdover. */
+    if (have_current_delta && !current_low_confidence) {
+        if (!s->have_pll_predictor) {
+            s->pll_predictor_delta = current_delta;
+            s->have_pll_predictor = true;
+        } else {
+            s->pll_predictor_delta = (s->pll_predictor_delta * 3 + current_delta) / 4;
+        }
+    }
 }
 
 static inline fusion_shadow_metrics_t fusion_shadow_finish(const fusion_shadow_t *s)
@@ -139,6 +180,10 @@ static inline fusion_shadow_metrics_t fusion_shadow_finish(const fusion_shadow_t
     if (s->lag4_total) m.lag4_disagreement_permille = (int)((s->lag4_disagree * 1000u) / s->lag4_total);
     if (s->slope_total) m.slope_residual_x100 = (int)((s->slope_residual_sum * 100u) / s->slope_total);
     if (s->consensus_total) m.consensus_outlier_permille = (int)((s->consensus_outliers * 1000u) / s->consensus_total);
+    if (s->pll_lite_total) {
+        m.pll_lite_slip_permille = (int)((s->pll_lite_slips * 1000u) / s->pll_lite_total);
+        m.pll_lite_hold_permille = (int)((s->pll_lite_holds * 1000u) / s->pll_lite_total);
+    }
     return m;
 }
 
@@ -178,6 +223,9 @@ static inline int fusion_catastrophic_risk_score(const fusion_observation_t *o)
     risk += o->shadow.lag4_disagreement_permille / 2;
     risk += o->shadow.consensus_outlier_permille / 2;
     risk += o->shadow.low_confidence_permille / 2;
+    risk += o->shadow.pll_lite_slip_permille;
+    risk += o->shadow.pll_lite_hold_permille / 3;
+    risk += o->shadow.trajectory_uncertainty_permille / 2;
     risk += o->clip_permille * 4;
     return fusion_clamp(risk, 0, 1000);
 }
@@ -196,6 +244,8 @@ static inline int fusion_quality_score(const fusion_observation_t *o)
     score -= o->iq_cross_permille / 8;
     score -= o->shadow.phase_jitter_x100 / 80;
     score -= o->shadow.slope_residual_x100 / 100;
+    score -= o->shadow.pll_lite_slip_permille / 3;
+    score -= o->shadow.trajectory_uncertainty_permille / 5;
     score -= fusion_catastrophic_risk_score(o) / 4;
     return fusion_clamp(score, 0, 1000);
 }
@@ -206,6 +256,8 @@ static inline int fusion_confidence_score(const fusion_observation_t *o)
     confidence -= o->shadow.low_confidence_permille / 2;
     confidence -= o->winding_permille / 3;
     confidence -= o->shadow.consensus_outlier_permille / 2;
+    confidence -= o->shadow.pll_lite_slip_permille / 2;
+    confidence -= o->shadow.trajectory_uncertainty_permille / 4;
     confidence -= o->clip_permille * 2;
     return fusion_clamp(confidence, 0, 1000);
 }
