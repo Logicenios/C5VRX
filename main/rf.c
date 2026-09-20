@@ -424,7 +424,17 @@ extern void phy_set_freq(uint16_t freq_mhz, int offset);
 extern void phy_chip_set_chan_offset(int offset_khz);
 extern void phy_fft_scale_force(bool force_en, int8_t force_value);
 
+/* C5-only/PHY experimental surface. Signatures below are independently used
+ * by C5-targeted PHY tooling, but remain undocumented by Espressif. Keep every
+ * call behind explicit EXPERIMENTAL menu modes and weak-link capability checks. */
+extern void phy_enable_agc(void) __attribute__((weak));
+extern void phy_agc_max_gain_set(int gain) __attribute__((weak));
+extern int phy_get_noise_floor(void) __attribute__((weak));
+extern int phy_get_rssi(void) __attribute__((weak));
+
 static uint8_t s_current_gain_val = 52u;
+static bool s_experimental_hw_agc;
+static uint8_t s_experimental_agc_max_gain = 62u;
 
 /* Standard FPV Channel Table: 6 Bands x 8 Channels = 48 Channels
  * RaceBand (R), Boscam A (A), Boscam B (B), Boscam E (E), FatShark (F), LowBand (L) */
@@ -552,6 +562,63 @@ void rf_set_fft_scale_force(bool force, int8_t value)
      * Espressif's CSI gain-control design. Keep it lab-only: whether it is
      * upstream of raw MODEM_DIAG is exactly what the FFT probe measures. */
     phy_fft_scale_force(force, value);
+}
+
+
+bool rf_try_get_noise_floor_dbm(int *dbm)
+{
+    if (!dbm || !phy_get_noise_floor) return false;
+    int value = phy_get_noise_floor();
+    /* Reject impossible values instead of feeding an ABI mismatch into AUTO. */
+    if (value < -140 || value > -20) return false;
+    *dbm = value;
+    return true;
+}
+
+bool rf_try_get_wideband_rssi_dbm(int *dbm)
+{
+    if (!dbm || !phy_get_rssi) return false;
+    int value = phy_get_rssi();
+    if (value < -140 || value > 10) return false;
+    *dbm = value;
+    return true;
+}
+
+bool rf_set_experimental_hw_agc(bool enable, uint8_t max_gain)
+{
+    if (enable) {
+        if (!phy_enable_agc || !phy_agc_max_gain_set) return false;
+        if (max_gain > 62u) max_gain = 62u;
+        if (max_gain < 2u) max_gain = 2u;
+
+        /* Release the same forced-gain primitive used by production, then let
+         * the vendor AGC operate under a bounded ceiling. This is deliberately
+         * experimental: boot disabled rfagc separately and the exact split
+         * between RF/BB AGC remains part of issue #27 characterization. */
+        s_experimental_agc_max_gain = max_gain;
+        phy_agc_max_gain_set((int)max_gain);
+        phy_force_rx_gain(false, s_current_gain_val);
+        phy_enable_agc();
+        s_experimental_hw_agc = true;
+        return true;
+    }
+
+    /* Deterministic return to the known C5VRX receive state. */
+    phy_disable_agc();
+    phy_rfagc_disable();
+    phy_force_rx_gain(true, s_current_gain_val);
+    s_experimental_hw_agc = false;
+    return true;
+}
+
+bool rf_get_experimental_hw_agc(void)
+{
+    return s_experimental_hw_agc;
+}
+
+uint8_t rf_get_experimental_agc_max_gain(void)
+{
+    return s_experimental_agc_max_gain;
 }
 
 const fpv_channel_t *rf_get_current_channel(void)
