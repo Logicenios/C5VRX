@@ -187,6 +187,9 @@ static inline void sync_dma_m2c(const void *addr, size_t size)
  * This raster is never linked to the RF ring. */
 static DMA_ATTR __attribute__((aligned(64))) menu_raster_t s_menu_raster;
 static DMA_ATTR __attribute__((aligned(64))) dma_descriptor_t s_menu_nodes[MENU_MAX_NODES];
+/* AGC sampling and channel scan are serialized in analog_agc_task, so they
+ * share one descriptor-sized CPU snapshot instead of reserving 8 KiB. */
+static uint8_t s_control_sample_buf[CONTROL_SAMPLE_BYTES];
 static unsigned s_menu_node_count;
 static volatile bool s_menu_active;
 static volatile bool s_menu_boot_btn_enabled = true;
@@ -1713,9 +1716,9 @@ static void leave_experimental_profile(void)
 
 /* Modern standalone menu renderer.
  *
- * SRAM-safe production raster: 384x56 logical pixels. One logical X pixel
- * maps to three 40 MHz DAC samples (75 ns), and every logical Y row is emitted
- * on three scanlines. This makes the on-screen controls 50% taller without the
+ * SRAM-safe production raster: 384x56 logical pixels. Horizontal coordinates
+ * use a sharp fractional 189/50 DAC-sample scale, and every logical Y row is
+ * emitted on three scanlines. This makes the on-screen controls 50% taller without the
  * oversized 400x72x4 backing store that exceeded ESP32-C5 DRAM.
  */
 enum {
@@ -2222,7 +2225,6 @@ static void init_boot_button(void)
 
 static void channel_auto_search(void)
 {
-    static uint8_t scan_buf[CONTROL_SAMPLE_BYTES];
     const size_t original_channel = rf_get_channel_index();
     const uint8_t original_gain = s_current_gain;
     const size_t channel_count = rf_get_channel_count();
@@ -2239,8 +2241,9 @@ static void channel_auto_search(void)
         vTaskDelay(pdMS_TO_TICKS(90));
         uint8_t *src = get_completed_rx_sample_window(CONTROL_SAMPLE_BYTES);
         sync_dma_m2c(src, CONTROL_SAMPLE_BYTES);
-        memcpy(scan_buf, src, sizeof(scan_buf));
-        control_metrics_t metrics = analyze_control_window(scan_buf, sizeof(scan_buf));
+        memcpy(s_control_sample_buf, src, sizeof(s_control_sample_buf));
+        control_metrics_t metrics =
+            analyze_control_window(s_control_sample_buf, sizeof(s_control_sample_buf));
         int quality = signal_strength_score(&metrics, 52u);
         int rank = metrics.q_phase * 4 + metrics.p_median + quality;
         if (metrics.q_phase >= 22 && rank > best_rank) {
@@ -2384,8 +2387,6 @@ static void analog_agc_task(void *arg)
     bool btn_scan_fired = false;
     bool btn_profile_fired = false;
     bool was_locked = false;
-    static uint8_t sample_buf[CONTROL_SAMPLE_BYTES];
-
     int boot_grace_ticks = 20;
 
     for (;;) {
@@ -2486,8 +2487,9 @@ static void analog_agc_task(void *arg)
         size_t ring_offset = (sample_src >= s_raw_ring && sample_src < s_raw_ring + sizeof(s_raw_ring))
                            ? (size_t)(sample_src - s_raw_ring) : 0u;
         sync_dma_m2c((void *)sample_src, CONTROL_SAMPLE_BYTES);
-        memcpy(sample_buf, sample_src, sizeof(sample_buf));
-        control_metrics_t metrics = analyze_control_window(sample_buf, sizeof(sample_buf));
+        memcpy(s_control_sample_buf, sample_src, sizeof(s_control_sample_buf));
+        control_metrics_t metrics =
+            analyze_control_window(s_control_sample_buf, sizeof(s_control_sample_buf));
 
         int p_median = metrics.p_median;
         int q_phase = metrics.q_phase;
@@ -2566,7 +2568,8 @@ static void analog_agc_task(void *arg)
         }
 
         if (settle_ticks == 0 && q_phase >= 70 && p_median >= 12 && clip_permille < 20) {
-            video_standard_observe(sample_buf, sizeof(sample_buf), ring_offset);
+            video_standard_observe(s_control_sample_buf,
+                                   sizeof(s_control_sample_buf), ring_offset);
         }
 
         if (s_rx_profile == RX_PROFILE_HW_AGC_EXP && rf_get_experimental_hw_agc()) {

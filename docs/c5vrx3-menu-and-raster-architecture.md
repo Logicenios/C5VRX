@@ -102,15 +102,15 @@ tolerance and decoder compatibility require physical validation.
 Shared porch/blank buffers and a dedicated modern UI raster avoid a full PAL
 framebuffer. The production UI is **384 x 56 logical pixels**:
 
-- horizontal coordinates use 18/5 DAC samples (1384 samples / 34.6 us UI width);
+- horizontal coordinates use 189/50 DAC samples (1452 samples / 36.3 us UI width);
 - one logical Y row = three physical video lines (168-line UI height);
 - exact six-bit DAC shades only; no alpha, anti-aliasing or browser-style scaling;
 - persistent status bar + navigation rail + page content, rendered from the existing
   8x8 bitmap font and small built-in icons.
 
-The UI backing store remains 64,512 bytes because vertical scaling reuses each
+The UI backing store is 81,312 bytes because vertical scaling reuses each
 logical row from the same SRAM buffer. Together with sync/burst/blank templates,
-`menu_raster_t` is 83,968 bytes. The first 400x72x4 implementation was rejected
+`menu_raster_t` is 90,016 bytes. The first 400x72x4 implementation was rejected
 by the production linker because it overflowed ESP32-C5 SRAM by 39,408 bytes.
 The compact 384x56x3 layout keeps the same modern status/sidebar/page structure
 while adding only about 7.2 KiB over the old menu raster.
