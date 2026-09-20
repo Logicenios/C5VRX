@@ -226,9 +226,9 @@ check("offline demod benchmark gates adjacent/PLL experiments",
 traj_asm = read(MAIN / "fm_traj.bsasm")
 traj_gen = read(ROOT / "tools" / "train_trajectory_v2.py")
 check("Trajectory v2 preserves exact-adjacent branch semantics",
-      "d0 + d1" in traj_gen and
-      "DO NOT wrap this sum" in traj_gen and
-      "NO second wrap" in read(MAIN / "trajectory_v2_lut.h"))
+      "raw_exact = scale_rad(" in traj_gen and
+      "wrap(phases[m] - phases[p]) + wrap(phases[c] - phases[m])" in traj_gen and
+      "never re-wrapped" in read(MAIN / "trajectory_v2_lut.h"))
 check("Trajectory v2 live loop stays two-bundle and quiet 20M->40M",
       "trajectory:" in traj_asm and
       "emit:" in traj_asm and
@@ -248,7 +248,23 @@ check("Trajectory v2 initial hardware A/B is locked to 6BIT@40",
 check("Trajectory v2 supervisor scores actual LUT sync and uncertainty",
       "trajectory_v2_code" in all_c and
       "trajectory_uncertainty_permille" in all_c and
-      "c5vrx_trajectory_v2_confidence" in all_c)
+      "c5vrx_trajectory_v2_confidence" in all_c and
+      "traj_uncert_pm=%d" in all_c and
+      "pll_slip_pm=%d" in all_c)
+check("Trajectory v2 uses one identical middle-I-sign hint everywhere",
+      "middle_raw >> 7u" in all_c and
+      "set 15 7" in traj_asm and
+      "middle_i_sign" in read(MAIN / "trajectory_v2_lut.h") and
+      "((middle_raw >> 7) & 1)" in read(ROOT / "tools/range_demod_bench.py"))
+check("demod A/B switch resets semantic lock state",
+      "cycle_demod_mode" in all_c and
+      "video_standard_detector_reset();" in all_c and
+      "receive_generation also makes the controller relearn cleanly" in all_c)
+check("demod mode persists but defaults safely to Golden",
+      "SETTINGS_VERSION 4u" in all_c and
+      ".demod_mode = (uint8_t)s_demod_mode" in all_c and
+      "settings.demod_mode < DEMOD_MODE_COUNT" in all_c and
+      "s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5" in all_c)
 check("PLL-lite remains observation-only and risk-gated",
       "pll_predictor_delta" in fusion_header and
       "pll_lite_slip_permille" in fusion_header and
