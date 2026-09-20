@@ -110,3 +110,22 @@ A web UI change made in a PR is not visible on the production Pages site until
 that change is merged into `main` and `deploy-web.yml` completes. The PR
 firmware prerelease itself can still be discovered by whatever flasher UI is
 currently deployed.
+
+
+### CI concurrency on merge
+
+A merged pull request generates two relevant events almost simultaneously:
+`pull_request: closed` and `push` to `main`. For a merged/closed PR GitHub
+can expose `github.ref` as `refs/heads/main`, so a concurrency group based
+only on `github.ref` is unsafe: the lightweight PR cleanup run can cancel the
+real main firmware build and semantic release.
+
+Keep Production CI concurrency separated by event type and PR identity:
+
+```yaml
+group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+```
+
+Do not simplify this back to `${{ github.workflow }}-${{ github.ref }}`.
+The latter caused main release runs after merged PRs to be cancelled within
+seconds.

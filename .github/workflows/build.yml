@@ -7,8 +7,11 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, closed]
 
+# A merged PR emits both pull_request:closed and push:main. GitHub reports
+# github.ref=refs/heads/main for the merged/closed PR event too, so grouping
+# only by ref lets the cleanup event cancel the real main build/release.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
