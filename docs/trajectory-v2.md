@@ -114,28 +114,49 @@ not raw noisy adjacent-25-ns samples straight to the DAC.
 
 ## Chosen live architecture
 
-The C5 16-bit BitScrambler LUT has a 10-bit address. Trajectory v2 spends it
-as:
+Trajectory v2 now uses the same physical 1024x16 BitScrambler LUT twice in
+each 50 ns output period. This avoids throwing away a Phase5 bit just to expose
+the middle sample.
+
+### Stage 1 — raw-Q4 trajectory token
+
+While `emit` prefetches the next `[middle,current]` raw-Q4 pair, it addresses
+the LUT with:
 
 ```text
-previous full Phase5          5 bits
-middle raw-I sign hint         1 bit
-current Phase5[4:1]           4 bits
+current raw Q4/I4 byte         8 bits
+middle raw-I sign              1 bit
+previous actual Phase5 MSB     1 bit
                               -------
                               10 bits
 ```
 
-The current full Phase5 state is still retained in persistent BitScrambler
-state for the next output. Only the trajectory lookup drops the current phase
-LSB.
+The high/spare bits of that LUT word return two things:
 
-The middle hint currently uses the raw I sign bit (packed byte bit 7). It was
-selected as the single middle-sample bit for the 10-bit hardware address after
-testing compressed candidates against a physical wide-FM prior. The important
-point is that the live and supervisory/offline address functions use the exact
-same bit.
+```text
+actual current Phase5          5 bits
+learned trajectory token       5 bits
+```
 
-The steady-state hardware loop is only:
+Actual current Phase5 is therefore still exact with respect to the same
+production Phase5 decode used by Golden. The token is a compact learned summary
+of the local two-adjacent trajectory, including information from the middle
+sample and raw-Q4 amplitude/noise state.
+
+### Stage 2 — previous Phase5 + token → CVBS
+
+The next steady-state bundle addresses the same LUT again with:
+
+```text
+previous actual Phase5         5 bits
+trajectory token               5 bits
+                              -------
+                              10 bits
+```
+
+The low six bits of that second LUT result are the final 6-bit CVBS code.
+
+The steady-state loop remains exactly:
 
 ```text
 trajectory
@@ -144,9 +165,8 @@ emit + prefetch
    └────────────> trajectory
 ```
 
-Two bundles per output.
-
-The output remains:
+So Trajectory v2 still uses only two BitScrambler bundles per 50 ns output and
+keeps the proven output contract:
 
 ```text
 20 MS/s unique 6-bit CVBS
@@ -154,54 +174,52 @@ The output remains:
  -> physical 40-MHz resistor DAC
 ```
 
+No CPU pixel DSP is introduced.
+
 ## LUT target
 
-The deterministic training prior generates physically plausible local FM
-slope/acceleration, random carrier phase, Q4 amplitude/fades and additive I/Q
-noise.
-
-For strong Q4 triplets:
+The deterministic trainer generates physically plausible local FM motion,
+carrier phase, amplitude fades and Q4 noise. For every training triplet it
+knows the clean local adjacent trajectory:
 
 ```text
-d0 = wrap(phi_middle - phi_previous)
-d1 = wrap(phi_current - phi_middle)
+d0 = local previous→middle phase increment
+d1 = local middle→current phase increment
 target = map_to_CVBS(d0 + d1)
 ```
 
-For weak/near-origin triplets, the target uses the known clean local FM
-trajectory as a tiny holdover prior instead of teaching the LUT to reproduce a
-noise-driven click. In both cases there is **no second wrap around the adjacent
-sum**.
+There is deliberately **no second wrap around `d0+d1`**. Preserving that branch
+information is the reason Trajectory v2 exists.
 
-Training samples that compress to the same 10-bit hardware address are
-averaged in video-code space. The generated LUT therefore approximates the
-full exact-adjacent trajectory where the Q4 observation is trustworthy, while
-using a conservative PLL-lite prior where it is not.
+Training is two-stage. Stage 1 learns one of 32 trajectory tokens for every
+raw-Q4/context address. Stage 2 learns the best CVBS code for
+`previous Phase5 + token`. The trainer iterates those assignments with a
+deterministic L1 objective, then emits both the 16-bit BitScrambler LUT words
+and matching supervisory tables.
 
-This distinction is important:
-
-- offline exact-adjacent = full-Q4 oracle;
-- live Trajectory v2 = compressed two-bundle estimator of that oracle.
-
-Do not describe the live path as bit-exact full-Q4 adjacent FM.
+This means the live path is not a bit-exact full-Q4 atan2 discriminator.
+It is a hardware-budgeted estimator trained toward the clean adjacent-FM
+trajectory while retaining full current Phase5 state.
 
 ## Confidence
 
-The generator also calculates the spread of exact-adjacent targets that map to
-each compressed address.
+The generated confidence table belongs to **stage 1**. It scores how tightly
+the training targets associated with one raw-Q4/context address agree after
+the learned token mapping.
 
-Small spread:
-- the compressed state is informative;
+Small residual:
+- stage-1 state is informative;
 - high confidence.
 
-Large spread:
-- different raw triples collapse onto the same address with different correct
-  answers;
+Large residual:
+- different plausible trajectories collapse onto the same compressed state;
 - low confidence.
 
-The confidence table does not alter the 40-MS/s pixel data on the CPU. It is
-used by the Range/Fusion supervisor to increase catastrophic-risk when the
-current compressed trajectory region is intrinsically ambiguous.
+The confidence table is supervisory only. It does not put CPU DSP in the
+40-MS/s video path. When TRAJ V2 is selected, Range/Fusion can use this
+uncertainty as additional catastrophic-risk evidence. When GOLDEN is selected,
+that Trajectory-only penalty is explicitly zeroed so A/B comparison remains
+clean.
 
 ## PLL-lite
 
@@ -291,10 +309,10 @@ python3 tools/train_trajectory_v2.py --self-test
 
 Checks:
 
-- 1024 embedded trajectory states;
-- embedded raw-Q4 -> Phase5 high bits;
-- generated DAC table equality;
-- confidence table;
+- 1024 stage-1 states and 1024 stage-2 address states;
+- embedded raw-Q4 -> actual Phase5 high bits;
+- learned 5-bit token packing/unpacking;
+- generated DAC, token and confidence table equality;
 - pinned generated-table SHA256;
 - exactly two steady-state bundles;
 - persistent downstream/no-EOF transport contract.
