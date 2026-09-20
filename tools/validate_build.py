@@ -176,6 +176,25 @@ check("range trials penalize endpoint winding instead of amplitude-only scoring"
       "demod_winding_penalty" in read(MAIN / "range_control.h") and
       "DEMOD_STATIC_HEAVY_WINDING_PM" in read(MAIN / "demod_quality.h") and
       "sync_quality_avg >= 70" in read(MAIN / "range_control.h"))
+fusion_header = read(MAIN / "fusion_receiver.h")
+fusion_optimizer = read(MAIN / "fusion_optimizer.h")
+check("IQ fusion combines adjacent, lag-2, lag-4 and robust slope evidence",
+      "fusion_shadow_push" in fusion_header and
+      "lag2_disagreement_permille" in fusion_header and
+      "lag4_disagreement_permille" in fusion_header and
+      "fusion_robust_delta3" in fusion_header and
+      "consensus_outlier_permille" in fusion_header)
+check("fusion learner is contextual, bounded and high-gain biased at loss",
+      "fusion_optimizer_tick" in fusion_optimizer and
+      "FUSION_CONTEXT_WEAK" in fusion_optimizer and
+      "FUSION_CONTEXT_BLOCKER" in fusion_optimizer and
+      "No carrier = maximum known sensitivity" in fusion_optimizer and
+      "FUSION_OPT_SETTLE_TICKS" in fusion_optimizer)
+check("fusion profile stays supervisory over the proven realtime demod",
+      "RX_PROFILE_FUSION_EXP" in all_c and
+      "fusion_optimizer_tick" in all_c and
+      "fusion_make_observation" in all_c and
+      bs_srcs == ["fm.bsasm", "fm4.bsasm"])
 check("lag correlation covers any tracked PHY write",
       "near_phy_event_count" in all_c and
       "s_last_phy_write_us" in all_c and
@@ -195,14 +214,15 @@ check("unsafe undocumented gain/filter ROM controls remain out of production",
           "phy_rfrx_rxdc_cal(",
       )))
 
-check("range profile is the BW40 default and other experiments remain explicit",
+check("fusion profile is the experimental default and other RX profiles remain explicit",
       "RX_PROFILE_BALANCED = 0" in all_c and
       "RX_PROFILE_RANGE_EXP" in all_c and
       "RX_PROFILE_BLOCKER_EXP" in all_c and
       "RX_PROFILE_RECOVERY_EXP" in all_c and
       "RX_PROFILE_AUTO_EXP" in all_c and
       "RX_PROFILE_HW_AGC_EXP" in all_c and
-      "s_rx_profile = RX_PROFILE_RANGE_EXP" in all_c and
+      "RX_PROFILE_FUSION_EXP" in all_c and
+      "s_rx_profile = RX_PROFILE_FUSION_EXP" in all_c and
       "s_rf_bw_mode = RF_BW_MODE_BW40" in all_c)
 check("RF menu preserves BW control and adds two-second profile selector",
       "LONG:BW  2S:PROFILE" in all_c and

@@ -151,3 +151,29 @@ apply. It downloads selected GitHub Release assets and places them under
 development fallback when the Pages manifest is unavailable. Never add a
 third-party CORS proxy, and do not make production flashing depend on
 cross-origin GitHub binary fetches.
+
+
+## IQ Fusion Engine experimental contract
+
+The experimental `FUSION EXP` profile may combine multiple estimators from a
+completed Q4/I4 control snapshot, but it must never insert CPU processing into
+the 40 MS/s realtime path.
+
+Useful fusion evidence includes adjacent 25 ns phase deltas, 50 ns endpoint
+winding disagreement, lag-4 disagreement, robust local phase-slope consensus,
+near-origin confidence, Q_phase, clipping, I/Q centering/skew and bounded
+semantic-video validation.
+
+The slow learner may select only PHY states whose actuator semantics are
+already established. A symbol name in the closed PHY blob is not sufficient
+evidence for production use. Undocumented LNA/BB/filter controls require a
+prototype, register-diff and raw-Q4 A/B before becoming learner actions.
+
+At the range edge, loss of sync/video is never by itself evidence to reduce
+sensitivity. NO_CARRIER must return to the known high-gain survival state.
+Clean/high-confidence IQ should produce zero PHY writes.
+
+Exact adjacent-FM waveform fusion remains gated by issue #23. Every 40 MS/s IQ
+sample must participate before 2:1 reduction, and a live implementation must
+prove sustained hardware throughput plus state continuity before replacing the
+current gapless BitScrambler path.
