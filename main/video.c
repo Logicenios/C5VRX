@@ -1785,6 +1785,139 @@ static void lab_run_bandwidth_probe(void)
 }
 
 
+/* Acquisition-only centering characterization. This deliberately does not
+ * become a continuous AFC loop: each PHY retune can disturb analog video.
+ * The probe scores actual demod/sync quality and restores the prior offset. */
+static void lab_run_frequency_probe(void)
+{
+    if (rf_get_experimental_hw_agc()) {
+        printf("C5VRX_AFC_PROBE_REFUSED reason=hw_agc_profile\n");
+        return;
+    }
+    if (s_gain_sweep.active || s_menu_active) {
+        printf("C5VRX_AFC_PROBE_REFUSED reason=%s\n",
+               s_gain_sweep.active ? "gain_sweep_active" : "menu_active");
+        return;
+    }
+
+    const analog_agc_mode_t saved_agc_mode = s_agc_mode;
+    const agc_state_t saved_agc_state = s_agc_state;
+    const rf_bw_mode_t saved_bw_mode = s_rf_bw_mode;
+    const bool saved_bw40 = s_current_bw40;
+    const afc_mode_t saved_afc_mode = s_afc_mode;
+    const int saved_offset = rf_get_frequency_offset_khz();
+    const bool saved_quiet = s_lab_quiet;
+
+    s_agc_mode = ANALOG_AGC_MANUAL;
+    s_rf_bw_mode = RF_BW_MODE_BW40;
+    if (!s_current_bw40) apply_rf_bandwidth(true);
+    s_afc_mode = AFC_MODE_HOLD;
+    s_lab_quiet = true;
+    vTaskDelay(pdMS_TO_TICKS(250));
+    lab_reset_correlation();
+
+    static const int offsets[] = {
+        -1000, -750, -500, -250, 0, 250, 500, 750, 1000
+    };
+    int best_offset = saved_offset;
+    int best_score = -100000;
+
+    printf("C5VRX_AFC_PROBE_BEGIN gain=%u bw=40 settle_ms=650 offsets=-1000..1000\n",
+           s_current_gain);
+
+    for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
+        const hw_transport_counters_t base = lab_counter_snapshot();
+        apply_frequency_offset_khz_tracked(offsets[i]);
+        vTaskDelay(pdMS_TO_TICKS(650));
+        lab_print_row("AFC_SWEEP", &base);
+
+        int score = s_last_fusion_quality +
+                    s_last_sync_quality * 3 -
+                    s_last_fusion_risk / 2 -
+                    s_last_winding_permille / 2;
+        if (score > best_score) {
+            best_score = score;
+            best_offset = offsets[i];
+        }
+    }
+
+    apply_frequency_offset_khz_tracked(saved_offset);
+    s_rf_bw_mode = saved_bw_mode;
+    if (s_current_bw40 != saved_bw40) apply_rf_bandwidth(saved_bw40);
+    s_afc_mode = saved_afc_mode;
+    s_agc_state = saved_agc_state;
+    s_agc_mode = saved_agc_mode;
+    s_lab_quiet = saved_quiet;
+
+    printf("C5VRX_AFC_PROBE_END best_offset_khz=%d best_score=%d restored_offset_khz=%d\n",
+           best_offset, best_score, saved_offset);
+}
+
+/* Let Espressif's own AGC choose a weak-signal state once, then snapshot the
+ * gain/filter registers. This is an oracle/characterization tool only; flight
+ * control remains deterministic and never lets vendor AGC fight Fusion. */
+static void lab_run_hw_agc_oracle(void)
+{
+    if (s_gain_sweep.active || s_menu_active) {
+        printf("C5VRX_HW_AGC_ORACLE_REFUSED reason=%s\n",
+               s_gain_sweep.active ? "gain_sweep_active" : "menu_active");
+        return;
+    }
+
+    const analog_agc_mode_t saved_agc_mode = s_agc_mode;
+    const agc_state_t saved_agc_state = s_agc_state;
+    const rf_bw_mode_t saved_bw_mode = s_rf_bw_mode;
+    const bool saved_bw40 = s_current_bw40;
+    const afc_mode_t saved_afc_mode = s_afc_mode;
+    const int saved_offset = rf_get_frequency_offset_khz();
+    const bool saved_quiet = s_lab_quiet;
+    const uint8_t saved_gain = s_current_gain;
+    const uint8_t saved_shadow = s_shadow_gain;
+
+    s_agc_mode = ANALOG_AGC_MANUAL;
+    s_rf_bw_mode = RF_BW_MODE_BW40;
+    if (!s_current_bw40) apply_rf_bandwidth(true);
+    s_afc_mode = AFC_MODE_HOLD;
+    if (saved_offset != 0) apply_frequency_offset_khz_tracked(0);
+    s_lab_quiet = true;
+
+    s_last_phy_write_us = esp_timer_get_time();
+    s_last_phy_write_kind = PHY_WRITE_HW_AGC;
+    if (!rf_set_experimental_hw_agc(true, 62u)) {
+        printf("C5VRX_HW_AGC_ORACLE_REFUSED reason=vendor_symbols_unavailable\n");
+        goto restore_hw_oracle;
+    }
+
+    printf("C5VRX_HW_AGC_ORACLE_BEGIN max_gain=62 dwell_ms=1500\n");
+    vTaskDelay(pdMS_TO_TICKS(1500));
+
+    int value;
+    s_noise_floor_valid = rf_try_get_noise_floor_dbm(&value);
+    if (s_noise_floor_valid) s_last_noise_floor_dbm = value;
+    s_phy_rssi_valid = rf_try_get_wideband_rssi_dbm(&value);
+    if (s_phy_rssi_valid) s_last_phy_rssi_dbm = value;
+    lab_print_row("HW_AGC_ORACLE", NULL);
+
+restore_hw_oracle:
+    s_last_phy_write_us = esp_timer_get_time();
+    s_last_phy_write_kind = PHY_WRITE_HW_AGC;
+    (void)rf_set_experimental_hw_agc(false, 62u);
+    if (s_current_gain != saved_gain) lab_apply_fixed_gain(saved_gain);
+    s_shadow_gain = saved_shadow;
+    if (rf_get_frequency_offset_khz() != saved_offset)
+        apply_frequency_offset_khz_tracked(saved_offset);
+    s_rf_bw_mode = saved_bw_mode;
+    if (s_current_bw40 != saved_bw40) apply_rf_bandwidth(saved_bw40);
+    s_afc_mode = saved_afc_mode;
+    s_agc_state = saved_agc_state;
+    s_agc_mode = saved_agc_mode;
+    s_lab_quiet = saved_quiet;
+
+    printf("C5VRX_HW_AGC_ORACLE_END restored_gain=%u restored_bw=%u\n",
+           saved_gain, saved_bw40 ? 40u : 20u);
+}
+
+
 static void apply_rx_profile(rx_profile_t profile)
 {
     if (profile >= RX_PROFILE_COUNT) profile = RX_PROFILE_BALANCED;
@@ -3215,6 +3348,10 @@ static void console_diag_task(void *arg)
                     lab_run_fft_probe();
                 } else if (c == 'W') {
                     lab_run_bandwidth_probe();
+                } else if (c == 'A') {
+                    lab_run_frequency_probe();
+                } else if (c == 'H') {
+                    lab_run_hw_agc_oracle();
                 } else if (c == 'X') {
                     cycle_rx_profile();
                 } else if (c == 't') {
@@ -3449,7 +3586,8 @@ static void console_diag_task(void *arg)
                     printf("  'b':         Enter quiet MANUAL/BW40/AFC-off baseline + reset counters\n");
                     printf("  'g':         Start/abort G2..G62 production-state gain sweep\n");
                     printf("  'F'/'W':     FFT-scale Q4 probe / fixed-gain BW40-vs-BW20 probe\n");
-                    printf("  'X':         Cycle RX profile (Balanced/Range/Blocker/Recovery/Auto/HW AGC)\n");
+                    printf("  'A'/'H':     AFC centering sweep / vendor-AGC register oracle\n");
+                    printf("  'X':         Cycle RX profile (Balanced/Range/Blocker/Recovery/Auto/HW AGC/Fusion)\n");
                     printf("  'p'/'r':     Machine-readable PHY/Q4 snapshot / reset lag counters\n");
                     printf("  't'/'q':     Vendor timer inventory / quiet unsolicited lock message\n");
                     printf("  'l':         Mark a visible lag/freeze for correlation\n");
