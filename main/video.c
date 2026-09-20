@@ -2468,10 +2468,12 @@ static void menu_draw_afc_page(void)
 static void menu_draw_video_page(void)
 {
     char detected[24];
-    menu_draw_page_title("VIDEO OUTPUT",
-                         s_output_mode == VIDEO_OUTPUT_4BIT_80 ? "EXPERIMENTAL" : "DEFAULT");
+    bool experimental = s_output_mode == VIDEO_OUTPUT_4BIT_80 ||
+                        s_demod_mode == DEMOD_MODE_TRAJECTORY_V2;
+    menu_draw_page_title("VIDEO OUTPUT", experimental ? "EXPERIMENTAL" : "DEFAULT");
     menu_ui_value_box(100, 22, 130, "DAC", output_mode_name());
-    menu_ui_value_box(238, 22, 138, "STANDARD",
+    menu_ui_value_box(238, 22, 138, "DEMOD", demod_mode_name());
+    menu_ui_value_box(100, 34, 130, "STANDARD",
                       s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC");
     if (s_detected_video_std_valid) {
         snprintf(detected, sizeof(detected), "%s %u",
@@ -2480,8 +2482,8 @@ static void menu_draw_video_page(void)
     } else {
         snprintf(detected, sizeof(detected), "SEARCHING");
     }
-    menu_ui_value_box(100, 34, 276, "DETECTED", detected);
-    menu_ui_text("LONG: TOGGLE OUTPUT - APPLIES ON EXIT", 100, 47, UI_MUTED);
+    menu_ui_value_box(238, 34, 138, "DETECTED", detected);
+    menu_ui_text("LONG:DAC  2S:DEMOD - APPLIES ON EXIT", 100, 47, UI_MUTED);
 }
 
 static void menu_draw_exit_page(void)
@@ -2782,10 +2784,15 @@ static void handle_button_long_click(void)
             settings_save();
             break;
         case 4: /* VIDEO OUTPUT */
-            s_output_mode = s_output_mode == VIDEO_OUTPUT_6BIT_40 ?
-                            VIDEO_OUTPUT_4BIT_80 : VIDEO_OUTPUT_6BIT_40;
-            printf("[MENU: OUTPUT] -> %s%s\n", output_mode_name(),
-                   s_output_mode == VIDEO_OUTPUT_4BIT_80 ? " (EXPERIMENTAL)" : "");
+            if (s_demod_mode == DEMOD_MODE_TRAJECTORY_V2) {
+                s_output_mode = VIDEO_OUTPUT_6BIT_40;
+                printf("[MENU: OUTPUT] TRAJ V2 is locked to 6BIT@40 for clean A/B validation\n");
+            } else {
+                s_output_mode = s_output_mode == VIDEO_OUTPUT_6BIT_40 ?
+                                VIDEO_OUTPUT_4BIT_80 : VIDEO_OUTPUT_6BIT_40;
+                printf("[MENU: OUTPUT] -> %s%s\n", output_mode_name(),
+                       s_output_mode == VIDEO_OUTPUT_4BIT_80 ? " (EXPERIMENTAL)" : "");
+            }
             settings_save();
             break;
         case 5: /* SAVE & EXIT */
@@ -2827,6 +2834,7 @@ static void analog_agc_task(void *arg)
     bool btn_long_fired = false;
     bool btn_scan_fired = false;
     bool btn_profile_fired = false;
+    bool btn_demod_fired = false;
     bool was_locked = false;
     range_control_t range_controller;
     range_control_reset(&range_controller, s_current_gain);
@@ -2867,6 +2875,7 @@ static void analog_agc_task(void *arg)
             btn_long_fired = false;
             btn_scan_fired = false;
             btn_profile_fired = false;
+            btn_demod_fired = false;
         } else {
             int btn_level = gpio_get_level(BOOT_BTN_GPIO);
             if (btn_level == 0) {
@@ -2880,6 +2889,18 @@ static void analog_agc_task(void *arg)
                         btn_profile_fired = true;
                         btn_long_fired = true;
                         cycle_rx_profile();
+                        menu_render_menu();
+                        s_menu_timeout_ticks = 0;
+                    }
+                } else if (s_menu_active && s_menu_cursor == 4) {
+                    if (btn_ticks >= 40 && !btn_demod_fired) {
+                        btn_demod_fired = true;
+                        btn_long_fired = true;
+                        cycle_demod_mode();
+                        settings_save();
+                        printf("[MENU: DEMOD] -> %s%s\n", demod_mode_name(),
+                               s_demod_mode == DEMOD_MODE_TRAJECTORY_V2 ?
+                               " (6BIT@40 forced)" : "");
                         menu_render_menu();
                         s_menu_timeout_ticks = 0;
                     }
@@ -2900,6 +2921,12 @@ static void analog_agc_task(void *arg)
                     } else if (!btn_profile_fired && btn_ticks >= 2) {
                         handle_button_short_click();
                     }
+                } else if (s_menu_active && s_menu_cursor == 4) {
+                    if (!btn_demod_fired && btn_ticks >= 12) {
+                        handle_button_long_click(); /* normal DAC-output action */
+                    } else if (!btn_demod_fired && btn_ticks >= 2) {
+                        handle_button_short_click();
+                    }
                 } else if (!btn_long_fired && btn_ticks >= 2) {
                     handle_button_short_click();
                 }
@@ -2907,6 +2934,7 @@ static void analog_agc_task(void *arg)
                 btn_long_fired = false;
                 btn_scan_fired = false;
                 btn_profile_fired = false;
+                btn_demod_fired = false;
             }
         }
 
