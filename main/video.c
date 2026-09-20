@@ -589,21 +589,34 @@ static inline bool phase5_pair_is_sync(uint8_t previous, uint8_t current)
     return (s_phase5_sync_mask[index >> 3u] & (1u << (index & 7u))) != 0u;
 }
 
-static inline unsigned trajectory_v2_address(uint8_t previous_phase5,
-                                             uint8_t middle_raw,
-                                             uint8_t current_phase5)
+static inline unsigned trajectory_v2_stage1_address(uint8_t previous_phase5,
+                                                    uint8_t middle_raw,
+                                                    uint8_t current_raw)
 {
-    return (unsigned)previous_phase5 |
-           ((((unsigned)middle_raw >> 7u) & 1u) << 5u) |
-           (((unsigned)current_phase5 >> 1u) << 6u);
+    /* Must mirror fm_traj.bsasm exactly:
+     *   A0..A7 = current raw Q4/I4
+     *   A8     = middle raw-I sign
+     *   A9     = previous actual Phase5 MSB. */
+    return (unsigned)current_raw |
+           ((((unsigned)middle_raw >> 7u) & 1u) << 8u) |
+           ((((unsigned)previous_phase5 >> 4u) & 1u) << 9u);
+}
+
+static inline unsigned trajectory_v2_stage2_address(uint8_t previous_phase5,
+                                                    uint8_t token)
+{
+    return (unsigned)previous_phase5 | (((unsigned)token & 31u) << 5u);
 }
 
 static inline uint8_t trajectory_v2_code(uint8_t previous_phase5,
                                          uint8_t middle_raw,
-                                         uint8_t current_phase5)
+                                         uint8_t current_raw)
 {
+    unsigned stage1 =
+        trajectory_v2_stage1_address(previous_phase5, middle_raw, current_raw);
+    uint8_t token = c5vrx_trajectory_v2_token[stage1];
     return c5vrx_trajectory_v2_dac[
-        trajectory_v2_address(previous_phase5, middle_raw, current_phase5)];
+        trajectory_v2_stage2_address(previous_phase5, token)];
 }
 
 static inline fusion_shadow_metrics_t active_demod_shadow(fusion_shadow_metrics_t shadow)
@@ -674,7 +687,7 @@ static int video_semantic_observe(const uint8_t *raw, size_t bytes, size_t ring_
     for (size_t i = first + 2u; i < bytes; i += 2u, ++out_index) {
         uint8_t current = s_phase5_state_lut[raw[i]];
         bool low = s_demod_mode == DEMOD_MODE_TRAJECTORY_V2 ?
-                   trajectory_v2_code(previous, raw[i - 1u], current) <= 8u :
+                   trajectory_v2_code(previous, raw[i - 1u], raw[i]) <= 8u :
                    phase5_pair_is_sync(previous, current);
         previous = current;
 
@@ -836,7 +849,8 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
                 if (winding) ++m.strong_winding_events;
             }
 
-            unsigned traj_addr = trajectory_v2_address(prev2_phase, prev_byte, phase);
+            unsigned traj_addr =
+                trajectory_v2_stage1_address(prev2_phase, prev_byte, byte);
             m.trajectory_uncertainty_sum +=
                 255u - c5vrx_trajectory_v2_confidence[traj_addr];
             ++m.trajectory_states;
