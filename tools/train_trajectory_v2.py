@@ -160,7 +160,7 @@ def self_test() -> None:
     # --write and update this digest in the same reviewed change.
     packed = bytes(dac) + bytes(confidence)
     digest = hashlib.sha256(packed).hexdigest()
-    expected = "TO_BE_FILLED"
+    expected = "662222820f078a17d69efc7392958aa95634a055175ce45678d3d637e70f3807"
     assert digest == expected, f"Trajectory v2 table drift: {digest}"
 
     # Spot-check address semantics across quadrant/sign boundaries.
