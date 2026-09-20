@@ -119,7 +119,7 @@ as:
 
 ```text
 previous full Phase5          5 bits
-middle raw-Q trajectory hint  1 bit
+middle raw-I sign hint         1 bit
 current Phase5[4:1]           4 bits
                               -------
                               10 bits
@@ -129,9 +129,11 @@ The current full Phase5 state is still retained in persistent BitScrambler
 state for the next output. Only the trajectory lookup drops the current phase
 LSB.
 
-The middle hint currently uses raw Q bit 0. An exhaustive synthetic search
-over the available raw middle bits found this family materially better than
-blindly restoring the old phase4 + middle-quadrant + phase4 design.
+The middle hint currently uses the raw I sign bit (packed byte bit 7). It was
+selected as the single middle-sample bit for the 10-bit hardware address after
+testing compressed candidates against a physical wide-FM prior. The important
+point is that the live and supervisory/offline address functions use the exact
+same bit.
 
 The steady-state hardware loop is only:
 
@@ -154,20 +156,27 @@ The output remains:
 
 ## LUT target
 
-For every possible raw Q4/I4 triple in the exhaustive geometry prior:
+The deterministic training prior generates physically plausible local FM
+slope/acceleration, random carrier phase, Q4 amplitude/fades and additive I/Q
+noise.
+
+For strong Q4 triplets:
 
 ```text
 d0 = wrap(phi_middle - phi_previous)
 d1 = wrap(phi_current - phi_middle)
-
 target = map_to_CVBS(d0 + d1)
 ```
 
-Again, there is **no wrap around d0+d1**.
+For weak/near-origin triplets, the target uses the known clean local FM
+trajectory as a tiny holdover prior instead of teaching the LUT to reproduce a
+noise-driven click. In both cases there is **no second wrap around the adjacent
+sum**.
 
-Triples that compress to the same 10-bit hardware address are averaged in
-video-code space. The generated LUT therefore approximates the full exact
-adjacent oracle while respecting the physical C5 address/instruction budget.
+Training samples that compress to the same 10-bit hardware address are
+averaged in video-code space. The generated LUT therefore approximates the
+full exact-adjacent trajectory where the Q4 observation is trustworthy, while
+using a conservative PLL-lite prior where it is not.
 
 This distinction is important:
 
@@ -296,8 +305,8 @@ Regeneration is explicit:
 python3 tools/train_trajectory_v2.py --write --self-test
 ```
 
-The exhaustive regeneration requires NumPy and is not performed silently by
-normal firmware builds.
+Regeneration is deterministic and dependency-free; normal firmware builds do
+not silently retrain the LUT. The embedded tables are pinned by SHA-256.
 
 ### Weak-signal benchmark
 
