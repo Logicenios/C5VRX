@@ -103,9 +103,10 @@ check("menu resolves detected PAL/NTSC before raster start",
 check("modern menu raster is SRAM-safe 384x56 logical pixels at 3x vertical scale",
       "MENU_UI_WIDTH 384u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_LINES 56u" in read(MAIN / "menu_raster.h") and
-      "MENU_UI_X_SCALE_NUM 189u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_X_SCALE_NUM 208u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_X_SCALE_DEN 50u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_Y_REPEAT 3u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_BYTES 1600u" in read(MAIN / "menu_raster.h") and
       "MENU_MAX_NODES 6348u" in read(MAIN / "menu_raster.h") and
       "s_menu_raster.ui" in all_c)
 check("native menu enabled with safe defaults",
@@ -115,6 +116,16 @@ check("native menu enabled with safe defaults",
 check("experimental BW auto and 4-bit@80 remain opt-in",
       "AUTO EXP" in all_c and "VIDEO_OUTPUT_4BIT_80" in all_c and
       "DAC4_RATE_HZ     80000000u" in all_c)
+check("4BIT@80 remains reachable with a valid GOLDEN pairing",
+      's_output_mode = s_output_mode == VIDEO_OUTPUT_6BIT_40 ?' in all_c and
+      "s_demod_mode == DEMOD_MODE_TRAJECTORY_V2" in all_c and
+      "s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;" in all_c and
+      "DEMOD -> GOLDEN" in all_c and
+      "selecting 4BIT@80" in all_c)
+check("TRAJ V2 keeps its required 6BIT@40 pairing",
+      "if (s_demod_mode == DEMOD_MODE_TRAJECTORY_V2)" in all_c and
+      "s_output_mode = VIDEO_OUTPUT_6BIT_40;" in all_c and
+      "start_flight_demodulator" in all_c)
 check("menu lifecycle does not double-disable BitScrambler",
       all_c.count("bitscrambler_disable(s_flight_bs)") == 1)
 check("legacy seven-line text menu removed",
@@ -415,6 +426,7 @@ check("stacked development PRs publish webflasher firmware",
       "github.event_name == 'push'" in workflow and
       "github.ref != 'refs/heads/main'" in workflow and
       "gh pr list" in workflow and
+      '--head "${GITHUB_REF_NAME}"' in workflow and
       "steps.pr.outputs.publish == 'true'" in workflow and
       "pull-requests: read" in workflow)
 check("CI concurrency separates merge push from PR-close cleanup",
@@ -447,7 +459,10 @@ check("AGENTS documents release, PR-build and trusted Pages mirror flow",
       "GitHub Pages" in agents and
       "always checks out trusted" in agents and
       "firmware/releases.json" in agents and
-      "same-origin" in agents)
+      "same-origin" in agents and
+      "Debugging a PR build missing from the web flasher" in agents and
+      'gh pr list --head "${GITHUB_REF_NAME}"' in agents and
+      "selecting `4BIT@80` while" in agents)
 
 check("gain transient classifier present",
       "gain_quality_drop_count" in all_c and
