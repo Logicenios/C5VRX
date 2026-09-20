@@ -63,12 +63,24 @@ no undocumented PHY polling, no hardware AGC and no forced FFT scaling.
 
 ### RANGE EXP
 
-Starts at maximum gain (G62), keeps the proven full-video BW40 filter fixed and
-leaves AFC off. During acquisition it only accepts a carrier after repeated
-phase-coherent windows; otherwise it keeps comparing G62 with G56 instead of
-mistaking high-gain static for lock. In addition to digital rail clipping, the
-range controller treats persistent high-power IQ DC/skew/cross distortion as
-soft front-end overload and escapes to lower gain when close to a VTX.
+Starts at G62 with BW40 and AFC off. Acquisition now requires recent valid
+Phase5 H-sync periods, in addition to IQ metrics. SEARCH explores G62, G56,
+G48, G40, G32, G24, G16, G8 and G2, stopping when video is acquired. This is
+a bounded acquisition sequence, not a measured ranking of sensitivity.
+LEARN returns to SEARCH when sync remains absent, and TRACK loss no longer
+requires low amplitude: high-amplitude noise must also release the lock.
+
+Severe rail clipping bypasses the normal 500 ms decision hold after two
+50 ms observation ticks. The normal hold remains conservative pending actual
+hardware settling measurements. Rail detection no longer requires a high
+median amplitude. IQ DC/skew/cross remains diagnostic only; it is not treated
+as proof of front-end compression.
+
+The host sync test exercises PAL/NTSC, sample alignment, invalid pulse timing,
+a constant tone and 1000 synthetic noise windows. These tests do not establish
+weak-signal sensitivity, real filtered-noise rejection, or glitch-free gain
+transitions. Measuring blanking noise, calibrated gain-state quality and
+transition waveforms remains hardware work; no zero-lag guarantee is made.
 
 ### BLOCKER EXP
 
