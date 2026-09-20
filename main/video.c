@@ -1099,8 +1099,10 @@ static void cycle_demod_mode(void)
 {
     s_demod_mode = s_demod_mode == DEMOD_MODE_GOLDEN_PHASE5 ?
                    DEMOD_MODE_TRAJECTORY_V2 : DEMOD_MODE_GOLDEN_PHASE5;
-    /* Trajectory v2 is intentionally validated first on the full 6-bit
-     * proven DAC path. Do not mix a new demodulator with 4-bit quantization. */
+    /* TRAJ V2 and 4BIT@80 use different BitScrambler/output contracts.
+     * Selecting TRAJ V2 therefore moves the DAC back to its proven 6-bit path.
+     * The inverse action is handled on the DAC control: selecting 4BIT@80
+     * automatically returns to GOLDEN instead of making 4-bit unreachable. */
     if (s_demod_mode == DEMOD_MODE_TRAJECTORY_V2)
         s_output_mode = VIDEO_OUTPUT_6BIT_40;
 
@@ -2835,12 +2837,17 @@ static void handle_button_long_click(void)
             settings_save();
             break;
         case 4: /* VIDEO OUTPUT */
-            if (s_demod_mode == DEMOD_MODE_TRAJECTORY_V2) {
-                s_output_mode = VIDEO_OUTPUT_6BIT_40;
-                printf("[MENU: OUTPUT] TRAJ V2 is locked to 6BIT@40 for clean A/B validation\n");
+            s_output_mode = s_output_mode == VIDEO_OUTPUT_6BIT_40 ?
+                            VIDEO_OUTPUT_4BIT_80 : VIDEO_OUTPUT_6BIT_40;
+            if (s_output_mode == VIDEO_OUTPUT_4BIT_80 &&
+                s_demod_mode == DEMOD_MODE_TRAJECTORY_V2) {
+                /* 4BIT@80 has its own fm4 BitScrambler contract. Keep the
+                 * combination valid by returning to GOLDEN automatically. */
+                s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;
+                video_standard_detector_reset();
+                ++s_profile_generation;
+                printf("[MENU: OUTPUT] -> 4BIT@80 (EXPERIMENTAL); DEMOD -> GOLDEN\n");
             } else {
-                s_output_mode = s_output_mode == VIDEO_OUTPUT_6BIT_40 ?
-                                VIDEO_OUTPUT_4BIT_80 : VIDEO_OUTPUT_6BIT_40;
                 printf("[MENU: OUTPUT] -> %s%s\n", output_mode_name(),
                        s_output_mode == VIDEO_OUTPUT_4BIT_80 ? " (EXPERIMENTAL)" : "");
             }
