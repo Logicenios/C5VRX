@@ -284,11 +284,18 @@ DEMOD    GOLDEN
 
 Controls:
 
-- normal long press: toggle DAC output while Golden is selected;
+- normal long press: toggle DAC output;
 - >=2 s hold: switch `GOLDEN <-> TRAJ V2`.
 
-Selecting TRAJ V2 forces `6BIT@40` so initial A/B testing changes only the
-demodulator instead of simultaneously changing DAC quantization.
+The two experimental contracts are mutually exclusive but neither menu option
+is hidden:
+
+- selecting TRAJ V2 automatically selects `6BIT@40`;
+- selecting `4BIT@80` while TRAJ V2 is active automatically returns the
+  demodulator to GOLDEN.
+
+This keeps every live BitScrambler/TX combination valid while still allowing
+4BIT@80 to be selected directly from the VIDEO page.
 
 Range v2 and demod mode are independent:
 
