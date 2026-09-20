@@ -151,6 +151,7 @@ jobs:
           /tmp/test_range_control
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_fusion_receiver.c -o /tmp/test_fusion_receiver
           /tmp/test_fusion_receiver
+          python3 tools/train_trajectory_v2.py --self-test
           python3 tools/range_demod_bench.py --self-test
 
   build:
