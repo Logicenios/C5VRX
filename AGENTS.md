@@ -29,6 +29,14 @@ findings that explain its failure.
 - Keep USB/debug outside realtime pacing.
 - Do not silently change the tested XIAO D4..D9 DAC pin order or the physical
   8.2k/3.9k/2k/1k/470R/240R plus 200R network.
+- Keep live output compatibility explicit: GOLDEN supports both `6BIT@40` and
+  experimental `4BIT@80`; TRAJ V2 currently supports only `6BIT@40`.
+  Selecting TRAJ V2 must auto-select `6BIT@40`; selecting `4BIT@80` while
+  TRAJ V2 is selected must auto-return the demodulator to GOLDEN rather than
+  making the 4-bit mode unreachable.
+- The standalone menu raster is always emitted through the byte-oriented
+  `6BIT@40` TX geometry. On menu exit, recreate the live TX unit for the
+  selected output mode before restarting the flight BitScrambler.
 
 
 ## Releases, PR builds, and web flasher deployment
@@ -71,18 +79,34 @@ commit prefixes intentionally.
 
 ### PR firmware publication
 
-For a same-repository pull request targeting `main`:
+Same-repository PR firmware must work for both ordinary PRs targeting `main`
+and stacked development PRs. Production CI therefore listens for PRs targeting
+`main`, `feat/**`, `fix/**`, and `codex/**`.
+
+Publication deliberately has a **single owner per update**:
 
 1. CI validates the architecture/DSP contract.
 2. CI builds the firmware and creates the normal release artifacts, including
    `c5vrx3.bin`, `c5vrx3_merged.bin`, bootloader, partition table,
    `flasher_args.json`, and checksums.
-3. `publish-pr-build` creates a GitHub **prerelease** tagged
-   `pr-<PR_NUMBER>` and targets it at the current PR head SHA.
-4. Every new PR commit recreates that mutable `pr-<number>` prerelease so its
-   assets always correspond to the latest tested PR head.
-5. When the PR closes or merges, `cleanup-pr-build` deletes the temporary
+3. For a normal commit pushed to an already-open same-repository PR, the
+   **push run** publishes the mutable PR channel. It resolves the open PR from
+   the head branch with `gh pr list --head "${GITHUB_REF_NAME}"`.
+4. The simultaneous `pull_request:synchronize` run may validate/build, but it
+   must **not also recreate the same release**; that caused release races.
+5. For `pull_request:opened` or `reopened`, where no extra head push is
+   required, the PR run may publish the initial channel directly.
+6. `publish-pr-build` creates a GitHub **prerelease** tagged
+   `pr-<PR_NUMBER>` and targets it at the exact tested PR head SHA.
+7. Every later PR head commit recreates that mutable `pr-<number>` prerelease
+   so its assets always correspond to the latest tested head.
+8. When the PR closes or merges, `cleanup-pr-build` deletes the temporary
    prerelease and tag.
+
+For same-repository branches, keep the `gh pr list --head` argument as the
+plain branch ref (for example `feat/trajectory-v2`). In GitHub Actions,
+`--head owner:branch` failed to resolve this stacked PR even though the REST
+API accepted that notation.
 
 Fork PRs must not receive write-capable release publication. Keep the
 same-repository guard on `publish-pr-build`.
@@ -114,6 +138,28 @@ firmware releases plus all currently active PR prereleases.
 A web UI change made in a PR is still not deployed until merged into `main`.
 PR firmware can trigger a Pages **mirror refresh**, but that refresh checks out
 `main` and therefore cannot deploy unmerged PR HTML/JavaScript.
+
+### Debugging a PR build missing from the web flasher
+
+Do not assume a green branch build means the PR firmware is available in the
+flasher. Verify the whole chain in order:
+
+1. The exact PR head has a successful Production CI build.
+2. `Publish Experimental PR Build` did not merely report success with its
+   download/publish steps skipped.
+3. A GitHub prerelease named `pr-<number>` exists and contains at least
+   `c5vrx3.bin`, `c5vrx3_merged.bin`, bootloader, partition table,
+   `flasher_args.json`, and checksums.
+4. The successful Production CI completion triggered `Deploy Web Flasher`.
+5. The Pages job's **Build same-origin firmware mirror** log contains
+   `-> pr-<number>`.
+6. The uploaded Pages artifact contains
+   `firmware/pr-<number>/...`; this also means the generated
+   `firmware/releases.json` can expose that PR in the **PR Builds** tab.
+
+If step 3 is missing, fix PR publication; refreshing Pages cannot invent a
+release. If step 3 exists but steps 4-6 are missing, fix the Pages mirror
+refresh rather than changing browser CORS/download logic.
 
 
 ### CI concurrency on merge
