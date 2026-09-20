@@ -30,7 +30,7 @@ typedef struct {
     fusion_bandit_cell_t cell[FUSION_CONTEXT_COUNT][FUSION_OPT_STATE_COUNT];
     fusion_edge_cell_t edge[FUSION_CONTEXT_COUNT][FUSION_OPT_STATE_COUNT - 1u];
     uint8_t state, previous_state, trial_state;
-    fusion_context_t context;
+    fusion_context_t context, trial_context;
     unsigned settle, cooldown, decision_age, trial_samples;
     int trial_sum, trial_risk_sum, baseline_quality, baseline_risk;
     uint32_t updates;
@@ -66,6 +66,7 @@ static inline void fusion_optimizer_reset(fusion_optimizer_t *o, uint8_t gain)
     o->trial_state = o->state;
     o->settle = FUSION_OPT_SETTLE_TICKS;
     o->context = FUSION_CONTEXT_NO_CARRIER;
+    o->trial_context = FUSION_CONTEXT_NO_CARRIER;
 }
 
 static inline void fusion_bandit_update(fusion_bandit_cell_t *c,
@@ -207,6 +208,7 @@ static inline void fusion_begin_trial(fusion_optimizer_t *o,
     o->state = candidate;
     o->baseline_quality = obs->quality;
     o->baseline_risk = obs->catastrophic_risk;
+    o->trial_context = obs->context;
     o->trial_samples = 0;
     o->trial_sum = 0;
     o->trial_risk_sum = 0;
@@ -262,7 +264,7 @@ static inline uint8_t fusion_optimizer_tick(
 
         int trial_quality = o->trial_sum / (int)o->trial_samples;
         int trial_risk = o->trial_risk_sum / (int)o->trial_samples;
-        fusion_record_trial_edge(o, obs->context, trial_quality);
+        fusion_record_trial_edge(o, o->trial_context, trial_quality);
 
         o->trial_active = false;
         o->trial_samples = 0;
