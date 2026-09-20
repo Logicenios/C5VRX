@@ -1,4 +1,6 @@
 #pragma once
+#include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 /**
@@ -34,6 +36,29 @@ bool rf_get_analog_bandwidth(void);
 
 void rf_set_rx_gain(bool force, uint8_t gain_idx);
 uint32_t rf_get_rx_gain_reg(void);
+
+/**
+ * Read-only snapshot of known ESP32-C5 RX PHY registers used for lab
+ * characterization. No undocumented PHY function is called by this helper.
+ */
+typedef struct {
+    uint32_t gain_reg;
+    uint32_t rx_filter_reg;
+    uint32_t adc_rate_reg;
+    uint32_t source_mux_reg;
+    uint8_t rx_filter_mode;
+    uint8_t adc_rate_sel;
+} rf_phy_snapshot_t;
+
+void rf_get_phy_snapshot(rf_phy_snapshot_t *snapshot);
+
+/**
+ * Force/release the PHY FFT scaling stage. This is exposed only so the lab can
+ * prove whether FFT gain sits upstream or downstream of the MODEM_DIAG Q4/I4
+ * tap. Production receive control must not depend on this until hardware data
+ * demonstrates a Q4/I4 effect.
+ */
+void rf_set_fft_scale_force(bool force, int8_t value);
 
 /**
  * FPV Channel and Carrier Frequency Fine-Tuning:
