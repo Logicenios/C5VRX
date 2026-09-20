@@ -132,9 +132,10 @@ USB ISR driver is installed. Output retains the unbuffered VFS; the menu-active
 polling branch has no periodic output or `fflush`.
 
 The control task continues sampling completed RX descriptors while the menu is
-open. It freezes AGC/AFC writes, but refreshes a smoothed 0-100 signal meter four
-times per second. The CHANNEL action scans all 48 configured frequencies at a
-fixed gain, rejects incoherent noise, and keeps the strongest coherent carrier.
+open. The independent menu raster leaves the receiver controller running, so
+gain and the smoothed 0-100 signal meter refresh four times per second. The
+CHANNEL action scans all 48 configured frequencies at a fixed gain, rejects
+incoherent noise, and keeps the strongest coherent carrier.
 
 User choices are stored as one versioned NVS record and restored before the RX
 and TX units start. Firmware flashing leaves the NVS partition intact.

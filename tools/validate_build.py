@@ -178,20 +178,21 @@ check("unsafe undocumented gain/filter ROM controls remain out of production",
           "phy_rfrx_rxdc_cal(",
       )))
 
-check("experimental RX profiles are explicit opt-in with balanced default",
+check("range profile is the BW40 default and other experiments remain explicit",
       "RX_PROFILE_BALANCED = 0" in all_c and
       "RX_PROFILE_RANGE_EXP" in all_c and
       "RX_PROFILE_BLOCKER_EXP" in all_c and
       "RX_PROFILE_RECOVERY_EXP" in all_c and
       "RX_PROFILE_AUTO_EXP" in all_c and
       "RX_PROFILE_HW_AGC_EXP" in all_c and
-      "s_rx_profile = RX_PROFILE_BALANCED" in all_c)
+      "s_rx_profile = RX_PROFILE_RANGE_EXP" in all_c and
+      "s_rf_bw_mode = RF_BW_MODE_BW40" in all_c)
 check("RF menu preserves BW control and adds two-second profile selector",
       "LONG:BW  2S:PROFILE" in all_c and
       "btn_ticks >= 40" in all_c and
       "cycle_rx_profile();" in all_c)
-check("experimental PHY environment reads stay out of balanced default",
-      "s_rx_profile != RX_PROFILE_BALANCED && ++phy_metric_ticks >= 5" in all_c and
+check("experimental PHY environment reads stay out of the range default",
+      "s_rx_profile == RX_PROFILE_AUTO_EXP && ++phy_metric_ticks >= 5" in all_c and
       "rf_try_get_noise_floor_dbm" in all_c and
       "rf_try_get_wideband_rssi_dbm" in all_c)
 check("AUTO FFT promotion requires same-boot raw-Q4 evidence",

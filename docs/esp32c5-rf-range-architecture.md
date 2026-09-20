@@ -51,8 +51,8 @@ current RF state.
 
 ## Experimental RX profiles
 
-PR #35 now exposes the range research as explicit menu profiles while keeping
-**BALANCED** as the boot/default profile. On the RF page, a normal long press
+PR #35 now exposes the range research as explicit menu profiles with
+**RANGE EXP on fixed BW40** as the boot/default profile. On the RF page, a normal long press
 still cycles BW40/BW20/AUTO; holding for about two seconds cycles the complete
 RX profile.
 
@@ -63,10 +63,12 @@ no undocumented PHY polling, no hardware AGC and no forced FFT scaling.
 
 ### RANGE EXP
 
-Starts high (G56), searches mainly in the upper gain range, uses the
-acquisition-only BW40/BW20 gearbox and leaves AFC off. It is range-biased, but
-the emergency overload path can still escape to lower gain so the mode remains
-usable close to a VTX.
+Starts at maximum gain (G62), keeps the proven full-video BW40 filter fixed and
+leaves AFC off. During acquisition it only accepts a carrier after repeated
+phase-coherent windows; otherwise it keeps comparing G62 with G56 instead of
+mistaking high-gain static for lock. In addition to digital rail clipping, the
+range controller treats persistent high-power IQ DC/skew/cross distortion as
+soft front-end overload and escapes to lower gain when close to a VTX.
 
 ### BLOCKER EXP
 
