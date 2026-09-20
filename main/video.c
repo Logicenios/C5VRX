@@ -1137,6 +1137,9 @@ static volatile int s_last_fusion_lag2_pm = 0;
 static volatile int s_last_fusion_lag4_pm = 0;
 static volatile int s_last_fusion_consensus_pm = 0;
 static volatile int s_last_fusion_slope_x100 = 0;
+static volatile int s_last_trajectory_uncertainty_pm = 0;
+static volatile int s_last_pll_lite_slip_pm = 0;
+static volatile int s_last_pll_lite_hold_pm = 0;
 static volatile int s_last_fusion_risk = 0;
 static volatile int s_last_fusion_fade = 0;
 static volatile int s_last_fusion_recovery = 0;
@@ -1489,6 +1492,7 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            "winding_pm=%d strong_winding_pm=%d sync_q=%d sync_width=%u "
            "fusion_ctx=%d fusion_q=%d fusion_conf=%d fusion_lowiq_pm=%d "
            "fusion_lag2_pm=%d fusion_lag4_pm=%d fusion_consensus_pm=%d fusion_slope_x100=%d "
+           "traj_uncert_pm=%d pll_slip_pm=%d pll_hold_pm=%d demod=%u "
            "fusion_risk=%d fusion_fade=%d fusion_recovery=%d fusion_stability=%d fusion_fast_n=%lu "
            "fft_forced=%u fft=%d filter_mode=%u adc_sel=%u filter_reg=0x%08lx "
            "adc_reg=0x%08lx source_mux=0x%08lx "
@@ -1510,6 +1514,8 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            s_last_fusion_context, s_last_fusion_quality, s_last_fusion_confidence,
            s_last_fusion_low_confidence_pm, s_last_fusion_lag2_pm,
            s_last_fusion_lag4_pm, s_last_fusion_consensus_pm, s_last_fusion_slope_x100,
+           s_last_trajectory_uncertainty_pm, s_last_pll_lite_slip_pm,
+           s_last_pll_lite_hold_pm, (unsigned)s_demod_mode,
            s_last_fusion_risk, s_last_fusion_fade, s_last_fusion_recovery,
            s_last_fusion_stability, (unsigned long)s_last_fusion_fast_samples,
            s_lab_fft_forced ? 1u : 0u, (int)s_lab_fft_value,
@@ -3080,6 +3086,10 @@ static void analog_agc_task(void *arg)
         s_last_fusion_lag4_pm = metrics.fusion_shadow.lag4_disagreement_permille;
         s_last_fusion_consensus_pm = metrics.fusion_shadow.consensus_outlier_permille;
         s_last_fusion_slope_x100 = metrics.fusion_shadow.slope_residual_x100;
+        s_last_trajectory_uncertainty_pm =
+            metrics.fusion_shadow.trajectory_uncertainty_permille;
+        s_last_pll_lite_slip_pm = metrics.fusion_shadow.pll_lite_slip_permille;
+        s_last_pll_lite_hold_pm = metrics.fusion_shadow.pll_lite_hold_permille;
         s_last_fusion_risk = fusion_obs.catastrophic_risk;
 
         fusion_temporal_metrics_t fusion_tm = fusion_temporal_read_shared();
