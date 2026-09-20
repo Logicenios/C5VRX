@@ -298,12 +298,14 @@ check("README documents GitHub Pages as the only production flasher host",
       "There is no VPS" in readme and
       "c5vrx.com" not in readme)
 agents = read(ROOT / "AGENTS.md")
-check("AGENTS documents release, PR-build and Pages flow",
+check("AGENTS documents release, PR-build and trusted Pages mirror flow",
       "## Releases, PR builds, and web flasher deployment" in agents and
       "pr-<PR_NUMBER>" in agents and
       "PR Builds" in agents and
       "GitHub Pages" in agents and
-      "do not create a PR-specific Pages" in agents)
+      "always checks out trusted" in agents and
+      "firmware/releases.json" in agents and
+      "same-origin" in agents)
 
 check("gain transient classifier present",
       "gain_quality_drop_count" in all_c and
