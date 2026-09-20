@@ -19,6 +19,8 @@ stages, or prove the cause of a visible lag event by software alone.
 | --- | --- |
 | `b` | Enter the quiet baseline: MANUAL gain, forced BW40, AFC OFF / 0 kHz, suppress unsolicited carrier-lock output, wait for setup transients, then clear correlation counters. |
 | `g` | Start or abort the fixed-gain sweep over the production states G2..G62 in steps of 2. Each state dwells 1000 ms and is reported after 700 ms. |
+| `F` | Run a bounded FFT-scale A/B at fixed RF gain/BW40 using forced values 16, 24, 32 and 40, then restore automatic FFT scaling. This tests whether FFT scaling changes raw MODEM_DIAG Q4/I4 at all. |
+| `W` | Run a fixed-gain BW40 -> BW20 A/B using only the already-used `phy_wifi_fbw_sel()` path, then restore the previous bandwidth. |
 | `p` | Print one machine-readable `C5VRX_LAB_ROW` using the current state and absolute counters. |
 | `r` | Clear lag/transport counters, the event ring, correlation timestamps, and sticky fault state without changing RF settings. |
 | `l` | Mark a visible lag/freeze immediately after it is observed. |
@@ -47,14 +49,22 @@ The row includes:
 
 - physical gain index and the existing RX gain register snapshot;
 - active RF bandwidth, AFC mode, offset, AGC mode/state;
+- read-only PHY snapshots for the known RX filter register, ADC-rate register,
+  source mux, decoded filter mode and ADC-rate selector;
+- FFT force state/value for the dedicated FFT probe;
 - `P_median`, `Q_phase`, rail-clipping permille, near-origin permille and the
   current signal-strength score;
+- Q4/I4 DC-centre estimates plus I/Q power-skew and cross-correlation metrics,
+  so RX DC/IQ quality can be characterized without invoking undocumented
+  calibration routines in the realtime path;
 - PARLIO TX-empty, RX-overflow and unexpected TX-EOF counts;
 - GDMA input/output fault counts;
 - BitScrambler FIFO-empty/EOF-overload evidence;
-- total lag events, events within 200 ms of a gain write and gain-adjacent
-  Q/P collapses;
-- age of the last gain write and transport event plus the last event flags.
+- total lag events, events within 200 ms of a gain write, events within 200 ms
+  of any tracked PHY write (gain, bandwidth, frequency-offset/gain reassert, or
+  FFT force) and gain-adjacent Q/P collapses;
+- age/type of the last PHY write, age of the last gain write and transport
+  event plus the last event flags.
 
 The sweep row reports counter deltas for that one gain state. A manual
 `p` snapshot reports current absolute counters since the last reset.
@@ -80,8 +90,36 @@ Expanding to undocumented or unused gain states should be a separate experiment
 with evidence for their validity.
 
 The useful result is a table showing where additional gain improves carrier
-coherence versus where it only raises rail clipping/noise. Do not interpret a
-larger raw code or gain register value as improved sensitivity by itself.
+coherence versus where it only raises rail clipping/noise. The extra PHY
+register fields should be diffed between adjacent gain states; discontinuities
+are candidates for internal gain-stage boundaries, but they are not named
+"LNA" or "BB" until hardware/register evidence proves that mapping. Do not
+interpret a larger raw code or gain register value as improved sensitivity by
+itself.
+
+## FFT-stage placement probe
+
+Run `F` with a stable VTX, fixed attenuation and fixed scene. The probe keeps
+the RF gain constant, forces FFT-scale values 16/24/32/40, and reports the same
+raw Q4/I4 metrics at each value.
+
+If `P_median`, the Q4/I4 DC/IQ statistics and raw quality metrics remain
+statistically unchanged while FFT gain changes, that is evidence that the FFT
+scaling stage is downstream of the MODEM_DIAG source used by C5VRX. In that
+case it must not become part of the range controller. A visible CSI effect is
+not sufficient; the acceptance criterion is an effect on this receiver's raw
+Q4/I4 path.
+
+## Receive-filter probe
+
+Run `W` at a fixed gain and attenuation. It compares BW40 and BW20 using the
+known production bandwidth primitive only. Record both image quality and the
+machine-readable Q4 metrics. A lower noise level is useful only if carrier
+coherence/video bandwidth is not damaged.
+
+The ROM also exports names such as `phy_chan_filt_set()` and
+`phy_rx_filter_mode()`, but this PR does not call them: their ESP32-C5 ABI,
+valid arguments and physical filter response are not yet proven.
 
 ## #28 quiet lag baseline
 
@@ -109,6 +147,12 @@ For ACTIVE vs SHADOW vs MANUAL, configure the desired mode, press `r`, and run
 the same physical setup. Keep BW40 and AFC OFF unless bandwidth or AFC is the
 explicit test variable.
 
+Production TRACK is now intentionally a PHY-write-free state for automatic
+control: AUTO bandwidth does not switch while TRACK is active, and AUTO AFC
+does not retune while TRACK is active. AFC acquisition and experimental
+bandwidth changes are confined to SEARCH/LEARN. This turns a clean carrier lock
+into a stable RF state rather than continuously optimizing it.
+
 ## Vendor timer correlation
 
 Use `t` outside the quiet soak to record the closed-source Wi-Fi timer
@@ -120,8 +164,14 @@ proof that the timer caused the lag.
 This PR intentionally leaves these conclusions open until measured:
 
 - which C5 gain indices correspond to LNA/baseband stage changes;
-- whether FFT gain affects the raw MODEM_DIAG source;
+- whether FFT gain affects the raw MODEM_DIAG source (the new `F` probe is
+  designed to answer this);
+- which gain indices correspond to distinct RF/baseband stage tuples;
 - which gain state gives the best equivalent-video RF threshold;
+- whether any safe narrower filter state exists beyond the coarse BW20/BW40
+  control;
+- whether RX DC/IQ calibration improves weak-signal Q4 phase coherence and can
+  be run safely only at startup/unlock;
 - whether any gain write causes a physical CVBS disturbance;
 - whether a visible lag event is transport starvation, malformed sync, or
   downstream decoder re-lock.
