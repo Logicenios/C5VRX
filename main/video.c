@@ -1208,6 +1208,12 @@ typedef struct {
     uint8_t reserved[1];
 } persisted_settings_t;
 
+/* v4 deliberately consumes one of v3's two reserved bytes for demod_mode.
+ * Keep the blob byte-for-byte the same size so a v3 record can be migrated
+ * safely with DEMOD_MODE_GOLDEN_PHASE5. */
+_Static_assert(sizeof(persisted_settings_t) == 14u,
+               "settings v3/v4 migration layout changed");
+
 /* Frequency-offset writes in rf.c re-assert the current forced RX gain after
  * touching the PHY channel offset. Track that hidden gain write so issue #28
  * correlation does not incorrectly call an AFC/fine-tune transient unrelated. */
