@@ -23,7 +23,7 @@ RX descriptor with two extra forms of evidence.
 
 ### 1. Exact-adjacent winding observer
 
-For every three raw 40 MS/s Phase5 samples `a,b,c`:
+For every endpoint interval used by the production 20 MS/s lane, with the skipped 40 MS/s middle sample restored as `a,b,c`:
 
 ```text
 adjacent = wrap(b-a) + wrap(c-b)
@@ -36,7 +36,7 @@ full winding.  This is the exact failure mechanism described in Issue #23.
 
 The observer reports:
 
-- `winding_pm`: winding disagreements per thousand raw triplets;
+- `winding_pm`: winding disagreements per thousand **production-parity** endpoint triplets;
 - `strong_winding_pm`: the same measurement only when all three raw IQ
   powers are >=64.
 

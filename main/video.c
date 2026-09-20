@@ -663,9 +663,7 @@ static int video_semantic_observe(const uint8_t *raw, size_t bytes, size_t ring_
     unsigned width_error = start_count ? width_error_sum / start_count : 100u;
     int width_score = start_count ? 40 - (int)width_error * 4 : 0;
     if (width_score < 0) width_score = 0;
-    s_last_sync_width_20m = start_count ?
-                            (uint16_t)(94u + (widths[0] > 94u ?
-                            widths[0] - 94u : -(int)(94u - widths[0]))) : 0u;
+    s_last_sync_width_20m = start_count ? (uint16_t)widths[0] : 0u;
 
     int best_period_score = 0;
     bool valid_period = false;
@@ -717,16 +715,19 @@ typedef struct {
     int iq_skew_permille;
     int iq_cross_permille;
     int winding_events;
+    int winding_triplets;
     int winding_permille;
     int strong_winding_events;
     int strong_winding_triplets;
     int strong_winding_permille;
 } control_metrics_t;
 
-static control_metrics_t analyze_control_window(const uint8_t *sample, size_t bytes)
+static control_metrics_t analyze_control_window(const uint8_t *sample, size_t bytes,
+                                                size_t ring_offset)
 {
     control_metrics_t m = {0};
     uint16_t hist[129] = {0};
+    const size_t production_first = (ring_offset & 1u) ? 0u : 1u;
     int8_t prev_i = 0, prev_q = 0;
     uint8_t prev_phase = 0, prev2_phase = 0;
     int prev_power = 0, prev2_power = 0;
@@ -763,10 +764,17 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
             }
         }
 
-        if (i >= 2u) {
+        /* fm.bsasm consumes one parity at 20 MS/s. Count exactly those
+         * endpoint intervals, while using the skipped 40 MS/s middle sample
+         * only as a shadow oracle. */
+        bool production_endpoint =
+            i >= production_first + 2u &&
+            ((i - production_first) & 1u) == 0u;
+        if (production_endpoint) {
             bool winding = demod_phase5_endpoint_loses_winding(prev2_phase,
                                                                prev_phase,
                                                                phase);
+            ++m.winding_triplets;
             if (winding) ++m.winding_events;
             if (prev2_power >= DEMOD_STRONG_POWER_MIN &&
                 prev_power >= DEMOD_STRONG_POWER_MIN &&
@@ -795,8 +803,8 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
     m.q_phase = bytes > 1u ? (m.n_coherent * 100) / (int)(bytes - 1u) : 0;
     m.clip_permille = bytes ? (m.n_clip * 1000) / (int)bytes : 0;
     m.origin_permille = bytes ? (m.n_origin * 1000) / (int)bytes : 1000;
-    m.winding_permille = bytes > 2u ?
-        (m.winding_events * 1000) / (int)(bytes - 2u) : 0;
+    m.winding_permille = m.winding_triplets ?
+        (m.winding_events * 1000) / m.winding_triplets : 0;
     m.strong_winding_permille = m.strong_winding_triplets ?
         (m.strong_winding_events * 1000) / m.strong_winding_triplets : 0;
     m.dc_i_x100 = bytes ? (m.sum_i * 100) / (int)bytes : 0;
@@ -2322,12 +2330,18 @@ static void channel_auto_search(void)
         if (rf_set_channel(channel) != ESP_OK) continue;
         vTaskDelay(pdMS_TO_TICKS(90));
         uint8_t *src = get_completed_rx_sample_window(CONTROL_SAMPLE_BYTES);
+        size_t scan_ring_offset =
+            (src >= s_raw_ring && src < s_raw_ring + sizeof(s_raw_ring)) ?
+            (size_t)(src - s_raw_ring) : 0u;
         sync_dma_m2c(src, CONTROL_SAMPLE_BYTES);
         memcpy(s_control_sample_buf, src, sizeof(s_control_sample_buf));
         control_metrics_t metrics =
-            analyze_control_window(s_control_sample_buf, sizeof(s_control_sample_buf));
+            analyze_control_window(s_control_sample_buf,
+                                   sizeof(s_control_sample_buf),
+                                   scan_ring_offset);
         int quality = signal_strength_score(&metrics, 52u);
-        int rank = metrics.q_phase * 4 + metrics.p_median + quality;
+        int rank = metrics.q_phase * 4 + metrics.p_median + quality -
+                   demod_winding_penalty(metrics.winding_permille);
         if (metrics.q_phase >= 22 && rank > best_rank) {
             best_rank = rank;
             best_channel = channel;
@@ -2580,7 +2594,9 @@ static void analog_agc_task(void *arg)
         sync_dma_m2c((void *)sample_src, CONTROL_SAMPLE_BYTES);
         memcpy(s_control_sample_buf, sample_src, sizeof(s_control_sample_buf));
         control_metrics_t metrics =
-            analyze_control_window(s_control_sample_buf, sizeof(s_control_sample_buf));
+            analyze_control_window(s_control_sample_buf,
+                                   sizeof(s_control_sample_buf),
+                                   ring_offset);
 
         int p_median = metrics.p_median;
         int q_phase = metrics.q_phase;

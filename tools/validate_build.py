@@ -163,6 +163,8 @@ check("Q4 IQ-centering metrics present",
 check("shadow exact-adjacent endpoint winding observer present",
       "demod_phase5_endpoint_loses_winding" in all_c and
       "winding_permille" in all_c and
+      "winding_triplets" in all_c and
+      "production_first" in all_c and
       "strong_winding_permille" in all_c and
       "DEMOD_STRONG_POWER_MIN" in read(MAIN / "demod_quality.h"))
 check("semantic CVBS sync score requires pulse width plus line period",
