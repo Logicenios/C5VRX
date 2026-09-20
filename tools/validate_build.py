@@ -264,6 +264,7 @@ check("demod mode persists, migrates v3 and defaults safely to Golden",
       "SETTINGS_VERSION 4u" in all_c and
       ".demod_mode = (uint8_t)s_demod_mode" in all_c and
       "legacy_v3 = settings.version == 3u" in all_c and
+      "sizeof(persisted_settings_t) == 14u" in all_c and
       "settings.demod_mode < DEMOD_MODE_COUNT" in all_c and
       "s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5" in all_c)
 check("Trajectory-only uncertainty does not contaminate Golden A/B",
