@@ -172,12 +172,44 @@ check("unsafe undocumented gain/filter ROM controls remain out of production",
       all(symbol not in all_c for symbol in (
           "phy_pbus_set_rxgain(",
           "phy_bb_gain_index(",
-          "phy_agc_max_gain_set(",
           "phy_wifi_agc_sat_gain(",
           "phy_chan_filt_set(",
           "phy_rx_filter_mode(",
           "phy_rfrx_rxdc_cal(",
       )))
+
+check("experimental RX profiles are explicit opt-in with balanced default",
+      "RX_PROFILE_BALANCED = 0" in all_c and
+      "RX_PROFILE_RANGE_EXP" in all_c and
+      "RX_PROFILE_BLOCKER_EXP" in all_c and
+      "RX_PROFILE_RECOVERY_EXP" in all_c and
+      "RX_PROFILE_AUTO_EXP" in all_c and
+      "RX_PROFILE_HW_AGC_EXP" in all_c and
+      "s_rx_profile = RX_PROFILE_BALANCED" in all_c)
+check("RF menu preserves BW control and adds two-second profile selector",
+      "LONG:BW  2S:PROFILE" in all_c and
+      "btn_ticks >= 40" in all_c and
+      "cycle_rx_profile();" in all_c)
+check("experimental PHY environment reads stay out of balanced default",
+      "s_rx_profile != RX_PROFILE_BALANCED && ++phy_metric_ticks >= 5" in all_c and
+      "rf_try_get_noise_floor_dbm" in all_c and
+      "rf_try_get_wideband_rssi_dbm" in all_c)
+check("AUTO FFT promotion requires same-boot raw-Q4 evidence",
+      "s_fft_q4_effect_known" in all_c and
+      "s_fft_q4_effective" in all_c and
+      "best_score >= baseline_score + 12" in all_c and
+      "s_rx_profile == RX_PROFILE_AUTO_EXP && s_fft_q4_effective" in all_c)
+check("AUTO profile uses Q4 IQ quality and bounded environment bias",
+      "metrics.iq_skew_permille > 260" in all_c and
+      "metrics.iq_cross_permille > 260" in all_c and
+      "s_last_phy_rssi_dbm - s_last_noise_floor_dbm" in all_c)
+check("HW AGC experiment is bounded and software AGC does not fight it",
+      "rf_set_experimental_hw_agc(true, 62u)" in all_c and
+      "phy_agc_max_gain_set" in all_c and
+      "s_rx_profile == RX_PROFILE_HW_AGC_EXP && rf_get_experimental_hw_agc()" in all_c and
+      "software must not fight vendor AGC" in all_c)
+check("lab sweeps refuse ownership conflict with HW AGC experiment",
+      all_c.count("reason=hw_agc_profile") >= 3)
 
 # ---- Web flasher / release safety ----
 web_app = read(ROOT / "web" / "app.js")
