@@ -253,10 +253,11 @@ check("Trajectory v2 is opt-in and Golden remains boot default",
       "DEMOD_MODE_TRAJECTORY_V2 = 1" in all_c and
       "s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5" in all_c and
       "s_fm_traj_program" in all_c)
-check("Trajectory v2 initial hardware A/B is locked to 6BIT@40",
-      "TRAJ V2 is locked to 6BIT@40" in all_c and
+check("Trajectory v2 initial hardware A/B keeps the 6BIT@40 contract",
       "s_demod_mode == DEMOD_MODE_TRAJECTORY_V2" in all_c and
-      "s_output_mode = VIDEO_OUTPUT_6BIT_40" in all_c)
+      "s_output_mode = VIDEO_OUTPUT_6BIT_40" in all_c and
+      "Selecting TRAJ V2 therefore moves the DAC back" in all_c and
+      "DEMOD -> GOLDEN" in all_c)
 check("Trajectory v2 supervisor mirrors two-stage token LUT and uncertainty",
       "trajectory_v2_stage1_address" in all_c and
       "trajectory_v2_stage2_address" in all_c and
