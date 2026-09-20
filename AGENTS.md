@@ -4,7 +4,7 @@
 
 - Current implementation: `/main`
 - Current hardware-proven findings: `/docs`
-- Historical experiments: `/legacy/c5vrx1`
+- Historical experiments: `/legacy/c5vrx1` and `/legacy/c5vrx2`
 - Preserved archive discussions: `/docs/legacy-issues`
 
 `legacy/c5vrx1` is reference material, not current production code. Always
