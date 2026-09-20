@@ -407,6 +407,14 @@ check("same-repo PR firmware is published only as an explicit prerelease",
       "--prerelease" in workflow and
       'tag="pr-${PR_NUMBER}"' in workflow and
       "cleanup-pr-build:" in workflow)
+check("stacked development PRs publish webflasher firmware",
+      'branches: [main, "feat/**", "fix/**", "codex/**"]' in workflow and
+      "github.event_name == 'push'" in workflow and
+      "github.ref != 'refs/heads/main'" in workflow and
+      'gh pr list' in workflow and
+      '--head "${GITHUB_REPOSITORY_OWNER}:${GITHUB_REF_NAME}"' in workflow and
+      "pull-requests: read" in workflow and
+      "steps.pr.outputs.publish == 'true'" in workflow)
 check("CI concurrency separates merge push from PR-close cleanup",
       "github.event_name" in workflow and
       "github.event.pull_request.number || github.ref" in workflow and
