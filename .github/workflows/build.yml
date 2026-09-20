@@ -215,65 +215,25 @@ jobs:
     name: Publish Experimental PR Build
     needs: [build]
     if: >-
-      (github.event_name == 'pull_request' &&
-       github.event.action != 'closed' &&
-       github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'push' &&
-       github.ref != 'refs/heads/main')
+      github.event_name == 'pull_request' &&
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: read
     steps:
-      - name: Resolve open PR for this build
-        id: pr
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
-          EVENT_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          pr_number=""
-          pr_head_sha=""
-
-          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
-            pr_number="${EVENT_PR_NUMBER}"
-            pr_head_sha="${EVENT_PR_HEAD_SHA}"
-          else
-            # A stacked PR may target feat/** rather than main. The push event
-            # still knows the head branch, so resolve any open same-repo PR
-            # after the build instead of silently skipping its test firmware.
-            pr_number="$(gh pr list               --repo "${GITHUB_REPOSITORY}"               --state open               --head "${GITHUB_REPOSITORY_OWNER}:${GITHUB_REF_NAME}"               --json number               --jq '.[0].number // empty')"
-            pr_head_sha="${GITHUB_SHA}"
-          fi
-
-          if [[ -z "${pr_number}" ]]; then
-            echo "publish=false" >> "${GITHUB_OUTPUT}"
-            echo "No open PR for ${GITHUB_REF_NAME}; skipping mutable PR prerelease."
-            exit 0
-          fi
-
-          echo "Resolved PR #${pr_number} at ${pr_head_sha}"
-          echo "publish=true" >> "${GITHUB_OUTPUT}"
-          echo "number=${pr_number}" >> "${GITHUB_OUTPUT}"
-          echo "head_sha=${pr_head_sha}" >> "${GITHUB_OUTPUT}"
-
       - name: Download Built Artifacts
-        if: steps.pr.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
           name: c5vrx3-production-firmware
           path: release/
 
       - name: Publish mutable PR prerelease
-        if: steps.pr.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         shell: bash
         run: |
           set -euo pipefail
@@ -285,7 +245,7 @@ jobs:
             gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag
           fi
 
-          gh release create "${tag}" release/*             --repo "${GITHUB_REPOSITORY}"             --target "${PR_HEAD_SHA}"             --title "C5VRX PR #${PR_NUMBER} — Experimental Build"             --notes "WARNING: unmerged test firmware for PR #${PR_NUMBER}. This mutable prerelease tracks the current PR head and is intended only for explicit hardware testing; use a semantic-version release for normal flashing."             --prerelease
+          gh release create "${tag}" release/*             --repo "${GITHUB_REPOSITORY}"             --target "${PR_HEAD_SHA}"             --title "C5VRX PR #${PR_NUMBER} — Experimental Build"             --notes "WARNING: unmerged test firmware for PR #${PR_NUMBER} (${PR_TITLE}). This mutable prerelease is intended only for explicit hardware testing; use a semantic-version release for normal flashing."             --prerelease
 
   cleanup-pr-build:
     name: Remove Closed PR Build
