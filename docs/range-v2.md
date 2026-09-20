@@ -10,6 +10,7 @@ Long-form engineering knowledge is preserved in:
   demodulation findings, numerical references and known limitations.
 - `docs/range-v2-research-notes.md` — RF-chain research, BW/AFC/LNA/diversity
   hypotheses, validation discipline and the next hardware test sequence.
+- `docs/trajectory-v2.md` — the experimental two-bundle adjacent-trajectory demodulator and PLL-lite slip research.
 
 This branch is built on the PR #43 Fusion Engine. The proven 40 MS/s live
 MODEM_DIAG -> PARLIO -> BitScrambler -> DAC path stays intact unless a new
