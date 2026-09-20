@@ -1242,6 +1242,13 @@ static void settings_load(void)
         s_rf_bw_mode = RF_BW_MODE_BW40;
         s_afc_mode = AFC_MODE_OFF;
         apply_rf_bandwidth(true);
+    } else if (s_rx_profile == RX_PROFILE_RANGE_V2_EXP) {
+        /* RANGE V2 always boots from the proven full-video shape, then permits
+         * BW/AFC changes only while acquiring/relearning. Persisted menu fields
+         * must not silently turn it into a different controller after reboot. */
+        s_rf_bw_mode = RF_BW_MODE_AUTO;
+        s_afc_mode = AFC_MODE_AUTO;
+        apply_rf_bandwidth(true);
     }
     if (s_video_std_mode == VIDEO_STD_MODE_PAL) s_video_std = VIDEO_STD_PAL;
     else if (s_video_std_mode == VIDEO_STD_MODE_NTSC) s_video_std = VIDEO_STD_NTSC;
