@@ -3,22 +3,23 @@
 
 Realtime state is intentionally limited to the C5 10-bit address budget:
 
-    prev Phase5 (5) | middle raw-Q bit0 (1) | current Phase5[4:1] (4)
+    prev Phase5 (5) | middle raw-I sign (1) | current Phase5[4:1] (4)
 
-For every raw Q4/I4 triple, the training target is:
+For every physical-FM training triple:
 
     d0 = wrap(phi_middle - phi_previous)
     d1 = wrap(phi_current - phi_middle)
-    target = map_to_cvbs(d0 + d1)
 
-The d0+d1 sum is DELIBERATELY NOT WRAPPED AGAIN.  That is the entire point:
-preserve the +/-2pi branch information that a 50 ns endpoint discriminator
-loses before 40 -> 20 MS/s reduction.
+Strong-Q4 target = map_to_cvbs(d0 + d1)
+Weak-Q4 target   = map_to_cvbs(clean_local_d0 + clean_local_d1)
+
+The adjacent sum is DELIBERATELY NOT WRAPPED AGAIN. Strong samples teach the
+raw exact-adjacent discriminator; weak samples use a deterministic clean
+trajectory holdover prior instead of learning a noisy near-origin click.
 
 --self-test is dependency-free and runs in CI.
---write regenerates main/fm_traj.bsasm and main/trajectory_v2_lut.h and
-requires NumPy because the exhaustive 256^3 geometry pass is intentionally
-kept offline.
+--write deterministically regenerates main/fm_traj.bsasm and
+main/trajectory_v2_lut.h from the pinned physical-FM prior.
 """
 from __future__ import annotations
 
