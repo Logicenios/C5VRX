@@ -2393,8 +2393,10 @@ static void menu_init_buffers(void)
     if (s_menu_node_capacity < required_nodes) {
         menu_free_nodes();
         size_t bytes = required_nodes * sizeof(*s_menu_nodes);
+        size_t alloc_bytes = (bytes + 63u) & ~(size_t)63u;
         s_menu_nodes = (dma_descriptor_t *)heap_caps_aligned_alloc(
-            64u, bytes, MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL);
+            64u, alloc_bytes,
+            MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL);
         ESP_ERROR_CHECK(s_menu_nodes ? ESP_OK : ESP_ERR_NO_MEM);
         s_menu_node_capacity = required_nodes;
     }
