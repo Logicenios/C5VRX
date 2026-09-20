@@ -792,9 +792,9 @@ static const char *rx_profile_name(void)
 static uint8_t profile_gain_min(void)
 {
     switch (s_rx_profile) {
-    case RX_PROFILE_RANGE_EXP:   return 44u;
+    case RX_PROFILE_RANGE_EXP:   return 24u; /* range-biased, but close-range overload still escapes */
     case RX_PROFILE_BLOCKER_EXP: return 8u;
-    case RX_PROFILE_RECOVERY_EXP:return 28u;
+    case RX_PROFILE_RECOVERY_EXP:return 20u;
     default:                     return 2u;
     }
 }
@@ -1410,6 +1410,8 @@ static void lab_run_fft_probe(void)
     rf_set_fft_scale_force(false, 0);
     s_lab_fft_forced = false;
     s_lab_fft_value = 0;
+    s_profile_fft_forced = false;
+    s_profile_fft_forced = false;
     vTaskDelay(pdMS_TO_TICKS(250));
     int baseline_score = s_last_q_phase * 4 + s_last_p_median
                        - s_last_clip_permille / 5
@@ -1470,6 +1472,13 @@ static void lab_run_fft_probe(void)
     s_agc_mode = saved_agc_mode;
     s_lab_quiet = saved_quiet;
 
+    if (s_rx_profile == RX_PROFILE_AUTO_EXP && s_fft_q4_effective) {
+        s_last_phy_write_us = esp_timer_get_time();
+        s_last_phy_write_kind = PHY_WRITE_FFT;
+        rf_set_fft_scale_force(true, s_fft_best_value);
+        s_profile_fft_forced = true;
+    }
+
     printf("C5VRX_FFT_PROBE_END restored_gain=%u restored_agc=%u restored_bw=%u "
            "q4_effect=%s best_fft=%d delta=%d\n",
            saved_gain, (unsigned)saved_agc_mode, saved_bw40 ? 40u : 20u,
@@ -1496,6 +1505,8 @@ static void lab_run_bandwidth_probe(void)
     const afc_mode_t saved_afc_mode = s_afc_mode;
     const int saved_offset = rf_get_frequency_offset_khz();
     const bool saved_quiet = s_lab_quiet;
+    const bool saved_profile_fft = s_profile_fft_forced;
+    const int8_t saved_profile_fft_value = s_fft_best_value;
 
     s_agc_mode = ANALOG_AGC_MANUAL;
     s_afc_mode = AFC_MODE_OFF;
@@ -1527,6 +1538,12 @@ static void lab_run_bandwidth_probe(void)
     s_agc_state = saved_agc_state;
     s_agc_mode = saved_agc_mode;
     s_lab_quiet = saved_quiet;
+    if (saved_profile_fft && saved_profile_fft_value != 0) {
+        s_last_phy_write_us = esp_timer_get_time();
+        s_last_phy_write_kind = PHY_WRITE_FFT;
+        rf_set_fft_scale_force(true, saved_profile_fft_value);
+        s_profile_fft_forced = true;
+    }
 
     printf("C5VRX_BW_PROBE_END restored_agc=%u restored_bw=%u\n",
            (unsigned)saved_agc_mode, saved_bw40 ? 40u : 20u);
@@ -1614,6 +1631,8 @@ static void apply_rx_profile(rx_profile_t profile)
 
     case RX_PROFILE_BALANCED:
     default:
+        s_noise_floor_valid = false;
+        s_phy_rssi_valid = false;
         s_agc_mode = ANALOG_AGC_ACTIVE;
         s_rf_bw_mode = RF_BW_MODE_BW40;
         apply_rf_bandwidth(true);
@@ -1637,6 +1656,23 @@ static void cycle_rx_profile(void)
            s_afc_mode == AFC_MODE_HOLD ? "HOLD" : "OFF",
            rf_get_experimental_hw_agc() ? 1u : 0u,
            s_profile_fft_forced ? "FORCED" : "AUTO");
+}
+
+static void leave_experimental_profile(void)
+{
+    if (rf_get_experimental_hw_agc()) {
+        s_last_phy_write_us = esp_timer_get_time();
+        s_last_phy_write_kind = PHY_WRITE_HW_AGC;
+        (void)rf_set_experimental_hw_agc(false, 62u);
+    }
+    if (s_profile_fft_forced) {
+        s_last_phy_write_us = esp_timer_get_time();
+        s_last_phy_write_kind = PHY_WRITE_FFT;
+        rf_set_fft_scale_force(false, 0);
+        s_profile_fft_forced = false;
+    }
+    s_rx_profile = RX_PROFILE_BALANCED;
+    ++s_profile_generation;
 }
 
 /* Modern standalone menu renderer.
@@ -2436,13 +2472,17 @@ static void analog_agc_task(void *arg)
 
         /* The undocumented reads are observation-only and rate-limited. AUTO
          * uses them only when they return physically plausible values. */
-        if (++phy_metric_ticks >= 5) {
+        if (s_rx_profile != RX_PROFILE_BALANCED && ++phy_metric_ticks >= 5) {
             phy_metric_ticks = 0;
             int value;
             s_noise_floor_valid = rf_try_get_noise_floor_dbm(&value);
             if (s_noise_floor_valid) s_last_noise_floor_dbm = value;
             s_phy_rssi_valid = rf_try_get_wideband_rssi_dbm(&value);
             if (s_phy_rssi_valid) s_last_phy_rssi_dbm = value;
+        } else if (s_rx_profile == RX_PROFILE_BALANCED) {
+            phy_metric_ticks = 0;
+            s_noise_floor_valid = false;
+            s_phy_rssi_valid = false;
         }
 
         int instant_strength = signal_strength_score(&metrics, s_current_gain);
@@ -2786,9 +2826,7 @@ static void console_diag_task(void *arg)
                     s_lab_quiet = !s_lab_quiet;
                     printf("C5VRX_LAB_QUIET enabled=%u\n", s_lab_quiet ? 1u : 0u);
                 } else if (c == '+' || c == 'k') {
-                    if (rf_get_experimental_hw_agc()) (void)rf_set_experimental_hw_agc(false, 62u);
-                    s_rx_profile = RX_PROFILE_BALANCED;
-                    ++s_profile_generation;
+                    leave_experimental_profile();
                     s_agc_mode = ANALOG_AGC_MANUAL;
                     if (s_current_gain < LAB_GAIN_MAX) {
                         s_current_gain = s_current_gain <= LAB_GAIN_MAX - LAB_GAIN_STEP ?
@@ -2802,9 +2840,7 @@ static void console_diag_task(void *arg)
                     settings_save();
                     printf("[MANUAL GAIN] = %u (reg=0x%08lx)\n", s_current_gain, (unsigned long)rf_get_rx_gain_reg());
                 } else if (c == '-' || c == 'j') {
-                    if (rf_get_experimental_hw_agc()) (void)rf_set_experimental_hw_agc(false, 62u);
-                    s_rx_profile = RX_PROFILE_BALANCED;
-                    ++s_profile_generation;
+                    leave_experimental_profile();
                     s_agc_mode = ANALOG_AGC_MANUAL;
                     if (s_current_gain > LAB_GAIN_MIN) {
                         s_current_gain = s_current_gain >= LAB_GAIN_MIN + LAB_GAIN_STEP ?
@@ -2818,23 +2854,17 @@ static void console_diag_task(void *arg)
                     settings_save();
                     printf("[MANUAL GAIN] = %u (reg=0x%08lx)\n", s_current_gain, (unsigned long)rf_get_rx_gain_reg());
                 } else if (c == 'a') {
-                    if (rf_get_experimental_hw_agc()) (void)rf_set_experimental_hw_agc(false, 62u);
-                    s_rx_profile = RX_PROFILE_BALANCED;
-                    ++s_profile_generation;
+                    leave_experimental_profile();
                     s_agc_mode = ANALOG_AGC_ACTIVE;
                     settings_save();
                     printf("[AGC MODE] -> ACTIVE (Self-Calibrating Adaptive Gain Controller ACTIVE)\n");
                 } else if (c == 's') {
-                    if (rf_get_experimental_hw_agc()) (void)rf_set_experimental_hw_agc(false, 62u);
-                    s_rx_profile = RX_PROFILE_BALANCED;
-                    ++s_profile_generation;
+                    leave_experimental_profile();
                     s_agc_mode = ANALOG_AGC_SHADOW;
                     settings_save();
                     printf("[AGC MODE] -> SHADOW (Dry-run: RF gain frozen at %u, computing recommendations)\n", s_current_gain);
                 } else if (c == 'm') {
-                    if (rf_get_experimental_hw_agc()) (void)rf_set_experimental_hw_agc(false, 62u);
-                    s_rx_profile = RX_PROFILE_BALANCED;
-                    ++s_profile_generation;
+                    leave_experimental_profile();
                     s_agc_mode = ANALOG_AGC_MANUAL;
                     settings_save();
                     printf("[AGC MODE] -> MANUAL (Fixed gain=%u)\n", s_current_gain);
