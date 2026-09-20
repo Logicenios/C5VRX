@@ -1278,6 +1278,10 @@ static void lab_finish_gain_sweep(bool aborted)
 
 static void lab_start_gain_sweep(void)
 {
+    if (rf_get_experimental_hw_agc()) {
+        printf("C5VRX_GAIN_SWEEP_REFUSED reason=hw_agc_profile\n");
+        return;
+    }
     if (s_gain_sweep.active) {
         lab_finish_gain_sweep(true);
         return;
@@ -1381,6 +1385,10 @@ static void lab_enter_quiet_baseline(void)
  * change the raw MODEM_DIAG Q4/I4 statistics? Production never forces FFT. */
 static void lab_run_fft_probe(void)
 {
+    if (rf_get_experimental_hw_agc()) {
+        printf("C5VRX_FFT_PROBE_REFUSED reason=hw_agc_profile\n");
+        return;
+    }
     if (s_gain_sweep.active || s_menu_active) {
         printf("C5VRX_FFT_PROBE_REFUSED reason=%s\n",
                s_gain_sweep.active ? "gain_sweep_active" : "menu_active");
@@ -1410,7 +1418,6 @@ static void lab_run_fft_probe(void)
     rf_set_fft_scale_force(false, 0);
     s_lab_fft_forced = false;
     s_lab_fft_value = 0;
-    s_profile_fft_forced = false;
     s_profile_fft_forced = false;
     vTaskDelay(pdMS_TO_TICKS(250));
     int baseline_score = s_last_q_phase * 4 + s_last_p_median
@@ -1492,6 +1499,10 @@ static void lab_run_fft_probe(void)
  * proven. */
 static void lab_run_bandwidth_probe(void)
 {
+    if (rf_get_experimental_hw_agc()) {
+        printf("C5VRX_BW_PROBE_REFUSED reason=hw_agc_profile\n");
+        return;
+    }
     if (s_gain_sweep.active || s_menu_active) {
         printf("C5VRX_BW_PROBE_REFUSED reason=%s\n",
                s_gain_sweep.active ? "gain_sweep_active" : "menu_active");
@@ -1515,6 +1526,7 @@ static void lab_run_bandwidth_probe(void)
     rf_set_fft_scale_force(false, 0);
     s_lab_fft_forced = false;
     s_lab_fft_value = 0;
+    s_profile_fft_forced = false;
     vTaskDelay(pdMS_TO_TICKS(250));
     lab_reset_correlation();
 
@@ -2611,7 +2623,13 @@ static void analog_agc_task(void *arg)
             break;
 
         case AGC_STATE_LEARN: {
-            bool too_hot = p_median > 36 || clip_permille >= 24;
+            bool iq_bad = s_rx_profile == RX_PROFILE_AUTO_EXP &&
+                          (metrics.iq_skew_permille > 260 ||
+                           metrics.iq_cross_permille > 260 ||
+                           metrics.dc_i_x100 > 125 || metrics.dc_i_x100 < -125 ||
+                           metrics.dc_q_x100 > 125 || metrics.dc_q_x100 < -125);
+            bool too_hot = p_median > 36 || clip_permille >= 24 ||
+                           (iq_bad && p_median > 22);
             bool too_weak = (p_median < 14 || q_phase < 50) && clip_permille <= 8;
 
             if (too_hot) {
@@ -2628,7 +2646,13 @@ static void analog_agc_task(void *arg)
                 }
             } else {
                 learn_adjust_counter = 0;
-                if (q_phase >= 65 && p_median >= 14 && p_median <= 36 && clip_permille <= 16) {
+                bool iq_lock_ok = s_rx_profile != RX_PROFILE_AUTO_EXP ||
+                                  (metrics.iq_skew_permille < 380 &&
+                                   metrics.iq_cross_permille < 380 &&
+                                   metrics.dc_i_x100 < 175 && metrics.dc_i_x100 > -175 &&
+                                   metrics.dc_q_x100 < 175 && metrics.dc_q_x100 > -175);
+                if (q_phase >= 65 && p_median >= 14 && p_median <= 36 &&
+                    clip_permille <= 16 && iq_lock_ok) {
                     s_agc_state = AGC_STATE_TRACK;
                     drift_counter = 0;
                     lost_counter = 0;
