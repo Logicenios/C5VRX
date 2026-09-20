@@ -98,11 +98,11 @@ check("menu resolves detected PAL/NTSC before raster start",
 
 check("modern menu raster is SRAM-safe 384x56 logical pixels at 3x vertical scale",
       "MENU_UI_WIDTH 384u" in read(MAIN / "menu_raster.h") and
-      "MENU_UI_LINES 56u" in read(MAIN / "menu_raster.h") and
-      "MENU_UI_X_SCALE_NUM 18u" in read(MAIN / "menu_raster.h") and
-      "MENU_UI_X_SCALE_DEN 5u" in read(MAIN / "menu_raster.h") and
-      "MENU_UI_Y_REPEAT 3u" in read(MAIN / "menu_raster.h") and
-      "MENU_MAX_NODES 6348u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_LINES 48u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_X_SCALE_NUM 207u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_X_SCALE_DEN 50u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_Y_REPEAT 4u" in read(MAIN / "menu_raster.h") and
+      "MENU_MAX_NODES 6540u" in read(MAIN / "menu_raster.h") and
       "s_menu_raster.ui" in all_c)
 check("native menu enabled with safe defaults",
       bool(re.search(r"MENU_RUNTIME_ENABLED\s+1", all_c)) and

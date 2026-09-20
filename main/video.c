@@ -956,24 +956,24 @@ static const char *const s_menu_nav[6] = {
 
 static inline void menu_ui_pixel(int x, int y, uint8_t code)
 {
-    if ((unsigned)x >= MENU_UI_WIDTH || (unsigned)y >= MENU_UI_LINES) return;
+    if ((unsigned)x >= MENU_UI_WIDTH || y < 8 || (unsigned)y >= MENU_UI_COORD_LINES) return;
     unsigned x0 = (unsigned)x * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
     unsigned x1 = (unsigned)(x + 1) * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
-    memset(&s_menu_raster.ui[y][x0], code, x1 - x0);
+    memset(&s_menu_raster.ui[y - 8][x0], code, x1 - x0);
 }
 
 static void menu_ui_rect(int x, int y, int w, int h, uint8_t code)
 {
     if (w <= 0 || h <= 0) return;
     int x0 = x < 0 ? 0 : x;
-    int y0 = y < 0 ? 0 : y;
+    int y0 = y < 8 ? 8 : y;
     int x1 = x + w > (int)MENU_UI_WIDTH ? (int)MENU_UI_WIDTH : x + w;
-    int y1 = y + h > (int)MENU_UI_LINES ? (int)MENU_UI_LINES : y + h;
+    int y1 = y + h > (int)MENU_UI_COORD_LINES ? (int)MENU_UI_COORD_LINES : y + h;
     if (x1 <= x0 || y1 <= y0) return;
     for (int yy = y0; yy < y1; ++yy) {
         unsigned sx0 = (unsigned)x0 * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
         unsigned sx1 = (unsigned)x1 * MENU_UI_X_SCALE_NUM / MENU_UI_X_SCALE_DEN;
-        memset(&s_menu_raster.ui[yy][sx0], code, sx1 - sx0);
+        memset(&s_menu_raster.ui[yy - 8][sx0], code, sx1 - sx0);
     }
 }
 
@@ -1126,26 +1126,10 @@ static const char *afc_mode_name(void)
 
 static void menu_draw_shell(void)
 {
-    menu_ui_rect(0, 0, MENU_UI_WIDTH, MENU_UI_LINES, UI_PANEL);
+    menu_ui_rect(0, 8, MENU_UI_WIDTH, MENU_UI_COORD_LINES - 8, UI_PANEL);
 
-    menu_ui_rect(0, 0, MENU_UI_WIDTH, 8, UI_HEADER);
-    menu_ui_rect(4, 1, 6, 6, UI_WHITE);
-    menu_ui_rect(6, 3, 2, 2, UI_HEADER);
-    menu_ui_text("C5VRX", 14, 0, UI_WHITE);
-
-    const fpv_channel_t *ch = rf_get_current_channel();
-    char buf[24];
-    menu_ui_text(ch->name, 96, 0, UI_WHITE);
-    snprintf(buf, sizeof(buf), "%uM", ch->freq_mhz);
-    menu_ui_text(buf, 128, 0, UI_MUTED);
-    snprintf(buf, sizeof(buf), "G%u", s_current_gain);
-    menu_ui_text(buf, 208, 0, UI_WHITE);
-    menu_ui_text(agc_state_name(), 244, 0, UI_MUTED);
-    menu_ui_signal_bars(320, 0, s_signal_strength);
-    menu_ui_text(s_video_std == VIDEO_STD_PAL ? "PAL" : "NTSC", 344, 0, UI_WHITE);
-
-    menu_ui_rect(0, 8, 92, MENU_UI_LINES - 8, UI_ROOT);
-    menu_ui_vline(91, 8, MENU_UI_LINES - 8, UI_DIVIDER);
+    menu_ui_rect(0, 8, 92, MENU_UI_COORD_LINES - 8, UI_ROOT);
+    menu_ui_vline(91, 8, MENU_UI_COORD_LINES - 8, UI_DIVIDER);
     for (unsigned i = 0; i < 6u; ++i) {
         int y = 8 + (int)i * 8;
         bool selected = (int)i == s_menu_cursor;

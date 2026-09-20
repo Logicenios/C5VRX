@@ -100,24 +100,22 @@ of laboratory broadcast compliance. Analog ratios, edge shaping, oscillator
 tolerance and decoder compatibility require physical validation.
 
 Shared porch/blank buffers and a dedicated modern UI raster avoid a full PAL
-framebuffer. The production UI is **384 x 56 logical pixels**:
+framebuffer. The production UI stores **384 x 48 logical pixels** below the former status strip:
 
-- horizontal coordinates use 18/5 DAC samples (1384 samples / 34.6 us UI width);
-- one logical Y row = three physical video lines (168-line UI height);
+- horizontal coordinates use 207/50 DAC samples (1592 samples / 39.8 us UI width);
+- one logical Y row = four physical video lines (192-line UI height);
 - exact six-bit DAC shades only; no alpha, anti-aliasing or browser-style scaling;
-- persistent status bar + navigation rail + page content, rendered from the existing
-  8x8 bitmap font and small built-in icons.
+- persistent navigation rail + page content, rendered from the existing 8x8
+  bitmap font and small built-in icons.
 
-The UI backing store remains 64,512 bytes because vertical scaling reuses each
-logical row from the same SRAM buffer. Together with sync/burst/blank templates,
-`menu_raster_t` is 83,968 bytes. The first 400x72x4 implementation was rejected
+The UI backing store remains compact because vertical scaling reuses each
+logical row from the same SRAM buffer. The first 400x72x4 implementation was rejected
 by the production linker because it overflowed ESP32-C5 SRAM by 39,408 bytes.
-The compact 384x56x3 layout keeps the same modern status/sidebar/page structure
-while adding only about 7.2 KiB over the old menu raster.
+The compact layout keeps the sidebar and page structure without resampling font rows.
 
 The scatter chain still uses one UI segment per displayed scanline, so the DMA
-node count does not grow with glyph complexity. Its capacity is 6,348 nodes to
-cover the 3x PAL raster. Only `raster.ui` changes while
+node count does not grow with glyph complexity. Its capacity is 6,540 nodes to
+cover the 4x PAL raster. Only `raster.ui` changes while
 the standalone menu is running; timing templates and descriptor links change
 only with TX stopped.
 
