@@ -178,6 +178,7 @@ check("range trials penalize endpoint winding instead of amplitude-only scoring"
       "sync_quality_avg >= 70" in read(MAIN / "range_control.h"))
 fusion_header = read(MAIN / "fusion_receiver.h")
 fusion_optimizer = read(MAIN / "fusion_optimizer.h")
+fusion_temporal = read(MAIN / "fusion_temporal.h")
 check("IQ fusion combines adjacent, lag-2, lag-4 and robust slope evidence",
       "fusion_shadow_push" in fusion_header and
       "lag2_disagreement_permille" in fusion_header and
@@ -188,8 +189,35 @@ check("fusion learner is contextual, bounded and high-gain biased at loss",
       "fusion_optimizer_tick" in fusion_optimizer and
       "FUSION_CONTEXT_WEAK" in fusion_optimizer and
       "FUSION_CONTEXT_BLOCKER" in fusion_optimizer and
-      "No carrier = maximum known sensitivity" in fusion_optimizer and
+      "Loss at the range edge means maximum known sensitivity" in fusion_optimizer and
       "FUSION_OPT_SETTLE_TICKS" in fusion_optimizer)
+check("Range v2 uses distributed temporal observation without extra PHY writes",
+      "fusion_temporal_update" in fusion_temporal and
+      "fade_score" in fusion_temporal and
+      "recovery_score" in fusion_temporal and
+      "FUSION_FAST_SAMPLE_BYTES" in all_c and
+      "FUSION_FAST_PERIOD_MS" in all_c and
+      "fusion_observer_task" in all_c)
+check("fusion separates catastrophic phase risk from average quality",
+      "catastrophic_risk" in fusion_header and
+      "fusion_catastrophic_risk_score" in fusion_header and
+      "baseline_risk" in fusion_optimizer and
+      "risk_win" in fusion_optimizer)
+check("fusion learns local ordered gain transitions and forgets stale certainty",
+      "fusion_edge_cell_t" in fusion_optimizer and
+      "fusion_record_trial_edge" in fusion_optimizer and
+      "fusion_optimizer_decay" in fusion_optimizer and
+      "FUSION_OPT_DECAY_TICKS" in fusion_optimizer)
+check("Range v2 exposes centering and vendor-AGC characterization probes",
+      "C5VRX_AFC_PROBE_BEGIN" in all_c and
+      "C5VRX_HW_AGC_ORACLE_BEGIN" in all_c and
+      "lab_run_frequency_probe" in all_c and
+      "lab_run_hw_agc_oracle" in all_c)
+check("offline demod benchmark gates adjacent/PLL experiments",
+      (ROOT / "tools/range_demod_bench.py").exists() and
+      "phase5_endpoint_winding_disagree_permille" in read(ROOT / "tools/range_demod_bench.py") and
+      "pll_demod" in read(ROOT / "tools/range_demod_bench.py"))
+
 check("fusion profile stays supervisory over the proven realtime demod",
       "RX_PROFILE_FUSION_EXP" in all_c and
       "fusion_optimizer_tick" in all_c and
@@ -223,8 +251,19 @@ check("fusion profile is the experimental default and other RX profiles remain e
       "RX_PROFILE_AUTO_EXP" in all_c and
       "RX_PROFILE_HW_AGC_EXP" in all_c and
       "RX_PROFILE_FUSION_EXP" in all_c and
+      "RX_PROFILE_RANGE_V2_EXP" in all_c and
       "s_rx_profile = RX_PROFILE_FUSION_EXP" in all_c and
       "s_rf_bw_mode = RF_BW_MODE_BW40" in all_c)
+check("Range v2 combines Fusion with acquisition-only BW/AFC and full overload headroom",
+      "RX_PROFILE_RANGE_V2_EXP" in all_c and
+      'return "RANGE V2"' in all_c and
+      "s_rf_bw_mode = RF_BW_MODE_AUTO" in all_c and
+      "s_last_fusion_risk >= 450" in all_c and
+      "goto profile_post_gain" in all_c and
+      "Persisted menu fields" in all_c and
+      "fusion_optimizer_set_gain_floor" in fusion_optimizer and
+      "RX_PROFILE_RANGE_V2_EXP:return 2u" in all_c)
+
 check("RF menu preserves BW control and adds two-second profile selector",
       "LONG:BW  2S:PROFILE" in all_c and
       "btn_ticks >= 40" in all_c and

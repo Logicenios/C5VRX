@@ -46,6 +46,7 @@ typedef struct {
     fusion_context_t context;
     int confidence;
     int quality;
+    int catastrophic_risk; /* 0..1000: phase-slip / clip / near-origin danger */
 } fusion_observation_t;
 
 static inline int fusion_abs(int v) { return v < 0 ? -v : v; }
@@ -165,6 +166,22 @@ static inline fusion_context_t fusion_classify(const fusion_observation_t *o)
     return FUSION_CONTEXT_CLEAN;
 }
 
+static inline int fusion_catastrophic_risk_score(const fusion_observation_t *o)
+{
+    /* Keep catastrophic failure separate from average "quality". A large
+     * endpoint/trajectory disagreement or near-origin cluster must not be
+     * cancelled by a pretty power metric. */
+    int risk = 0;
+    risk += o->origin_permille / 2;
+    risk += o->winding_permille;
+    risk += o->strong_winding_permille * 2;
+    risk += o->shadow.lag4_disagreement_permille / 2;
+    risk += o->shadow.consensus_outlier_permille / 2;
+    risk += o->shadow.low_confidence_permille / 2;
+    risk += o->clip_permille * 4;
+    return fusion_clamp(risk, 0, 1000);
+}
+
 static inline int fusion_quality_score(const fusion_observation_t *o)
 {
     int score = o->q_phase * 9;
@@ -179,6 +196,7 @@ static inline int fusion_quality_score(const fusion_observation_t *o)
     score -= o->iq_cross_permille / 8;
     score -= o->shadow.phase_jitter_x100 / 80;
     score -= o->shadow.slope_residual_x100 / 100;
+    score -= fusion_catastrophic_risk_score(o) / 4;
     return fusion_clamp(score, 0, 1000);
 }
 
@@ -208,6 +226,7 @@ static inline fusion_observation_t fusion_make_observation(
         .sync_quality = sync_quality, .shadow = shadow,
     };
     o.context = fusion_classify(&o);
+    o.catastrophic_risk = fusion_catastrophic_risk_score(&o);
     o.quality = fusion_quality_score(&o);
     o.confidence = fusion_confidence_score(&o);
     return o;
