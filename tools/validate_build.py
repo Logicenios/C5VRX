@@ -208,6 +208,9 @@ check("HW AGC experiment is bounded and software AGC does not fight it",
       "phy_agc_max_gain_set" in all_c and
       "s_rx_profile == RX_PROFILE_HW_AGC_EXP && rf_get_experimental_hw_agc()" in all_c and
       "software must not fight vendor AGC" in all_c)
+check("HW AGC experiment never auto-restores after reboot",
+      "s_rx_profile == RX_PROFILE_HW_AGC_EXP ?" in all_c and
+      "settings.rx_profile != RX_PROFILE_HW_AGC_EXP" in all_c)
 check("lab sweeps refuse ownership conflict with HW AGC experiment",
       all_c.count("reason=hw_agc_profile") >= 3)
 
