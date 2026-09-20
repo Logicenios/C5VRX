@@ -129,6 +129,18 @@ jobs:
           python tools/validate_build.py
           bash -n tools/prepare_pages_site.sh
 
+      - name: Dry-run GitHub Pages firmware mirror
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/prepare_pages_site.sh /tmp/c5vrx-pages-test
+          jq -e 'length > 0' /tmp/c5vrx-pages-test/firmware/releases.json >/dev/null
+          first_asset="$(jq -r '.[0].assets[0].local_url // empty' /tmp/c5vrx-pages-test/firmware/releases.json)"
+          test -n "${first_asset}"
+          test -s "/tmp/c5vrx-pages-test/${first_asset}"
+
       - name: Run host range / demod tests
         shell: bash
         run: |
