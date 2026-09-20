@@ -33,16 +33,14 @@ int main(void) {
     for(int i=0;i<20;i++) tick(&c,0,10,20,0,100,400);
     assert(!c.trial && c.gain==40 && c.cooldown>=80);
 
-    /* No-video acquisition still explores the full gain range. */
-    range_control_reset(&c,62);
-    bool reached_low=false;
+    /* At the range edge, no-video recovery returns to high gain. */
+    range_control_reset(&c,40);
     for(int i=0;i<1000;i++) {
-        uint8_t g=tick(&c,0,25,70,0,10,250);
-        assert(g>=2 && g<=62);
-        reached_low |= g<=8;
+        uint8_t g=tick(&c,0,10,20,0,700,300);
+        assert(g>=40 && g<=62);
         assert(!c.locked);
     }
-    assert(reached_low);
+    assert(c.gain==62);
 
     /* Valid sync but severe endpoint winding is NOT called static-free.
      * The controller may make one normal trial, then accepts a large quality
@@ -56,5 +54,5 @@ int main(void) {
     range_control_reset(&c,24);
     assert(!c.trial && !c.cooldown && !c.failures && c.gain==24);
 
-    puts("Range controller: semantic lock, winding-aware trials, rollback and recovery passed");
+    puts("Range controller: semantic lock, winding-aware trials, rollback and high-gain recovery passed");
 }
