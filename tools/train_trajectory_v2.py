@@ -159,7 +159,7 @@ def self_test() -> None:
     # --write and update this digest in the same reviewed change.
     packed = bytes(dac) + bytes(confidence)
     digest = hashlib.sha256(packed).hexdigest()
-    expected = "15e57fe6e571da29acce82c6824e276a306faae3ed54d4f4a5984c9f3d269f86"
+    expected = "90536e744e3665080b1b3d3777e65d97f95515a442643ed56cc24e8ece659f4d"
     assert digest == expected, f"Trajectory v2 table drift: {digest}"
 
     # Spot-check address semantics across quadrant/sign boundaries.
@@ -198,7 +198,6 @@ def regenerate() -> tuple[list[int], list[int], list[int]]:
     triplets use the known clean local FM trajectory as a small PLL/holdover
     prior. This prevents impossible uniform-Q4 jumps from dominating the LUT.
     """
-    golden_words = parse_lut_words((ROOT / "main" / "fm.bsasm").read_text())
     phases = [phase_rad(b) for b in range(256)]
     phases5 = [phase5(b) for b in range(256)]
     powers = []
@@ -274,13 +273,24 @@ def regenerate() -> tuple[list[int], list[int], list[int]]:
             confidence[address] = max(
                 0, min(255, iround(255.0 * (1.0 - min(std, 24.0) / 24.0))))
         else:
+            # The physical-FM prior leaves a handful of compressed states
+            # unseen. Keep regeneration self-contained: fall back to the same
+            # Phase5 endpoint geometry rather than depending on fm.bsasm data.
             prev = address & 31
             current4 = (address >> 6) & 15
             c0 = current4 << 1
             c1 = c0 | 1
-            d0 = golden_words[(prev << 5) | c0] & 63
-            d1 = golden_words[(prev << 5) | c1] & 63
-            dac[address] = iround((d0 + d1) * 0.5)
+
+            def phase5_endpoint_code(current: int) -> int:
+                delta = current - prev
+                if delta > 15:
+                    delta -= 32
+                elif delta < -16:
+                    delta += 32
+                return scale_rad(delta * TAU / 32.0)
+
+            dac[address] = iround(
+                (phase5_endpoint_code(c0) + phase5_endpoint_code(c1)) * 0.5)
 
     words = list(dac)
     for raw in range(256):
