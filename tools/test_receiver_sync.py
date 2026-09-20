@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 
 source = Path("main/video.c").read_text()
-luts = source[source.index("static const uint8_t s_phase5_state_lut"):source.index("static void video_standard_detector_reset")]
+luts = source[source.index("static const uint8_t s_phase5_state_lut"):source.index("static uint32_t s_receive_generation;")]
 observer = source[source.index("static bool video_standard_observe"):source.index("typedef struct {\n    int p_median;")]
 harness = r"""
 #include <stdint.h>

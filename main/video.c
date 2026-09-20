@@ -31,6 +31,7 @@
 #include "rf.h"
 #include "menu_font.h"
 #include "menu_raster.h"
+#include "range_control.h"
 #include "hal/parlio_ll.h"
 #include "hal/usb_serial_jtag_ll.h"
 
@@ -568,8 +569,11 @@ static inline bool phase5_pair_is_sync(uint8_t previous, uint8_t current)
     return (s_phase5_sync_mask[index >> 3u] & (1u << (index & 7u))) != 0u;
 }
 
+static uint32_t s_receive_generation;
+
 static void video_standard_detector_reset(void)
 {
+    ++s_receive_generation;
     s_video_std_pal_score = 0;
     s_video_std_ntsc_score = 0;
     s_detected_video_std_valid = false;
@@ -2394,6 +2398,9 @@ static void analog_agc_task(void *arg)
     bool btn_scan_fired = false;
     bool btn_profile_fired = false;
     bool was_locked = false;
+    range_control_t range_controller;
+    range_control_reset(&range_controller, s_current_gain);
+    uint32_t receive_generation = s_receive_generation;
     int boot_grace_ticks = 20;
 
     for (;;) {
@@ -2599,6 +2606,26 @@ static void analog_agc_task(void *arg)
             target_gain = s_current_gain;
             s_shadow_gain = s_current_gain;
             goto apply_target;
+        }
+
+        if (s_rx_profile == RX_PROFILE_RANGE_EXP) {
+            if (receive_generation != s_receive_generation ||
+                range_controller.gain != s_current_gain) {
+                receive_generation = s_receive_generation;
+                range_control_reset(&range_controller, s_current_gain);
+            }
+            if (s_agc_mode == ANALOG_AGC_ACTIVE) {
+                target_gain = range_control_tick(&range_controller, fresh_sync,
+                    p_median, q_phase, clip_permille, origin_permille);
+                s_agc_state = range_controller.locked ? AGC_STATE_TRACK :
+                              AGC_STATE_LEARN;
+                s_shadow_gain = target_gain;
+                if (target_gain != s_current_gain) apply_rx_gain_tracked(target_gain);
+                /* The controller owns settling. Observe sync throughout;
+                 * its hold excludes post-write observations from decisions. */
+                settle_ticks = 0;
+                goto control_tail;
+            }
         }
 
         /* Allow severe clipping protection after two observation ticks even

@@ -63,24 +63,31 @@ no undocumented PHY polling, no hardware AGC and no forced FFT scaling.
 
 ### RANGE EXP
 
-Starts at G62 with BW40 and AFC off. Acquisition now requires recent valid
-Phase5 H-sync periods, in addition to IQ metrics. SEARCH explores G62, G56,
-G48, G40, G32, G24, G16, G8 and G2, stopping when video is acquired. This is
-a bounded acquisition sequence, not a measured ranking of sensitivity.
-LEARN returns to SEARCH when sync remains absent, and TRACK loss no longer
-requires low amplitude: high-amplitude noise must also release the lock.
+The ACTIVE range controller in `main/range_control.h` starts from the applied
+hardware gain and holds settings during usable video with amplitude headroom.
+It scores ten settled observations using recent Phase5 H-sync evidence,
+coherence, clipping and near-origin occupancy. This is a heuristic, not a
+calibrated SNR or a measurement of visible snow.
 
-Severe rail clipping bypasses the normal 500 ms decision hold after two
-50 ms observation ticks. The normal hold remains conservative pending actual
-hardware settling measurements. Rail detection no longer requires a high
-median amplitude. IQ DC/skew/cross remains diagnostic only; it is not treated
-as proof of front-end compression.
+Persistent clipping reduces gain. Severe clipping can bypass normal settling
+after two 50 ms ticks. Ordinary trial changes retain a conservative 500 ms hold.
+A trial must improve its score by a margin; otherwise the previous gain is
+restored and repeated unsuccessful trials receive a 4..32 second backoff.
+The controller explores lower gain states after sustained absence of sync,
+including states near G2, rather than parking permanently at maximum gain.
+Channel/profile reset invalidates trial history. Learning is volatile and does
+not write NVS. Clean reception performs no optimization gain writes.
 
-The host sync test exercises PAL/NTSC, sample alignment, invalid pulse timing,
-a constant tone and 1000 synthetic noise windows. These tests do not establish
-weak-signal sensitivity, real filtered-noise rejection, or glitch-free gain
-transitions. Measuring blanking noise, calibrated gain-state quality and
-transition waveforms remains hardware work; no zero-lag guarantee is made.
+BW40 and AFC OFF remain the default test conditions. ACTIVE RANGE bypasses the
+legacy automatic bandwidth/AFC loop. No additional undocumented PHY controls
+are enabled. IQ DC/skew/cross is diagnostic only, not proof of compression.
+
+Tests exercise clean hold, bounded clipping response, rejected trials/rollback,
+noise recovery, state reset and synthetic PAL/NTSC detection. The physical gain
+settling time, optimal sensitivity, filtered-noise rejection and visible snow
+are not proven by these tests. Measuring blanking noise and gain-transition
+waveforms remains hardware work. The score can still be affected by a changing
+RF environment during a trial; no pixel-perfect or zero-relock claim is made.
 
 ### BLOCKER EXP
 
