@@ -2512,9 +2512,13 @@ static void analog_agc_task(void *arg)
                 menu_refresh_ticks = 0;
                 menu_render_menu();
             }
-            continue; /* Keep AGC/AFC frozen while the independent menu raster runs. */
+            /* The menu raster has its own TX DMA chain, while PARLIO RX keeps
+             * filling the raw IQ ring.  Keep the receive controller running
+             * so Gxx and the signal indication reflect the selected channel
+             * instead of freezing at the value from when the menu opened. */
+        } else {
+            menu_refresh_ticks = 0;
         }
-        menu_refresh_ticks = 0;
 
         /* Issue #28 classifier: if raw carrier coherence collapses within
          * 200 ms of a new gain state while no transport fault is required to
