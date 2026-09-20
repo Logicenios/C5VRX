@@ -47,9 +47,12 @@ static bool s_analog_bw40 = true;
 #define MAC_TXQ_COUNT    5u
 
 /* RX digital filter register (0x600A0430[21:18]) */
-#define RX_FILTER_REG   0x600A0430u
-#define RX_FILTER_SHIFT 18u
-#define RX_FILTER_MASK  (0xFu << RX_FILTER_SHIFT)
+#define RX_FILTER_REG       0x600A0430u
+#define RX_FILTER_SHIFT     18u
+#define RX_FILTER_MASK      (0xFu << RX_FILTER_SHIFT)
+#define ADC_RATE_REG        0x600A0448u
+#define RX_GAIN_STATUS_REG  0x600A702Cu
+#define ADC_RATE_SEL_MASK   0x3u
 
 /* Continuous modem front-end un-gating registers.
  * Required to keep the C5 ADC / modem continuously clocking 80 MS/s IQ
@@ -419,8 +422,19 @@ extern void phy_disable_agc(void);
 extern void phy_rfagc_disable(void);
 extern void phy_set_freq(uint16_t freq_mhz, int offset);
 extern void phy_chip_set_chan_offset(int offset_khz);
+extern void phy_fft_scale_force(bool force_en, int8_t force_value);
+
+/* C5-only/PHY experimental surface. Signatures below are independently used
+ * by C5-targeted PHY tooling, but remain undocumented by Espressif. Keep every
+ * call behind explicit EXPERIMENTAL menu modes and weak-link capability checks. */
+extern void phy_enable_agc(void) __attribute__((weak));
+extern void phy_agc_max_gain_set(int gain) __attribute__((weak));
+extern int phy_get_noise_floor(void) __attribute__((weak));
+extern int phy_get_rssi(void) __attribute__((weak));
 
 static uint8_t s_current_gain_val = 52u;
+static bool s_experimental_hw_agc;
+static uint8_t s_experimental_agc_max_gain = 62u;
 
 /* Standard FPV Channel Table: 6 Bands x 8 Channels = 48 Channels
  * RaceBand (R), Boscam A (A), Boscam B (B), Boscam E (E), FatShark (F), LowBand (L) */
@@ -525,7 +539,86 @@ void rf_set_rx_gain(bool force, uint8_t gain_idx)
 
 uint32_t rf_get_rx_gain_reg(void)
 {
-    return REG32(0x600a702cu);
+    return REG32(RX_GAIN_STATUS_REG);
+}
+
+void rf_get_phy_snapshot(rf_phy_snapshot_t *snapshot)
+{
+    if (!snapshot) return;
+
+    snapshot->gain_reg = REG32(RX_GAIN_STATUS_REG);
+    snapshot->rx_filter_reg = REG32(RX_FILTER_REG);
+    snapshot->adc_rate_reg = REG32(ADC_RATE_REG);
+    snapshot->source_mux_reg = REG32(SOURCE_MUX);
+    snapshot->rx_filter_mode =
+        (uint8_t)((snapshot->rx_filter_reg & RX_FILTER_MASK) >> RX_FILTER_SHIFT);
+    snapshot->adc_rate_sel =
+        (uint8_t)(snapshot->adc_rate_reg & ADC_RATE_SEL_MASK);
+}
+
+void rf_set_fft_scale_force(bool force, int8_t value)
+{
+    /* The symbol is exported by the ESP32-C5 ROM PHY and is also used by
+     * Espressif's CSI gain-control design. Keep it lab-only: whether it is
+     * upstream of raw MODEM_DIAG is exactly what the FFT probe measures. */
+    phy_fft_scale_force(force, value);
+}
+
+
+bool rf_try_get_noise_floor_dbm(int *dbm)
+{
+    if (!dbm || !phy_get_noise_floor) return false;
+    int value = phy_get_noise_floor();
+    /* Reject impossible values instead of feeding an ABI mismatch into AUTO. */
+    if (value < -140 || value > -20) return false;
+    *dbm = value;
+    return true;
+}
+
+bool rf_try_get_wideband_rssi_dbm(int *dbm)
+{
+    if (!dbm || !phy_get_rssi) return false;
+    int value = phy_get_rssi();
+    if (value < -140 || value > 10) return false;
+    *dbm = value;
+    return true;
+}
+
+bool rf_set_experimental_hw_agc(bool enable, uint8_t max_gain)
+{
+    if (enable) {
+        if (!phy_enable_agc || !phy_agc_max_gain_set) return false;
+        if (max_gain > 62u) max_gain = 62u;
+        if (max_gain < 2u) max_gain = 2u;
+
+        /* Release the same forced-gain primitive used by production, then let
+         * the vendor AGC operate under a bounded ceiling. This is deliberately
+         * experimental: boot disabled rfagc separately and the exact split
+         * between RF/BB AGC remains part of issue #27 characterization. */
+        s_experimental_agc_max_gain = max_gain;
+        phy_agc_max_gain_set((int)max_gain);
+        phy_force_rx_gain(false, s_current_gain_val);
+        phy_enable_agc();
+        s_experimental_hw_agc = true;
+        return true;
+    }
+
+    /* Deterministic return to the known C5VRX receive state. */
+    phy_disable_agc();
+    phy_rfagc_disable();
+    phy_force_rx_gain(true, s_current_gain_val);
+    s_experimental_hw_agc = false;
+    return true;
+}
+
+bool rf_get_experimental_hw_agc(void)
+{
+    return s_experimental_hw_agc;
+}
+
+uint8_t rf_get_experimental_agc_max_gain(void)
+{
+    return s_experimental_agc_max_gain;
 }
 
 const fpv_channel_t *rf_get_current_channel(void)

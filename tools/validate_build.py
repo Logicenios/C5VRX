@@ -99,8 +99,8 @@ check("menu resolves detected PAL/NTSC before raster start",
 check("modern menu raster is SRAM-safe 384x56 logical pixels at 3x vertical scale",
       "MENU_UI_WIDTH 384u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_LINES 56u" in read(MAIN / "menu_raster.h") and
-      "MENU_UI_X_SCALE_NUM 18u" in read(MAIN / "menu_raster.h") and
-      "MENU_UI_X_SCALE_DEN 5u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_X_SCALE_NUM 189u" in read(MAIN / "menu_raster.h") and
+      "MENU_UI_X_SCALE_DEN 50u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_Y_REPEAT 3u" in read(MAIN / "menu_raster.h") and
       "MENU_MAX_NODES 6348u" in read(MAIN / "menu_raster.h") and
       "s_menu_raster.ui" in all_c)
@@ -123,6 +123,97 @@ check("lag diagnostics poll PARLIO GDMA and BitScrambler",
 check("lag events correlate against gain writes",
       "near_gain_event_count" in all_c and
       "s_last_gain_write_us = esp_timer_get_time();" in all_c)
+
+check("issue 27 fixed-gain characterization sweep present",
+      "C5VRX_GAIN_SWEEP_BEGIN" in all_c and
+      "C5VRX_LAB_ROW" in all_c and
+      "LAB_GAIN_SETTLE_MS 700u" in all_c and
+      "LAB_GAIN_DWELL_MS  1000u" in all_c and
+      "lab_gain_sweep_tick" in all_c)
+check("issue 28 quiet fixed baseline and reset present",
+      "C5VRX_LAB_BASELINE_READY" in all_c and
+      "lab_reset_correlation" in all_c and
+      "s_lab_quiet" in all_c and
+      "ANALOG_AGC_MANUAL" in all_c and
+      "RF_BW_MODE_BW40" in all_c and
+      "AFC_MODE_OFF" in all_c)
+check("vendor PHY timer inventory is reachable on demand",
+      "rf_dump_tracked_timers();" in all_c)
+check("manual gain cannot step below production lower bound",
+      "s_current_gain > LAB_GAIN_MIN" in all_c and
+      "LAB_GAIN_MIN       2u" in all_c)
+
+check("PHY lab exposes read-only filter/ADC snapshot",
+      "rf_get_phy_snapshot" in all_c and
+      "RX_GAIN_STATUS_REG" in all_c and
+      "ADC_RATE_REG" in all_c and
+      "rx_filter_mode" in all_c)
+check("FFT placement probe is bounded and restores automatic FFT scaling",
+      "C5VRX_FFT_PROBE_BEGIN" in all_c and
+      "s_lab_fft_values[] = {16, 24, 32, 40}" in all_c and
+      "rf_set_fft_scale_force(false, 0)" in all_c)
+check("fixed-gain BW40/BW20 A/B probe present",
+      "C5VRX_BW_PROBE_BEGIN" in all_c and
+      'lab_print_row("BW_SWEEP"' in all_c and
+      "LAB_BW_SETTLE_MS" in all_c)
+check("Q4 IQ-centering metrics present",
+      "dc_i_x100" in all_c and "dc_q_x100" in all_c and
+      "iq_skew_permille" in all_c and "iq_cross_permille" in all_c)
+check("lag correlation covers any tracked PHY write",
+      "near_phy_event_count" in all_c and
+      "s_last_phy_write_us" in all_c and
+      "PHY_WRITE_BW" in all_c and "PHY_WRITE_OFFSET" in all_c and
+      "PHY_WRITE_FFT" in all_c)
+check("TRACK freezes automatic bandwidth and AFC writes",
+      "TRACK is a hard no-write zone" in all_c and
+      "AUTO AFC is acquisition-only" in all_c and
+      "s_agc_state != AGC_STATE_TRACK" in all_c)
+check("unsafe undocumented gain/filter ROM controls remain out of production",
+      all(symbol not in all_c for symbol in (
+          "phy_pbus_set_rxgain(",
+          "phy_bb_gain_index(",
+          "phy_wifi_agc_sat_gain(",
+          "phy_chan_filt_set(",
+          "phy_rx_filter_mode(",
+          "phy_rfrx_rxdc_cal(",
+      )))
+
+check("range profile is the BW40 default and other experiments remain explicit",
+      "RX_PROFILE_BALANCED = 0" in all_c and
+      "RX_PROFILE_RANGE_EXP" in all_c and
+      "RX_PROFILE_BLOCKER_EXP" in all_c and
+      "RX_PROFILE_RECOVERY_EXP" in all_c and
+      "RX_PROFILE_AUTO_EXP" in all_c and
+      "RX_PROFILE_HW_AGC_EXP" in all_c and
+      "s_rx_profile = RX_PROFILE_RANGE_EXP" in all_c and
+      "s_rf_bw_mode = RF_BW_MODE_BW40" in all_c)
+check("RF menu preserves BW control and adds two-second profile selector",
+      "LONG:BW  2S:PROFILE" in all_c and
+      "btn_ticks >= 40" in all_c and
+      "cycle_rx_profile();" in all_c)
+check("experimental PHY environment reads stay out of the range default",
+      "s_rx_profile == RX_PROFILE_AUTO_EXP && ++phy_metric_ticks >= 5" in all_c and
+      "rf_try_get_noise_floor_dbm" in all_c and
+      "rf_try_get_wideband_rssi_dbm" in all_c)
+check("AUTO FFT promotion requires same-boot raw-Q4 evidence",
+      "s_fft_q4_effect_known" in all_c and
+      "s_fft_q4_effective" in all_c and
+      "best_score >= baseline_score + 12" in all_c and
+      "s_rx_profile == RX_PROFILE_AUTO_EXP && s_fft_q4_effective" in all_c)
+check("AUTO profile uses Q4 IQ quality and bounded environment bias",
+      "metrics.iq_skew_permille > 260" in all_c and
+      "metrics.iq_cross_permille > 260" in all_c and
+      "s_last_phy_rssi_dbm - s_last_noise_floor_dbm" in all_c)
+check("HW AGC experiment is bounded and software AGC does not fight it",
+      "rf_set_experimental_hw_agc(true, 62u)" in all_c and
+      "phy_agc_max_gain_set" in all_c and
+      "s_rx_profile == RX_PROFILE_HW_AGC_EXP && rf_get_experimental_hw_agc()" in all_c and
+      "software must not fight vendor AGC" in all_c)
+check("HW AGC experiment never auto-restores after reboot",
+      "s_rx_profile == RX_PROFILE_HW_AGC_EXP ?" in all_c and
+      "settings.rx_profile != RX_PROFILE_HW_AGC_EXP" in all_c)
+check("lab sweeps refuse ownership conflict with HW AGC experiment",
+      all_c.count("reason=hw_agc_profile") >= 3)
 
 # ---- Web flasher / release safety ----
 web_app = read(ROOT / "web" / "app.js")
