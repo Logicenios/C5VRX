@@ -53,6 +53,7 @@
 #include "esp_attr.h"
 #include "esp_cache.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "nvs.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
@@ -197,7 +198,12 @@ static inline void sync_dma_m2c(const void *addr, size_t size)
 /* Timing and descriptors are immutable while running; only text pixels change.
  * This raster is never linked to the RF ring. */
 static DMA_ATTR __attribute__((aligned(64))) menu_raster_t s_menu_raster;
-static DMA_ATTR __attribute__((aligned(64))) dma_descriptor_t s_menu_nodes[MENU_MAX_NODES];
+/* The full PAL scatter chain is ~76 KiB. Keeping it in static BSS made a
+ * ~10% wider menu overflow the C5 static DRAM segment even though descriptors
+ * are needed only while the standalone menu owns TX. Allocate the exact chain
+ * from internal AHB-DMA descriptor memory while the menu is active instead. */
+static dma_descriptor_t *s_menu_nodes;
+static unsigned s_menu_node_capacity;
 /* AGC sampling and channel scan are serialized in analog_agc_task, so they
  * share one descriptor-sized CPU snapshot instead of reserving 8 KiB. */
 static uint8_t s_control_sample_buf[CONTROL_SAMPLE_BYTES];
@@ -2335,11 +2341,20 @@ static void menu_ui_signal_bars(int x, int y, int quality)
     }
 }
 
+static bool menu_count_segment(void *ctx, const uint8_t *data, unsigned length)
+{
+    unsigned *count = (unsigned *)ctx;
+    if (!count || *count >= MENU_MAX_NODES || length > 4092 ||
+        ((uintptr_t)data & 3) || (length & 3)) return false;
+    ++*count;
+    return true;
+}
+
 static bool menu_append_segment(void *ctx, const uint8_t *data, unsigned length)
 {
     (void)ctx;
-    if (s_menu_node_count >= MENU_MAX_NODES || length > 4092 ||
-        ((uintptr_t)data & 3) || (length & 3)) return false;
+    if (!s_menu_nodes || s_menu_node_count >= s_menu_node_capacity ||
+        length > 4092 || ((uintptr_t)data & 3) || (length & 3)) return false;
     dma_descriptor_t *node = &s_menu_nodes[s_menu_node_count++];
     memset(node, 0, sizeof(*node));
     node->dw0.size = length;
@@ -2350,14 +2365,46 @@ static bool menu_append_segment(void *ctx, const uint8_t *data, unsigned length)
     return true;
 }
 
+static void menu_free_nodes(void)
+{
+    if (!s_menu_nodes) return;
+    heap_caps_free(s_menu_nodes);
+    s_menu_nodes = NULL;
+    s_menu_node_capacity = 0;
+    s_menu_node_count = 0;
+}
+
 static void menu_render_menu(void);
 
 static void menu_init_buffers(void)
 {
     menu_raster_init(&s_menu_raster, s_video_std);
+
+    /* Count first, then allocate exactly the PAL/NTSC chain needed by this
+     * raster. The count pass is hardware-independent and avoids reserving the
+     * 6348-node PAL maximum when the active standard is NTSC. */
+    unsigned required_nodes = 0;
+    ESP_ERROR_CHECK(menu_raster_emit(&s_menu_raster, s_video_std,
+                                     menu_count_segment, &required_nodes) ?
+                    ESP_OK : ESP_ERR_INVALID_SIZE);
+    ESP_ERROR_CHECK(required_nodes > 0 && required_nodes <= MENU_MAX_NODES ?
+                    ESP_OK : ESP_ERR_INVALID_SIZE);
+
+    if (s_menu_node_capacity < required_nodes) {
+        menu_free_nodes();
+        size_t bytes = required_nodes * sizeof(*s_menu_nodes);
+        s_menu_nodes = (dma_descriptor_t *)heap_caps_aligned_alloc(
+            64u, bytes, MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL);
+        ESP_ERROR_CHECK(s_menu_nodes ? ESP_OK : ESP_ERR_NO_MEM);
+        s_menu_node_capacity = required_nodes;
+    }
+
     s_menu_node_count = 0;
     ESP_ERROR_CHECK(menu_raster_emit(&s_menu_raster, s_video_std,
-                                   menu_append_segment, NULL) ? ESP_OK : ESP_ERR_INVALID_SIZE);
+                                     menu_append_segment, NULL) ?
+                    ESP_OK : ESP_ERR_INVALID_SIZE);
+    ESP_ERROR_CHECK(s_menu_node_count == required_nodes ?
+                    ESP_OK : ESP_ERR_INVALID_SIZE);
     s_menu_nodes[s_menu_node_count - 1].next = s_menu_nodes;
     menu_render_menu();
     sync_dma_c2m(&s_menu_raster, sizeof(s_menu_raster));
@@ -2668,6 +2715,11 @@ static void video_set_menu_mode(bool active)
         quiet_tx_interrupts();
         patch_descriptors_clear_eof(s_rx_dma_ch, true);
         patch_descriptors_clear_eof(s_tx_dma_ch, false);
+
+        /* Live TX now owns its own driver descriptors; the standalone menu
+         * scatter chain is no longer referenced by GDMA. Return its large
+         * descriptor allocation to internal heap for normal flight. */
+        menu_free_nodes();
     }
     s_menu_timeout_ticks = 0;
     s_menu_active = active;
