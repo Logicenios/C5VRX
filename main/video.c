@@ -839,6 +839,11 @@ static control_metrics_t analyze_control_window(const uint8_t *sample, size_t by
     return m;
 }
 
+/* Fast observer publishes temporal state with a tiny sequence lock. It only
+ * reads completed DMA data; the 40 MS/s hardware path never waits on it. */
+static volatile uint32_t s_fusion_temporal_seq;
+static fusion_temporal_metrics_t s_fusion_temporal_shared;
+
 static fusion_temporal_metrics_t fusion_temporal_read_shared(void)
 {
     fusion_temporal_metrics_t out = {0};
@@ -1076,10 +1081,6 @@ static volatile int s_last_fusion_recovery = 0;
 static volatile int s_last_fusion_stability = 0;
 static volatile uint32_t s_last_fusion_fast_samples = 0;
 
-/* Fast observer publishes temporal state with a tiny sequence lock. It only
- * reads completed DMA data; the 40 MS/s hardware path never waits on it. */
-static volatile uint32_t s_fusion_temporal_seq;
-static fusion_temporal_metrics_t s_fusion_temporal_shared;
 static volatile uint32_t s_gain_transition_count = 0;
 static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in kHz */
 static volatile bool s_channel_scan_active;
@@ -1441,6 +1442,8 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            s_last_fusion_context, s_last_fusion_quality, s_last_fusion_confidence,
            s_last_fusion_low_confidence_pm, s_last_fusion_lag2_pm,
            s_last_fusion_lag4_pm, s_last_fusion_consensus_pm, s_last_fusion_slope_x100,
+           s_last_fusion_risk, s_last_fusion_fade, s_last_fusion_recovery,
+           s_last_fusion_stability, (unsigned long)s_last_fusion_fast_samples,
            s_lab_fft_forced ? 1u : 0u, (int)s_lab_fft_value,
            (unsigned)phy.rx_filter_mode, (unsigned)phy.adc_rate_sel,
            (unsigned long)phy.rx_filter_reg, (unsigned long)phy.adc_rate_reg,
