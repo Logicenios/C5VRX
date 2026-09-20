@@ -98,11 +98,12 @@ static inline uint8_t range_control_tick(range_control_t *c, bool sync,
      * rollback/backoff machinery. */
     if (video && p >= 14 && p <= 36 && !demod_static_heavy(winding))
         return c->gain;
-    /* Absence of video never parks permanently at one high-gain state.
-     * Acquisition is separate from trials; no bad baseline to restore. */
+    /* Range-edge rule: loss of semantic video is not a reason to lower
+     * receive gain. Return to the high-gain survival state instead. */
     if (c->no_video >= 4) {
         c->no_video = 0;
-        return range_control_move(c, c->gain <= 8 ? 62 : c->gain - 8);
+        c->trial = false;
+        return range_control_move(c, 62);
     }
     if (!video || c->cooldown) return c->gain;
     int direction = p < 14 ? 2 : -2;
