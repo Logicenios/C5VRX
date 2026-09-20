@@ -121,6 +121,23 @@ The ROM also exports names such as `phy_chan_filt_set()` and
 `phy_rx_filter_mode()`, but this PR does not call them: their ESP32-C5 ABI,
 valid arguments and physical filter response are not yet proven.
 
+## RX profile A/B
+
+The RF menu has two hold durations on the RF page:
+
+- normal long press: cycle BW40 / BW20 / AUTO;
+- hold for about 2 seconds: cycle BALANCED / RANGE EXP / BLOCKER EXP /
+  RECOVERY / AUTO EXP / HW AGC EXP.
+
+For controlled comparisons, keep channel, antenna, VTX scene and attenuation
+identical. Reset evidence with `r` before each profile and mark a visible
+freeze with `l`.
+
+`AUTO EXP` is evidence-gated: FFT optimization stays dormant until the `F`
+probe reports a material raw-Q4 improvement during the same boot.
+`HW AGC EXP` owns the vendor gain loop, so G/FFT/BW characterization sweeps
+refuse to start until another profile is selected.
+
 ## #28 quiet lag baseline
 
 Use `b` once. The ready line confirms:
