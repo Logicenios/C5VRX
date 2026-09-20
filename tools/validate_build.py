@@ -225,11 +225,11 @@ check("offline demod benchmark gates adjacent/PLL experiments",
 
 traj_asm = read(MAIN / "fm_traj.bsasm")
 traj_gen = read(ROOT / "tools" / "train_trajectory_v2.py")
-check("Trajectory v2 preserves exact-adjacent branch semantics",
-      "raw_exact = scale_rad(" in traj_gen and
-      "wrap(phases[m] - phases[p]) + wrap(phases[c] - phases[m])" in traj_gen and
-      "d0+d1 is never" in read(MAIN / "trajectory_v2_lut.h") and
-      "re-wrapped" in read(MAIN / "trajectory_v2_lut.h"))
+check("Trajectory v2 preserves no-rewrap adjacent trajectory target",
+      "groups[address].append((previous, scale_rad(d0 + d1)))" in traj_gen and
+      "target is the clean two-adjacent trajectory d0+d1" in
+          read(MAIN / "trajectory_v2_lut.h") and
+      "no second wrap" in read(MAIN / "trajectory_v2_lut.h"))
 check("Trajectory v2 live loop stays two-bundle and quiet 20M->40M",
       "trajectory:" in traj_asm and
       "emit:" in traj_asm and
@@ -246,17 +246,24 @@ check("Trajectory v2 initial hardware A/B is locked to 6BIT@40",
       "TRAJ V2 is locked to 6BIT@40" in all_c and
       "s_demod_mode == DEMOD_MODE_TRAJECTORY_V2" in all_c and
       "s_output_mode = VIDEO_OUTPUT_6BIT_40" in all_c)
-check("Trajectory v2 supervisor scores actual LUT sync and uncertainty",
+check("Trajectory v2 supervisor mirrors two-stage token LUT and uncertainty",
+      "trajectory_v2_stage1_address" in all_c and
+      "trajectory_v2_stage2_address" in all_c and
       "trajectory_v2_code" in all_c and
       "trajectory_uncertainty_permille" in all_c and
+      "c5vrx_trajectory_v2_token" in all_c and
       "c5vrx_trajectory_v2_confidence" in all_c and
       "traj_uncert_pm=%d" in all_c and
       "pll_slip_pm=%d" in all_c)
-check("Trajectory v2 uses one identical middle-I-sign hint everywhere",
+check("Trajectory v2 live two-stage address contract is mirrored everywhere",
       "middle_raw >> 7u" in all_c and
-      "set 15 7" in traj_asm and
-      "middle_i_sign" in read(MAIN / "trajectory_v2_lut.h") and
-      "((middle_raw >> 7) & 1)" in read(ROOT / "tools/range_demod_bench.py"))
+      "set 24 7" in traj_asm and
+      "set 25 O30" in traj_asm and
+      "set 21 L6" in traj_asm and
+      "set 25 L15" in traj_asm and
+      "middle raw-I sign" in traj_gen and
+      "middle_raw >> 7" in read(ROOT / "tools/range_demod_bench.py") and
+      "c5vrx_trajectory_v2_token" in read(MAIN / "trajectory_v2_lut.h"))
 check("demod A/B switch resets semantic lock state",
       "cycle_demod_mode" in all_c and
       "video_standard_detector_reset();" in all_c and
