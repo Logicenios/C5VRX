@@ -31,6 +31,12 @@
 
 The current experimental range work measures semantic CVBS sync and the exact-adjacent winding loss hidden by the 50 ns endpoint discriminator. See `docs/range-demod-quality-v2.md` for the measurement model and hardware validation rules.
 
+The production receive profile now uses ARC: it reconstructs the valid
+ESP32-C5 vendor gain table at boot, starts at the highest RF stage with bounded
+downstream gain, fits BB/fine gain to raw Q4 evidence during acquisition, and
+performs zero PHY writes while clean video is locked. See
+`docs/arc-receive-chain.md` for the recovered PHY ABI and state model.
+
 The current Range v2 work is documented in:
 - `docs/range-v2.md` — implementation and validation overview;
 - `docs/range-v2-knowledge.md` — preserved control/demod engineering knowledge;
@@ -130,7 +136,9 @@ After startup, the CPU does not process pixels; the entire pipeline runs continu
 - Eliminates both the erratic hunting of stock packet AGC and the "noise trap" of blind power measurement (where background thermal noise keeps measured power elevated even in deep fades).
 - Computes real-time integer FM phase coherence:
   $$Q_{\text{phase}} = \frac{\text{count}(P \ge 8 \land \text{Dot} > 0 \land |\text{Cross}| \le \text{Dot})}{255} \times 100\%$$
-- **Dynamic Gain Adaptation**: As signal degrades ($Q_{\text{phase}} < 68\%$ or $P_{\text{median}} < 18$) without clipping, the receiver actively steps RF gain up towards Gain 62 to lift weak carriers above the ADC quantizer floor.
+- **ARC Gain Adaptation**: ARC separates the vendor RF stage from downstream
+  BB/fine gain. Persistent loss selects the first entry of the highest RF stage;
+  acquisition then fits Q4 utilization one valid vendor index at a time.
 - **Fast Overload Safety Rem**: Instant gain cut ($\Delta G = -4 / -6$) if clipping occurs ($N_{\text{clip}} \ge 4$ and $P_{\text{median}} > 18$).
 - **Deadband Lock**: Zero register writes when locked in the clean target zone ($Q_{\text{phase}} \ge 70\%, P_{\text{median}} \in [18, 30]$).
 

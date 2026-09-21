@@ -49,7 +49,7 @@ c_files = list(MAIN.glob("*.c"))
 all_c = "\n".join(read(f) for f in c_files)
 c_names = [f.name for f in c_files]
 
-check("production receiver and dedicated menu raster modules", set(c_names) == {"main.c", "rf.c", "video.c", "menu_raster.c"},
+check("production receiver and dedicated menu raster modules", set(c_names) == {"main.c", "arc_phy.c", "rf.c", "video.c", "menu_raster.c"},
       f"found: {c_names}")
 check("main.c present", "main.c" in c_names)
 check("rf.c present", "rf.c" in c_names)
@@ -230,11 +230,11 @@ check("fusion learns local ordered gain transitions and forgets stale certainty"
       "fusion_record_trial_edge" in fusion_optimizer and
       "fusion_optimizer_decay" in fusion_optimizer and
       "FUSION_OPT_DECAY_TICKS" in fusion_optimizer)
-check("Range v2 exposes centering and vendor-AGC characterization probes",
+check("Range v2 exposes centering and read-only ARC characterization probes",
       "C5VRX_AFC_PROBE_BEGIN" in all_c and
-      "C5VRX_HW_AGC_ORACLE_BEGIN" in all_c and
+      "C5VRX_ARC_ORACLE" in all_c and
       "lab_run_frequency_probe" in all_c and
-      "lab_run_hw_agc_oracle" in all_c)
+      "lab_print_arc_oracle" in all_c)
 check("offline demod benchmark gates adjacent/PLL experiments",
       (ROOT / "tools/range_demod_bench.py").exists() and
       "phase5_endpoint_winding_disagree_permille" in read(ROOT / "tools/range_demod_bench.py") and
@@ -331,16 +331,16 @@ check("unsafe undocumented gain/filter ROM controls remain out of production",
           "phy_rfrx_rxdc_cal(",
       )))
 
-check("fusion profile is the experimental default and other RX profiles remain explicit",
+check("ARC is the production default and legacy RX profiles remain explicit",
       "RX_PROFILE_BALANCED = 0" in all_c and
       "RX_PROFILE_RANGE_EXP" in all_c and
       "RX_PROFILE_BLOCKER_EXP" in all_c and
       "RX_PROFILE_RECOVERY_EXP" in all_c and
       "RX_PROFILE_AUTO_EXP" in all_c and
-      "RX_PROFILE_HW_AGC_EXP" in all_c and
+      "RX_PROFILE_ARC" in all_c and
       "RX_PROFILE_FUSION_EXP" in all_c and
       "RX_PROFILE_RANGE_V2_EXP" in all_c and
-      "s_rx_profile = RX_PROFILE_FUSION_EXP" in all_c and
+      "s_rx_profile = RX_PROFILE_ARC" in all_c and
       "s_rf_bw_mode = RF_BW_MODE_BW40" in all_c)
 check("Range v2 combines Fusion with acquisition-only BW/AFC and full overload headroom",
       "RX_PROFILE_RANGE_V2_EXP" in all_c and
@@ -373,16 +373,22 @@ check("AUTO profile uses Q4 IQ quality and bounded environment bias",
       "metrics.iq_skew_permille > 260" in all_c and
       "metrics.iq_cross_permille > 260" in all_c and
       "s_last_phy_rssi_dbm - s_last_noise_floor_dbm" in all_c)
-check("HW AGC experiment is bounded and software AGC does not fight it",
-      "rf_set_experimental_hw_agc(true, 62u)" in all_c and
-      "phy_agc_max_gain_set" in all_c and
-      "s_rx_profile == RX_PROFILE_HW_AGC_EXP && rf_get_experimental_hw_agc()" in all_c and
-      "software must not fight vendor AGC" in all_c)
-check("HW AGC experiment never auto-restores after reboot",
-      "s_rx_profile == RX_PROFILE_HW_AGC_EXP ?" in all_c and
-      "settings.rx_profile != RX_PROFILE_HW_AGC_EXP" in all_c)
-check("lab sweeps refuse ownership conflict with HW AGC experiment",
-      all_c.count("reason=hw_agc_profile") >= 3)
+arc_phy = read(MAIN / "arc_phy.c") + read(MAIN / "arc_phy.h")
+arc_controller = read(MAIN / "arc_controller.h")
+check("ARC reconstructs only vendor-generated gain tuples",
+      "59c1234e929212aec0fdda75769b759951235536" in arc_phy and
+      "PHY_PARAM_RX_SPANS_OFFSET 0x422u" in arc_phy and
+      "64u, 100u, 93u, 94u, 107u, 119u, 124u, 125u, 127u" in arc_phy and
+      "tuple->packed_state" in arc_phy and
+      "phy_pbus_set_rxgain(" not in all_c)
+check("ARC preserves clean LOCK and uses maximum RF-stage survival",
+      "ARC_LOCK" in arc_controller and
+      "LOCK invariant: clean IQ causes no PHY writes" in arc_controller and
+      "arc_gain_highest_rf_stage_start" in arc_controller and
+      "s_rx_profile == RX_PROFILE_ARC" in all_c)
+check("incorrect one-argument AGC maximum call is absent",
+      "phy_agc_max_gain_set" not in all_c and
+      "rf_set_experimental_hw_agc" not in all_c)
 
 # ---- Web flasher / release safety ----
 web_app = read(ROOT / "web" / "app.js")
