@@ -1,3 +1,10 @@
+> [!IMPORTANT]
+> **Development notice**
+>
+> I'm taking a temporary step back from active C5VRX development. The project has grown into a lot of work and takes a significant amount of time. I recently graduated, and I'm currently spending a lot of time applying for jobs and focusing on that next step, so I simply don't have much time to keep developing C5VRX at the same pace.
+>
+> **C5VRX is not abandoned.** Development will just be slower for a while. Contributions, testing, ideas, and discussion are still very welcome. Thanks for all the support and understanding!
+
 <div align="center">
   <img src="assets/c5vrx-logo.jpg" alt="C5VRX logo" width="760" />
 
