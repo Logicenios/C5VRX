@@ -195,6 +195,25 @@ check("fixed-gain BW40/BW20 A/B probe present",
       "C5VRX_BW_PROBE_BEGIN" in all_c and
       'lab_print_row("BW_SWEEP"' in all_c and
       "LAB_BW_SETTLE_MS" in all_c)
+check("PRE-Q4 self-noise probe physically removes TX and restores live pipeline",
+      "C5VRX_PREQ4_TXNOISE_BEGIN" in all_c and
+      'lab_print_row("PREQ4_TX_ACTIVE"' in all_c and
+      'lab_print_row("PREQ4_TX_QUIET"' in all_c and
+      "parlio_del_tx_unit(s_tx)" in all_c and
+      "gpio_set_level((gpio_num_t)s_dac_gpio[i], 0)" in all_c and
+      "lab_restore_live_tx_pipeline" in all_c and
+      "s_lab_tx_quiet" in all_c)
+check("PRE-Q4 far-gain probe uses complete valid vendor table",
+      "C5VRX_PREQ4_FAR_BEGIN" in all_c and
+      "rf_get_arc_survival_gain()" in all_c and
+      "table->max_index" in all_c and
+      'lab_print_row("PREQ4_FAR_GAIN"' in all_c and
+      "lab_apply_vendor_gain" in all_c)
+check("fresh PHY calibration is next-boot only through official ESP-IDF API",
+      "esp_phy_erase_cal_data_in_nvs()" in all_c and
+      "rf_prepare_fresh_phy_calibration" in all_c and
+      "C5VRX_PREQ4_FULLCAL_ARMED" in all_c and
+      "esp_restart();" in all_c)
 check("Q4 IQ-centering metrics present",
       "dc_i_x100" in all_c and "dc_q_x100" in all_c and
       "iq_skew_permille" in all_c and "iq_cross_permille" in all_c)
@@ -345,6 +364,11 @@ check("unsafe undocumented gain/filter ROM controls remain out of production",
           "phy_chan_filt_set(",
           "phy_rx_filter_mode(",
           "phy_rfrx_rxdc_cal(",
+          "phy_rfrx_rxdc_cal_new(",
+          "phy_pbus_rx_dco_cal(",
+          "phy_dc_iq_est_new(",
+          "phy_set_cal_rxdc(",
+          "phy_rxiq_set_reg(",
       )))
 
 check("ARC is the production default and legacy RX profiles remain explicit",
