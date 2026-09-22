@@ -37,6 +37,7 @@
 #include "fusion_temporal.h"
 #include "fusion_optimizer.h"
 #include "arc_controller.h"
+#include "arc_v3_controller.h"
 #include "rx_auto_lab.h"
 #include "trajectory_v2_lut.h"
 #include "hal/parlio_ll.h"
@@ -249,6 +250,7 @@ typedef enum {
     RX_PROFILE_ARC,
     RX_PROFILE_FUSION_EXP,
     RX_PROFILE_RANGE_V2_EXP,
+    RX_PROFILE_ARC_V3_EXP,
     RX_PROFILE_COUNT,
 } rx_profile_t;
 
@@ -1040,8 +1042,9 @@ static const char *rx_profile_name(void)
     case RX_PROFILE_AUTO_EXP:     return "AUTO EXP";
     case RX_PROFILE_ARC:          return "ARC";
     case RX_PROFILE_FUSION_EXP:   return "FUSION EXP";
-    case RX_PROFILE_RANGE_V2_EXP: return "RANGE V2";
-    default:                      return "BALANCED";
+    case RX_PROFILE_RANGE_V2_EXP:return "RANGE V2";
+    case RX_PROFILE_ARC_V3_EXP:  return "ARC V3 EXP";
+    default:                     return "BALANCED";
     }
 }
 
@@ -1061,7 +1064,8 @@ static uint8_t profile_gain_max(void)
 {
     switch (s_rx_profile) {
     case RX_PROFILE_BLOCKER_EXP: return 48u;
-    case RX_PROFILE_ARC:         return rf_get_arc_gain_table()->max_index;
+    case RX_PROFILE_ARC:
+    case RX_PROFILE_ARC_V3_EXP:  return rf_get_arc_gain_table()->max_index;
     default:                     return 62u;
     }
 }
@@ -1365,7 +1369,8 @@ static void settings_load(void)
     }
     if (s_rx_profile == RX_PROFILE_RANGE_EXP ||
         s_rx_profile == RX_PROFILE_FUSION_EXP ||
-        s_rx_profile == RX_PROFILE_ARC) {
+        s_rx_profile == RX_PROFILE_ARC ||
+        s_rx_profile == RX_PROFILE_ARC_V3_EXP) {
         /* RANGE/FUSION have one deterministic RF shape across reboot: the
          * proven full-video filter, with no acquisition-time filter or AFC writes. */
         s_rf_bw_mode = RF_BW_MODE_BW40;
@@ -1393,6 +1398,7 @@ static void settings_load(void)
         case RX_PROFILE_FUSION_EXP:   s_current_gain = 62u; break;
         case RX_PROFILE_RANGE_V2_EXP: s_current_gain = 62u; break;
         case RX_PROFILE_ARC:          s_current_gain = rf_get_arc_survival_gain(); break;
+        case RX_PROFILE_ARC_V3_EXP:   s_current_gain = rf_get_arc_survival_gain(); break;
         default:                      s_current_gain = 52u; break;
         }
         s_current_gain = profile_gain_clamp(s_current_gain);
@@ -2719,6 +2725,19 @@ static void apply_rx_profile(rx_profile_t profile)
         apply_rx_gain_tracked(rf_get_arc_survival_gain());
         break;
 
+    case RX_PROFILE_ARC_V3_EXP:
+        /* Hardware-proven gain-first experiment. Keep the RF shape fixed so
+         * gain placement is the only moving actuator: BW40, offset 0. Q4
+         * starvation may climb above the old G62 survival entry; overload may
+         * descend below it. Semantic sync is not a gain-up prerequisite. */
+        s_agc_mode = ANALOG_AGC_ACTIVE;
+        s_rf_bw_mode = RF_BW_MODE_BW40;
+        apply_rf_bandwidth(true);
+        s_afc_mode = AFC_MODE_OFF;
+        if (rf_get_frequency_offset_khz() != 0) apply_frequency_offset_khz_tracked(0);
+        apply_rx_gain_tracked(rf_get_arc_survival_gain());
+        break;
+
     case RX_PROFILE_BALANCED:
     default:
         s_noise_floor_valid = false;
@@ -3680,6 +3699,8 @@ static void analog_agc_task(void *arg)
         s_rx_profile == RX_PROFILE_RANGE_V2_EXP ? 2u : 34u);
     arc_controller_t arc_controller;
     arc_controller_reset(&arc_controller, rf_get_arc_gain_table(), s_current_gain);
+    arc_v3_controller_t arc_v3_controller;
+    arc_v3_controller_reset(&arc_v3_controller, rf_get_arc_gain_table(), s_current_gain);
     uint32_t seen_arc_generation = rf_get_arc_generation();
     uint32_t receive_generation = s_receive_generation;
     int boot_grace_ticks = 20;
@@ -3803,6 +3824,8 @@ static void analog_agc_task(void *arg)
                 s_rx_profile == RX_PROFILE_RANGE_V2_EXP ? 2u : 34u);
             arc_controller_reset(&arc_controller, rf_get_arc_gain_table(),
                                  s_current_gain);
+            arc_v3_controller_reset(&arc_v3_controller, rf_get_arc_gain_table(),
+                                    s_current_gain);
         }
 
         /* rf_set_channel() recaptures the vendor table after every successful
@@ -3815,6 +3838,8 @@ static void analog_agc_task(void *arg)
             apply_rx_gain_tracked(target_gain);
             arc_controller_reset(&arc_controller, rf_get_arc_gain_table(),
                                  target_gain);
+            arc_v3_controller_reset(&arc_v3_controller, rf_get_arc_gain_table(),
+                                    target_gain);
         }
 
         if (menu_was_active) {
@@ -3964,6 +3989,25 @@ static void analog_agc_task(void *arg)
             if (target_gain != s_current_gain) apply_rx_gain_tracked(target_gain);
             settle_ticks = 0;
             if (s_rx_profile == RX_PROFILE_RANGE_V2_EXP) goto profile_post_gain;
+            goto control_tail;
+        }
+
+        if (s_rx_profile == RX_PROFILE_ARC_V3_EXP &&
+            s_agc_mode == ANALOG_AGC_ACTIVE) {
+            arc_v3_observation_t v3_obs = {
+                .p_median = p_median,
+                .q_phase = q_phase,
+                .clip_permille = clip_permille,
+                .origin_permille = origin_permille,
+                .winding_permille = winding_permille,
+            };
+            target_gain = arc_v3_controller_tick(&arc_v3_controller, &v3_obs);
+            s_shadow_gain = target_gain;
+            s_agc_state = arc_v3_controller.state == ARC_V3_LOCK ?
+                          AGC_STATE_TRACK : AGC_STATE_LEARN;
+            if (target_gain != s_current_gain) apply_rx_gain_tracked(target_gain);
+            /* ARC V3 owns settling. BW40 and 0 kHz remain fixed in flight. */
+            settle_ticks = 0;
             goto control_tail;
         }
 
@@ -4371,6 +4415,10 @@ static void console_diag_task(void *arg)
                     lab_run_tx_self_noise_probe();
                 } else if (c == 'K') {
                     lab_request_fresh_phy_calibration();
+                } else if (c == 'Y') {
+                    apply_rx_profile(RX_PROFILE_ARC_V3_EXP);
+                    settings_save();
+                    printf("[RX PROFILE] -> ARC V3 EXP (gain-first raw-Q4 controller)\n");
                 } else if (c == 'X') {
                     cycle_rx_profile();
                 } else if (c == 't') {
