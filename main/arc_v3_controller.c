@@ -96,8 +96,13 @@ arc_v3_q4_state_t arc_v3_classify(const arc_v3_observation_t *o)
 uint8_t arc_v3_controller_tick(arc_v3_controller_t *arc,
                                const arc_v3_observation_t *o)
 {
-    /* Emergency overload protection is allowed to bypass post-write settle. */
-    if (o->clip_permille >= 80 || o->p_median > 60) {
+    /* Emergency overload protection may shorten normal settle, but never use
+     * the first two 50 ms observations after a PHY write: those can still
+     * describe the previous gain state. */
+    bool severe_overload = o->clip_permille >= 80 || o->p_median > 60;
+    bool emergency_ready = arc->settle == 0u ||
+                           arc->settle <= ARC_V3_SETTLE_TICKS - 2u;
+    if (severe_overload && emergency_ready) {
         arc->state = ARC_V3_ACQUIRE;
         arc->bad_lock_ticks = 0u;
         return write_next(arc, step_gain(arc, -4));
