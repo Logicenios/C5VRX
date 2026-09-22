@@ -8,6 +8,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES
         esp_wifi
+        esp_phy
         nvs_flash
         esp_event
         esp_netif

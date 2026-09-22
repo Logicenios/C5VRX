@@ -37,6 +37,12 @@ downstream gain, fits BB/fine gain to raw Q4 evidence during acquisition, and
 performs zero PHY writes while clean video is locked. See
 `docs/arc-receive-chain.md` for the recovered PHY ABI and state model.
 
+Pre-Q4 receiver characterization is documented in `docs/pre-q4-lab.md`. The
+lab can isolate TX/DAC self-noise, sweep the complete highest RF-stage portion
+of the generated vendor gain table, and request a fresh vendor PHY calibration
+on the next boot without promoting undocumented RXDC/IQ/filter writers into
+production.
+
 The current Range v2 work is documented in:
 - `docs/range-v2.md` — implementation and validation overview;
 - `docs/range-v2-knowledge.md` — preserved control/demod engineering knowledge;

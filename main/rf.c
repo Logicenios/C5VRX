@@ -20,6 +20,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_phy_init.h"
 #include "esp_rom_gpio.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
@@ -290,6 +291,21 @@ static esp_err_t init_nvs(void)
         err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         err = nvs_flash_erase();
         if (err == ESP_OK) err = nvs_flash_init();
+    }
+    return err;
+}
+
+esp_err_t rf_prepare_fresh_phy_calibration(void)
+{
+    /* Espressif documents this API for diagnostic flows before Wi-Fi init.
+     * C5VRX invokes it only as a request for the NEXT boot: the live receiver
+     * is not recalibrated in-place. The caller reboots immediately after a
+     * successful erase, so esp_wifi_init() on the next boot sees no stored PHY
+     * calibration data and rebuilds the vendor calibration state normally. */
+    esp_err_t err = esp_phy_erase_cal_data_in_nvs();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not erase PHY calibration namespace: %s",
+                 esp_err_to_name(err));
     }
     return err;
 }

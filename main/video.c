@@ -56,6 +56,7 @@
 #include "esp_cache.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "nvs.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
@@ -156,6 +157,7 @@ BITSCRAMBLER_PROGRAM(s_fm_traj_program, "fm_traj");
 #define LAB_FFT_SETTLE_MS  550u      /* FFT probe: wait beyond one control/settle interval */
 #define LAB_FFT_DWELL_MS   750u      /* short bounded dwell; lab-only, never production */
 #define LAB_BW_SETTLE_MS   800u      /* allow analog filter change before measurement */
+#define LAB_PREQ4_SETTLE_MS 850u      /* raw-Q4 settle after TX/noise-state change */
 
 typedef enum {
     VIDEO_STD_MODE_AUTO = 0,
@@ -1208,6 +1210,8 @@ static lab_gain_sweep_t s_gain_sweep;
 static volatile bool s_lab_quiet;
 static volatile bool s_lab_fft_forced;
 static volatile int8_t s_lab_fft_value;
+static volatile bool s_lab_tx_quiet;
+static volatile bool s_pre_q4_probe_active;
 
 static const int8_t s_lab_fft_values[] = {16, 24, 32, 40};
 
@@ -1541,7 +1545,7 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            "fusion_lag2_pm=%d fusion_lag4_pm=%d fusion_consensus_pm=%d fusion_slope_x100=%d "
            "traj_uncert_pm=%d pll_slip_pm=%d pll_hold_pm=%d demod=%u "
            "fusion_risk=%d fusion_fade=%d fusion_recovery=%d fusion_stability=%d fusion_fast_n=%lu "
-           "fft_forced=%u fft=%d filter_mode=%u adc_sel=%u filter_reg=0x%08lx "
+           "tx_quiet=%u fft_forced=%u fft=%d filter_mode=%u adc_sel=%u filter_reg=0x%08lx "
            "adc_reg=0x%08lx source_mux=0x%08lx rf_stage=%u rf_code=%u bb_code=%u fine=%u "
            "packed=0x%08lx iq_en=%u iq_c0=%d iq_c1=%d iq_reg=0x%08lx "
            "tx_empty=%lu rx_ovf=%lu tx_eof=%lu gdma_in=%lu gdma_out=%lu "
@@ -1566,6 +1570,7 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            s_last_pll_lite_hold_pm, (unsigned)s_demod_mode,
            s_last_fusion_risk, s_last_fusion_fade, s_last_fusion_recovery,
            s_last_fusion_stability, (unsigned long)s_last_fusion_fast_samples,
+           s_lab_tx_quiet ? 1u : 0u,
            s_lab_fft_forced ? 1u : 0u, (int)s_lab_fft_value,
            (unsigned)phy.rx_filter_mode, (unsigned)phy.adc_rate_sel,
            (unsigned long)phy.rx_filter_reg, (unsigned long)phy.adc_rate_reg,
@@ -1595,6 +1600,23 @@ static void lab_apply_fixed_gain(uint8_t gain)
 {
     if (gain < LAB_GAIN_MIN) gain = LAB_GAIN_MIN;
     if (gain > LAB_GAIN_MAX) gain = LAB_GAIN_MAX;
+    s_current_gain = gain;
+    s_shadow_gain = gain;
+    s_last_gain_write_us = esp_timer_get_time();
+    s_last_phy_write_us = s_last_gain_write_us;
+    s_last_phy_write_kind = PHY_WRITE_GAIN;
+    rf_set_rx_gain(true, gain);
+    ++s_gain_transition_count;
+}
+
+/* PRE-Q4 characterization may intentionally explore the complete vendor-
+ * generated table above legacy G62. This bypasses profile clamps but never
+ * writes a hand-built PBUS tuple: phy_force_rx_gain() still owns the state. */
+static void lab_apply_vendor_gain(uint8_t gain)
+{
+    const arc_gain_table_t *table = rf_get_arc_gain_table();
+    if (gain < 2u) gain = 2u;
+    if (gain > table->max_index) gain = table->max_index;
     s_current_gain = gain;
     s_shadow_gain = gain;
     s_last_gain_write_us = esp_timer_get_time();
@@ -1914,6 +1936,113 @@ static void lab_run_bandwidth_probe(void)
            (unsigned)saved_agc_mode, saved_bw40 ? 40u : 20u);
 }
 
+
+/* PRE-Q4 far-state characterization. ARC has statically recovered the vendor
+ * RF-stage boundary, but G61+ still needs physical proof: indices above the
+ * highest RF-stage entry can add downstream BB/fine gain without adding RF
+ * sensitivity. Sweep only valid generated indices and score raw Q4/video. */
+static void lab_run_far_gain_probe(void)
+{
+    if (s_gain_sweep.active || s_menu_active || s_pre_q4_probe_active) {
+        printf("C5VRX_PREQ4_FAR_REFUSED reason=%s\n",
+               s_gain_sweep.active ? "gain_sweep_active" :
+               s_menu_active ? "menu_active" : "preq4_busy");
+        return;
+    }
+
+    const arc_gain_table_t *table = rf_get_arc_gain_table();
+    const uint8_t first = rf_get_arc_survival_gain();
+    const uint8_t last = table->max_index;
+    if (first > last) {
+        printf("C5VRX_PREQ4_FAR_REFUSED reason=invalid_vendor_table first=%u max=%u\n",
+               first, last);
+        return;
+    }
+
+    const uint8_t saved_gain = s_current_gain;
+    const uint8_t saved_shadow = s_shadow_gain;
+    const analog_agc_mode_t saved_agc_mode = s_agc_mode;
+    const agc_state_t saved_agc_state = s_agc_state;
+    const rf_bw_mode_t saved_bw_mode = s_rf_bw_mode;
+    const bool saved_bw40 = s_current_bw40;
+    const afc_mode_t saved_afc_mode = s_afc_mode;
+    const int saved_offset = rf_get_frequency_offset_khz();
+    const bool saved_quiet = s_lab_quiet;
+    const bool saved_profile_fft = s_profile_fft_forced;
+    const int8_t saved_profile_fft_value = s_fft_best_value;
+
+    s_pre_q4_probe_active = true;
+    s_agc_mode = ANALOG_AGC_MANUAL;
+    s_rf_bw_mode = RF_BW_MODE_BW40;
+    if (!s_current_bw40) apply_rf_bandwidth(true);
+    s_afc_mode = AFC_MODE_OFF;
+    if (saved_offset != 0) apply_frequency_offset_khz_tracked(0);
+    s_lab_quiet = true;
+    if (s_profile_fft_forced) {
+        s_last_phy_write_us = esp_timer_get_time();
+        s_last_phy_write_kind = PHY_WRITE_FFT;
+        rf_set_fft_scale_force(false, 0);
+        s_profile_fft_forced = false;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(300));
+    lab_reset_correlation();
+    printf("C5VRX_PREQ4_FAR_BEGIN first=%u max=%u step=1 settle_ms=%u bw=40 afc=off\n",
+           first, last, LAB_GAIN_SETTLE_MS);
+
+    for (unsigned gain = first; gain <= last; ++gain) {
+        const hw_transport_counters_t base = lab_counter_snapshot();
+        lab_apply_vendor_gain((uint8_t)gain);
+        vTaskDelay(pdMS_TO_TICKS(LAB_GAIN_SETTLE_MS));
+        lab_print_row("PREQ4_FAR_GAIN", &base);
+    }
+
+    lab_apply_vendor_gain(saved_gain);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    s_shadow_gain = saved_shadow;
+    s_rf_bw_mode = saved_bw_mode;
+    if (s_current_bw40 != saved_bw40) apply_rf_bandwidth(saved_bw40);
+    s_afc_mode = saved_afc_mode;
+    if (rf_get_frequency_offset_khz() != saved_offset)
+        apply_frequency_offset_khz_tracked(saved_offset);
+    s_agc_state = saved_agc_state;
+    s_agc_mode = saved_agc_mode;
+    s_lab_quiet = saved_quiet;
+    if (saved_profile_fft && saved_profile_fft_value != 0) {
+        s_last_phy_write_us = esp_timer_get_time();
+        s_last_phy_write_kind = PHY_WRITE_FFT;
+        rf_set_fft_scale_force(true, saved_profile_fft_value);
+        s_profile_fft_forced = true;
+    }
+    s_pre_q4_probe_active = false;
+
+    printf("C5VRX_PREQ4_FAR_END restored_gain=%u restored_agc=%u restored_bw=%u\n",
+           saved_gain, (unsigned)saved_agc_mode, saved_bw40 ? 40u : 20u);
+}
+
+/* Request a fresh vendor PHY calibration on the next boot. The live receiver
+ * is never recalibrated in place: only the stored PHY calibration namespace is
+ * erased, then C5VRX reboots immediately. */
+static void lab_request_fresh_phy_calibration(void)
+{
+    if (s_gain_sweep.active || s_menu_active || s_pre_q4_probe_active) {
+        printf("C5VRX_PREQ4_FULLCAL_REFUSED reason=%s\n",
+               s_gain_sweep.active ? "gain_sweep_active" :
+               s_menu_active ? "menu_active" : "preq4_busy");
+        return;
+    }
+
+    esp_err_t err = rf_prepare_fresh_phy_calibration();
+    if (err != ESP_OK) {
+        printf("C5VRX_PREQ4_FULLCAL_ERROR err=%s\n", esp_err_to_name(err));
+        return;
+    }
+
+    printf("C5VRX_PREQ4_FULLCAL_ARMED action=reboot next_boot=fresh_vendor_phy_calibration\n");
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    esp_restart();
+}
 
 /* Acquisition-only centering characterization. This deliberately does not
  * become a continuous AFC loop: each PHY retune can disturb analog video.
@@ -2565,6 +2694,138 @@ static void start_flight_demodulator(void)
     ESP_ERROR_CHECK(bitscrambler_start(s_flight_bs));
 }
 
+/* Restore the exact live topology used after leaving the standalone menu.
+ * The self-noise probe intentionally destroys/recreates the TX unit so the
+ * quiet state can disconnect PARLIO from every DAC GPIO instead of merely
+ * freezing a clock with unknown FIFO/BitScrambler side effects. */
+static esp_err_t lab_restore_live_tx_pipeline(void)
+{
+    esp_err_t err = create_tx_unit(s_output_mode);
+    if (err != ESP_OK) return err;
+
+    start_flight_demodulator();
+
+    err = parlio_rx_unit_disable(s_rx);
+    if (err != ESP_OK) return err;
+    err = parlio_rx_unit_enable(s_rx, false);
+    if (err != ESP_OK) return err;
+    err = parlio_tx_unit_enable(s_tx);
+    if (err != ESP_OK) return err;
+
+    s_tx_dma_ch = -1;
+    for (int i = 0; i < 3; ++i) {
+        if (AHB_DMA.channel[i].out.out_peri_sel.peri_out_sel_chn == 9) {
+            s_tx_dma_ch = i;
+            break;
+        }
+    }
+    if (s_tx_dma_ch < 0) return ESP_ERR_NOT_FOUND;
+
+    quiet_tx_interrupts();
+    err = start_rx();
+    if (err != ESP_OK) return err;
+    if (s_rx_dma_ch >= 0) AHB_DMA.in_intr[s_rx_dma_ch].ena.val = 0;
+    PARL_IO.rx_genrl_cfg.rx_eof_gen_sel = 1;
+
+    esp_rom_delay_us((RAW_RING_BYTES / 2ULL) * 1000000ULL / IQ_RATE_HZ);
+    err = start_tx();
+    if (err != ESP_OK) return err;
+    quiet_tx_interrupts();
+    patch_descriptors_clear_eof(s_rx_dma_ch, true);
+    patch_descriptors_clear_eof(s_tx_dma_ch, false);
+    return ESP_OK;
+}
+
+/* Directly test whether C5VRX's own 40/80 MHz parallel video output raises the
+ * pre-Q4 receiver noise floor. RX remains the measurement source while TX is
+ * removed and all six resistor-DAC GPIOs are held static low. */
+static void lab_run_tx_self_noise_probe(void)
+{
+    if (s_gain_sweep.active || s_menu_active || s_pre_q4_probe_active) {
+        printf("C5VRX_PREQ4_TXNOISE_REFUSED reason=%s\n",
+               s_gain_sweep.active ? "gain_sweep_active" :
+               s_menu_active ? "menu_active" : "preq4_busy");
+        return;
+    }
+
+    const uint8_t saved_gain = s_current_gain;
+    const uint8_t saved_shadow = s_shadow_gain;
+    const analog_agc_mode_t saved_agc_mode = s_agc_mode;
+    const agc_state_t saved_agc_state = s_agc_state;
+    const rf_bw_mode_t saved_bw_mode = s_rf_bw_mode;
+    const bool saved_bw40 = s_current_bw40;
+    const afc_mode_t saved_afc_mode = s_afc_mode;
+    const int saved_offset = rf_get_frequency_offset_khz();
+    const bool saved_quiet = s_lab_quiet;
+    const bool saved_profile_fft = s_profile_fft_forced;
+    const int8_t saved_profile_fft_value = s_fft_best_value;
+
+    s_pre_q4_probe_active = true;
+    s_agc_mode = ANALOG_AGC_MANUAL;
+    s_rf_bw_mode = RF_BW_MODE_BW40;
+    if (!s_current_bw40) apply_rf_bandwidth(true);
+    s_afc_mode = AFC_MODE_OFF;
+    if (saved_offset != 0) apply_frequency_offset_khz_tracked(0);
+    s_lab_quiet = true;
+    if (s_profile_fft_forced) {
+        s_last_phy_write_us = esp_timer_get_time();
+        s_last_phy_write_kind = PHY_WRITE_FFT;
+        rf_set_fft_scale_force(false, 0);
+        s_profile_fft_forced = false;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(LAB_PREQ4_SETTLE_MS));
+    lab_reset_correlation();
+    printf("C5VRX_PREQ4_TXNOISE_BEGIN gain=%u bw=40 afc=off settle_ms=%u output=%s\n",
+           s_current_gain, LAB_PREQ4_SETTLE_MS, output_mode_name());
+    lab_print_row("PREQ4_TX_ACTIVE", NULL);
+
+    ESP_ERROR_CHECK(parlio_tx_unit_disable(s_tx));
+    ESP_ERROR_CHECK(bitscrambler_disable(s_flight_bs));
+    ESP_ERROR_CHECK(parlio_del_tx_unit(s_tx));
+    s_tx = NULL;
+    s_tx_dma_ch = -1;
+
+    /* Once the PARLIO owner is gone, explicitly select ordinary GPIO output
+     * and hold every physical DAC branch low. RX/PARLIO input remains live. */
+    for (unsigned i = 0; i < 6u; ++i) {
+        gpio_reset_pin((gpio_num_t)s_dac_gpio[i]);
+        gpio_set_direction((gpio_num_t)s_dac_gpio[i], GPIO_MODE_OUTPUT);
+        gpio_set_level((gpio_num_t)s_dac_gpio[i], 0);
+    }
+    s_lab_tx_quiet = true;
+    vTaskDelay(pdMS_TO_TICKS(LAB_PREQ4_SETTLE_MS));
+    lab_print_row("PREQ4_TX_QUIET", NULL);
+
+    ESP_ERROR_CHECK(lab_restore_live_tx_pipeline());
+    s_lab_tx_quiet = false;
+    lab_clear_transport_sticky();
+    vTaskDelay(pdMS_TO_TICKS(LAB_PREQ4_SETTLE_MS));
+    lab_print_row("PREQ4_TX_RESTORED", NULL);
+
+    /* Restore supervisory state after the physical live path is known-good. */
+    if (s_current_gain != saved_gain) lab_apply_vendor_gain(saved_gain);
+    s_shadow_gain = saved_shadow;
+    s_rf_bw_mode = saved_bw_mode;
+    if (s_current_bw40 != saved_bw40) apply_rf_bandwidth(saved_bw40);
+    s_afc_mode = saved_afc_mode;
+    if (rf_get_frequency_offset_khz() != saved_offset)
+        apply_frequency_offset_khz_tracked(saved_offset);
+    s_agc_state = saved_agc_state;
+    s_agc_mode = saved_agc_mode;
+    s_lab_quiet = saved_quiet;
+    if (saved_profile_fft && saved_profile_fft_value != 0) {
+        s_last_phy_write_us = esp_timer_get_time();
+        s_last_phy_write_kind = PHY_WRITE_FFT;
+        rf_set_fft_scale_force(true, saved_profile_fft_value);
+        s_profile_fft_forced = true;
+    }
+    s_pre_q4_probe_active = false;
+
+    printf("C5VRX_PREQ4_TXNOISE_END restored_gain=%u restored_agc=%u restored_bw=%u\n",
+           saved_gain, (unsigned)saved_agc_mode, saved_bw40 ? 40u : 20u);
+}
+
 static void start_menu_tx(void)
 {
     /* IDF owns the channel allocation and stop/reset lifecycle. While its TX
@@ -2602,6 +2863,7 @@ static void start_menu_tx(void)
 
 static void video_set_menu_mode(bool active)
 {
+    if (s_pre_q4_probe_active) return;
     if (active && !MENU_RUNTIME_ENABLED) return;
     if (s_menu_active == active) return;
 
@@ -3604,6 +3866,12 @@ static void console_diag_task(void *arg)
                     lab_run_frequency_probe();
                 } else if (c == 'H') {
                     lab_print_arc_oracle();
+                } else if (c == 'G') {
+                    lab_run_far_gain_probe();
+                } else if (c == 'S') {
+                    lab_run_tx_self_noise_probe();
+                } else if (c == 'K') {
+                    lab_request_fresh_phy_calibration();
                 } else if (c == 'X') {
                     cycle_rx_profile();
                 } else if (c == 't') {
@@ -3831,8 +4099,9 @@ static void console_diag_task(void *arg)
                            MENU_RUNTIME_ENABLED ?
                            (s_menu_active ? "OPEN" : "CLOSED") :
                            "TEMPORARILY DISABLED (live video only)");
-                    printf(" Lab Status:                 quiet=%u gain_sweep=%u fft_known=%u fft_useful=%u best=%d\n",
+                    printf(" Lab Status:                 quiet=%u gain_sweep=%u preq4=%u tx_quiet=%u fft_known=%u fft_useful=%u best=%d\n",
                            s_lab_quiet ? 1u : 0u, s_gain_sweep.active ? 1u : 0u,
+                           s_pre_q4_probe_active ? 1u : 0u, s_lab_tx_quiet ? 1u : 0u,
                            s_fft_q4_effect_known ? 1u : 0u,
                            s_fft_q4_effective ? 1u : 0u, (int)s_fft_best_value);
                     printf(" Keys:\n");
@@ -3841,6 +4110,9 @@ static void console_diag_task(void *arg)
                     printf("  'g':         Start/abort G2..G62 production-state gain sweep\n");
                     printf("  'F'/'W':     FFT-scale Q4 probe / fixed-gain BW40-vs-BW20 probe\n");
                     printf("  'A'/'H':     AFC centering sweep / read-only ARC PHY oracle\n");
+                    printf("  'G':         PRE-Q4 highest-RF-stage vendor gain sweep (survival..table max)\n");
+                    printf("  'S':         PRE-Q4 self-noise A/B (live TX vs DAC/PARLIO electrically quiet)\n");
+                    printf("  'K':         Erase stored PHY calibration and reboot for a fresh vendor calibration\n");
                     printf("  'X':         Cycle RX profile (Balanced/Range/Blocker/Recovery/Auto/ARC/Fusion/Range V2)\n");
                     printf("  'p'/'r':     Machine-readable PHY/Q4 snapshot / reset lag counters\n");
                     printf("  't'/'q':     Vendor timer inventory / quiet unsolicited lock message\n");

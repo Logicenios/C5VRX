@@ -41,6 +41,7 @@ Modern C5VRX
 | Dual-loop self-calibrating AGC, FM phase coherence ($Q_{\text{phase}}$), and noise trap immunity | [dual-loop-adaptive-gain-optimizer.md](dual-loop-adaptive-gain-optimizer.md) |
 | ESP32-C5 RF/BB/filter characterization, FFT placement probe, IQ centering and zero-write TRACK architecture | [esp32c5-rf-range-architecture.md](esp32c5-rf-range-architecture.md) |
 | ARC vendor gain-table reconstruction, corrected private-PHY ABI, IQ calibration state and production freeze policy | [arc-receive-chain.md](arc-receive-chain.md) |
+| PRE-Q4 self-noise, full vendor-table FAR sweep and fresh-calibration lab procedure | [pre-q4-lab.md](pre-q4-lab.md) |
 | C5VRX-3 independent PAL/NTSC menu, waveform tests, decoder hypotheses and remaining hardware validation | [c5vrx3-menu-and-raster-architecture.md](c5vrx3-menu-and-raster-architecture.md) |
 | Wiring and remaining physical tests | [hardware-test.md](hardware-test.md) |
 | Accepted historical donor primitives | [proven-donors.md](proven-donors.md) |

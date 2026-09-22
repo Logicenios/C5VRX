@@ -48,6 +48,8 @@ for bsasm_file in bsasm_files:
 c_files = list(MAIN.glob("*.c"))
 all_c = "\n".join(read(f) for f in c_files)
 c_names = [f.name for f in c_files]
+video_c = read(MAIN / "video.c")
+menu_lifecycle = video_c.split("static void video_set_menu_mode", 1)[1].split("static void menu_cycle_standard_mode", 1)[0]
 
 check("production receiver and dedicated menu raster modules", set(c_names) == {"main.c", "arc_phy.c", "rf.c", "video.c", "menu_raster.c"},
       f"found: {c_names}")
@@ -137,7 +139,7 @@ check("TRAJ V2 keeps its required 6BIT@40 pairing",
       "s_output_mode = VIDEO_OUTPUT_6BIT_40;" in all_c and
       "start_flight_demodulator" in all_c)
 check("menu lifecycle does not double-disable BitScrambler",
-      all_c.count("bitscrambler_disable(s_flight_bs)") == 1)
+      menu_lifecycle.count("bitscrambler_disable(s_flight_bs)") == 1)
 check("large menu descriptor chain is transient DMA heap, not static BSS",
       "dma_descriptor_t s_menu_nodes[MENU_MAX_NODES]" not in all_c and
       "static dma_descriptor_t *s_menu_nodes;" in all_c and
@@ -195,6 +197,25 @@ check("fixed-gain BW40/BW20 A/B probe present",
       "C5VRX_BW_PROBE_BEGIN" in all_c and
       'lab_print_row("BW_SWEEP"' in all_c and
       "LAB_BW_SETTLE_MS" in all_c)
+check("PRE-Q4 self-noise probe physically removes TX and restores live pipeline",
+      "C5VRX_PREQ4_TXNOISE_BEGIN" in all_c and
+      'lab_print_row("PREQ4_TX_ACTIVE"' in all_c and
+      'lab_print_row("PREQ4_TX_QUIET"' in all_c and
+      "parlio_del_tx_unit(s_tx)" in all_c and
+      "gpio_set_level((gpio_num_t)s_dac_gpio[i], 0)" in all_c and
+      "lab_restore_live_tx_pipeline" in all_c and
+      "s_lab_tx_quiet" in all_c)
+check("PRE-Q4 far-gain probe uses complete valid vendor table",
+      "C5VRX_PREQ4_FAR_BEGIN" in all_c and
+      "rf_get_arc_survival_gain()" in all_c and
+      "table->max_index" in all_c and
+      'lab_print_row("PREQ4_FAR_GAIN"' in all_c and
+      "lab_apply_vendor_gain" in all_c)
+check("fresh PHY calibration is next-boot only through official ESP-IDF API",
+      "esp_phy_erase_cal_data_in_nvs()" in all_c and
+      "rf_prepare_fresh_phy_calibration" in all_c and
+      "C5VRX_PREQ4_FULLCAL_ARMED" in all_c and
+      "esp_restart();" in all_c)
 check("Q4 IQ-centering metrics present",
       "dc_i_x100" in all_c and "dc_q_x100" in all_c and
       "iq_skew_permille" in all_c and "iq_cross_permille" in all_c)
@@ -345,6 +366,11 @@ check("unsafe undocumented gain/filter ROM controls remain out of production",
           "phy_chan_filt_set(",
           "phy_rx_filter_mode(",
           "phy_rfrx_rxdc_cal(",
+          "phy_rfrx_rxdc_cal_new(",
+          "phy_pbus_rx_dco_cal(",
+          "phy_dc_iq_est_new(",
+          "phy_set_cal_rxdc(",
+          "phy_rxiq_set_reg(",
       )))
 
 check("ARC is the production default and legacy RX profiles remain explicit",

@@ -22,6 +22,16 @@
 esp_err_t rf_start(void);
 
 /**
+ * Erase only Espressif's stored PHY calibration namespace. This does not
+ * recalibrate the already-running receiver; callers must reboot afterwards so
+ * the next Wi-Fi/PHY initialization performs a fresh calibration.
+ *
+ * PRE-Q4 lab only: production must never trigger calibration while live video
+ * owns the RF chain.
+ */
+esp_err_t rf_prepare_fresh_phy_calibration(void);
+
+/**
  * Dump all vendor timers intercepted during Wi-Fi operation.
  */
 void rf_dump_tracked_timers(void);
