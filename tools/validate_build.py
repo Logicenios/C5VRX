@@ -442,21 +442,31 @@ check("ARC V3 EXP is an explicit gain-only Q4 test profile",
       "s_rf_bw_mode = RF_BW_MODE_BW40" in video_c and
       "s_afc_mode = AFC_MODE_OFF" in video_c)
 check("ARC V3 does not require semantic sync to escape a starved G62",
-      "Semantic video" in arc_v3 and
-      "sync is intentionally absent here" in arc_v3 and
       "hard_starved" in arc_v3 and
-      "step_gain(arc, delta)" in arc_v3 and
+      "step_gain(arc, hard ? 4 : 1)" in arc_v3 and
       "arc->table.max_index" in arc_v3 and
       "bool sync" not in read(MAIN / "arc_v3_controller.h"))
+check("ARC V3 filters ordinary gain decisions over five raw-Q4 windows",
+      "ARC_V3_FILTER_SAMPLES 5u" in read(MAIN / "arc_v3_controller.h") and
+      "filter_push" in arc_v3 and
+      "median_int" in arc_v3 and
+      "if (!arc->filtered_valid)" in arc_v3 and
+      "const arc_v3_observation_t *f = &arc->filtered" in arc_v3)
+check("ARC V3 gain-up is slower than gain-down and guards direction reversal",
+      "ARC_V3_UP_CONFIRM_TICKS          5u" in arc_v3 and
+      "ARC_V3_OVERLOAD_CONFIRM_TICKS    2u" in arc_v3 and
+      "ARC_V3_UP_GUARD_TICKS           20u" in arc_v3 and
+      "arc->up_guard_ticks != 0u" in arc_v3 and
+      "G66 -> G81" in arc_v3)
 check("ARC V3 preserves zero-write Q4 lock and overload protection",
       "Zero-write clean LOCK invariant" in arc_v3 and
       "lock_hold_good" in arc_v3 and
-      "o->clip_permille >= 80" in arc_v3 and
+      "arc->severe_ticks >= 2u" in arc_v3 and
       "step_gain(arc, -4)" in arc_v3)
 check("ARC V3 exposes an explicit RF limit at the vendor-table ceiling",
       "ARC_V3_RF_LIMIT" in arc_v3 and
       "arc->gain >= arc->table.max_index" in arc_v3 and
-      "arc->rf_limit_ticks >= 6u" in arc_v3)
+      "ARC_V3_RF_LIMIT_CONFIRM_TICKS" in arc_v3)
 
 rx_auto = read(MAIN / "rx_auto_lab.c") + read(MAIN / "rx_auto_lab.h")
 check("ARC V3 RX AUTO LAB is explicit opt-in console instrumentation",
