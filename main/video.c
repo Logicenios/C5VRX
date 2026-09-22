@@ -260,6 +260,8 @@ static volatile video_output_mode_t s_output_mode = VIDEO_OUTPUT_6BIT_40;
 static video_output_mode_t s_tx_unit_mode = VIDEO_OUTPUT_6BIT_40;
 static volatile demod_mode_t s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;
 static volatile rx_profile_t s_rx_profile = RX_PROFILE_ARC;
+static volatile arc_v3_state_t s_last_arc_v3_state = ARC_V3_ACQUIRE;
+static volatile arc_v3_q4_state_t s_last_arc_v3_q4_state = ARC_V3_Q4_STARVED;
 static volatile uint32_t s_profile_generation;
 static volatile bool s_profile_fft_forced;
 static volatile bool s_fft_q4_effect_known;
@@ -4001,7 +4003,9 @@ static void analog_agc_task(void *arg)
                 .origin_permille = origin_permille,
                 .winding_permille = winding_permille,
             };
+            s_last_arc_v3_q4_state = arc_v3_classify(&v3_obs);
             target_gain = arc_v3_controller_tick(&arc_v3_controller, &v3_obs);
+            s_last_arc_v3_state = arc_v3_controller.state;
             s_shadow_gain = target_gain;
             s_agc_state = arc_v3_controller.state == ARC_V3_LOCK ?
                           AGC_STATE_TRACK : AGC_STATE_LEARN;
@@ -4571,6 +4575,11 @@ static void console_diag_task(void *arg)
                            (s_agc_state == AGC_STATE_LEARN) ? "LEARN" : "SEARCH");
                     printf(" Gain Settings:              G_actual=%u, G_shadow_rec=%u (reg=0x%08lx)\n",
                            s_current_gain, s_shadow_gain, (unsigned long)rf_get_rx_gain_reg());
+                    if (s_rx_profile == RX_PROFILE_ARC_V3_EXP) {
+                        printf(" ARC V3 State:               %s (Q4=%s)\n",
+                               arc_v3_state_name(s_last_arc_v3_state),
+                               arc_v3_q4_state_name(s_last_arc_v3_q4_state));
+                    }
                     printf(" FM Vector Metrics:          P_median=%d, Q_phase=%d%%, Clip=%d.%d%%, Origin=%d.%d%%\n",
                            s_last_p_median, s_last_q_phase,
                            s_last_clip_permille / 10, s_last_clip_permille % 10,
