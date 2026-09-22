@@ -442,10 +442,12 @@ check("ARC V3 EXP is an explicit gain-only Q4 test profile",
       "s_rf_bw_mode = RF_BW_MODE_BW40" in video_c and
       "s_afc_mode = AFC_MODE_OFF" in video_c)
 check("ARC V3 does not require semantic sync to escape a starved G62",
-      "Semantic sync is intentionally absent" in arc_v3 and
+      "Semantic video" in arc_v3 and
+      "sync is intentionally absent here" in arc_v3 and
       "hard_starved" in arc_v3 and
       "step_gain(arc, delta)" in arc_v3 and
-      "arc->table.max_index" in arc_v3)
+      "arc->table.max_index" in arc_v3 and
+      "bool sync" not in read(MAIN / "arc_v3_controller.h"))
 check("ARC V3 preserves zero-write Q4 lock and overload protection",
       "Zero-write clean LOCK invariant" in arc_v3 and
       "lock_hold_good" in arc_v3 and
