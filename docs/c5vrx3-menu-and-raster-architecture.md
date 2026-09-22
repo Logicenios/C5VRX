@@ -6,6 +6,14 @@ The dedicated generator is implemented and host-tested. Physical confirmation
 on the XIAO ESP32-C5 and FatShark HD3 is still required. A build or sample test
 does not establish decoder lock, analog levels, or uninterrupted DMA output.
 
+PR #52 established one concrete hardware failure on the XIAO: the original
+eight-field chain attempted one contiguous 66--76 KiB descriptor allocation
+after Wi-Fi/PHY startup. That returned `ESP_ERR_NO_MEM`; `ESP_ERROR_CHECK`
+aborted, the DAC went black during reboot, and normal VTX video then returned.
+The production raster now loops one complete two-field frame, needs at most
+1,587 descriptors (less than 20 KiB), and allocates before stopping live TX.
+Allocation failure therefore leaves live video running instead of rebooting.
+
 The reported symptom was a readable menu for about one second, then inversion
 and disappearance. Progressive timing, missing burst, synthetic IQ and live-ring
 splicing were visible in the old source. Decoder standard detection and clamp
@@ -16,7 +24,7 @@ explain rejection of a monochrome signal.
 ### Output ownership
 
 ```text
-FLIGHT: MODEM_DIAG -> PARLIO RX -> 16 KiB ring -> Phase5 -> PARLIO TX -> DAC
+FLIGHT: MODEM_DIAG -> PARLIO RX -> 32 KiB ring -> Phase5 -> PARLIO TX -> DAC
 MENU:   independent SRAM raster -----------------------> PARLIO TX -> DAC
 ```
 
@@ -39,9 +47,9 @@ transition errors use `ESP_ERROR_CHECK` rather than continuing with partial stat
 
 Returning to flight restarts RX at ring zero before the TX delay. Delaying an
 already-running RX cannot establish separation. The delay calculation now uses
-64-bit arithmetic: the old `8192u * 1000000u` overflowed. The requested delay is
-204 us, truncated from 204.8 us, plus driver latency; exact physical separation
-still needs measurement.
+64-bit arithmetic avoids overflow. With the 32 KiB ring, the requested
+half-ring delay is 409 us, truncated from 409.6 us, plus driver latency; exact
+physical separation still needs measurement.
 
 ### Automatic live-standard matching
 
@@ -80,20 +88,20 @@ The hardware-independent `menu_raster.c` emits these DMA segments:
 
 - PAL: 625 lines/frame, 312.5 lines/field, 64 us lines, 50 fields/s; five
   pre-equalizing, five broad and five post-equalizing half-line pulses. Line 1
-  starts with broad sync. Eight fields occupy exactly 6,400,000 samples.
+  starts with broad sync. Two fields occupy exactly 1,600,000 samples.
 - NTSC: 525 lines/frame, 262.5 lines/field, approximately 59.94 fields/s; six
   pulses in each vertical group. Cumulative half-line times are rounded to DMA
-  words rather than rounding every scanline independently. Eight fields occupy
-  5,338,668 samples: period error +0.25 ppm. The carrier is adjusted about
-  -0.895 Hz to close after 477,750 cycles, saving two frames of descriptors.
+  words rather than rounding every scanline independently. Two fields occupy
+  1,334,668 samples.
 - Ordinary H sync stays on the full-line grid across both fields. H-sync width
   is 4.7 us; broad sync ends 4.7 us before the next half-line edge. Within the
   NTSC cycle, timing quantization is at most 44.45 ns.
-- Burst is 4.43361875 MHz PAL or approximately 3.57954456 MHz NTSC. PAL uses
+- Burst is approximately 4.433625 MHz PAL or 3.579556 MHz NTSC. The small
+  offsets close burst phase exactly over the compact two-field loop. PAL uses
   alternating phase and nine-line burst-blanking windows; NTSC suppresses burst
   during its vertical pulse train. Absolute sample time determines phase,
-  including loop closure. Shared 32-phase templates quantize starting phase
-  by at most 5.625 degrees.
+  including loop closure. Shared eight-phase templates quantize starting phase
+  by at most 22.5 degrees.
 
 This is a quantized monochrome menu with a colour reference burst, not a claim
 of laboratory broadcast compliance. Analog ratios, edge shaping, oscillator
@@ -119,17 +127,19 @@ The later ~10% horizontal widening adds 8,288 bytes to the UI backing store
 without increasing the DMA node count.
 
 The scatter chain still uses one UI segment per displayed scanline, so the DMA
-node count does not grow with glyph complexity. PAL currently needs 6,348 nodes
-and NTSC 5,548. A `dma_descriptor_t` is 12 bytes on ESP32-C5, so a static PAL
-chain alone costs 76,176 bytes.
+node count does not grow with glyph complexity. PAL needs 1,587 nodes and NTSC
+1,387. A `dma_descriptor_t` is 12 bytes on ESP32-C5, so the bounded allocation
+is 19,200 bytes.
 
 The widened 1600-byte UI rows initially pushed static `.dram0.bss` 7,488 bytes
 past the C5 linker limit. The fix is not to shrink the menu again: menu
-descriptors are now counted from the resolved raster and allocated only while
+descriptors are counted from the resolved raster and the compact maximum is
+allocated only while
 the standalone menu owns TX using
 `MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL`. The chain is freed after live
 TX has restarted and no GDMA link can reference it. This removes the large
-descriptor array from static BSS and avoids reserving the PAL maximum for NTSC.
+descriptor array from static BSS while allowing standard changes without a
+second allocation.
 Only `raster.ui` changes while the standalone menu is running; timing templates
 and descriptor links change only with TX stopped.
 

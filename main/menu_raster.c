@@ -15,11 +15,13 @@ uint32_t menu_half_sample(video_standard_t standard, unsigned half)
 void menu_raster_init(menu_raster_t *r, video_standard_t standard)
 {
     const double tau = 6.2831853071795864769;
-    /* Four NTSC frames round to 5,338,668 samples. Lock 477,750 carrier
-     * cycles to that loop: -0.895 Hz carrier error, -0.25 ppm field-rate
-     * error, avoiding two more frames of descriptors in scarce C5 SRAM. */
-    const double frequency = standard == VIDEO_STD_PAL ? 4433618.75 :
-                             477750.0 * 40000000.0 / 5338668.0;
+    /* Close the colour-reference carrier over one complete two-field frame.
+     * The menu itself is monochrome.  The resulting offsets are only
+     * +6.25 Hz for PAL and about +10.7 Hz for NTSC, while reducing the cyclic
+     * descriptor allocation from ~76 KiB to less than 20 KiB. */
+    const double frequency = standard == VIDEO_STD_PAL ?
+                             177345.0 * 40000000.0 / 1600000.0 :
+                             119438.0 * 40000000.0 / 1334668.0;
     const unsigned burst_start = standard == VIDEO_STD_PAL ? 224u : 212u;
     const unsigned burst_samples = standard == VIDEO_STD_PAL ? 90u : 100u;
     memset(r, 20, sizeof(*r));
@@ -43,8 +45,8 @@ bool menu_raster_emit(const menu_raster_t *r, video_standard_t standard,
     const bool pal = standard == VIDEO_STD_PAL;
     const unsigned field_halves = pal ? 625 : 525;
     const unsigned eq = pal ? 5 : 6;
-    /* Eight fields: PAL colour sequence and two NTSC colour sequences. */
-    const unsigned total_halves = field_halves * 8;
+    /* A complete interlaced frame.  Burst phase is closed at this loop. */
+    const unsigned total_halves = field_halves * MENU_FIELDS;
     /* Keep the taller menu centered at the same vertical position as the old
      * 112-line raster while staying clear of the vertical blanking interval. */
     const unsigned text_start = pal ? 62 : 42;
@@ -74,8 +76,8 @@ bool menu_raster_emit(const menu_raster_t *r, video_standard_t standard,
         /* Carrier phase from absolute sample time, including at loop wrap.
          * Phase bins quantize only the burst start phase; samples within each
          * burst retain the exact PAL/NTSC carrier frequency. */
-        double cycles = pal ? (double)start * 709379.0 / 6400000.0 :
-                              (double)start * 477750.0 / 5338668.0;
+        double cycles = pal ? (double)start * 177345.0 / 1600000.0 :
+                              (double)start * 119438.0 / 1334668.0;
         cycles += pal ? ((h / 2) & 1u ? -0.375 : 0.375) : 0.5;
         int phase = (int)floor(cycles * MENU_PHASES + 0.5);
         unsigned frame = h / 1250;

@@ -31,6 +31,12 @@
 
 The current experimental range work measures semantic CVBS sync and the exact-adjacent winding loss hidden by the 50 ns endpoint discriminator. See `docs/range-demod-quality-v2.md` for the measurement model and hardware validation rules.
 
+The production receive profile now uses ARC: it reconstructs the valid
+ESP32-C5 vendor gain table at boot, starts at the highest RF stage with bounded
+downstream gain, fits BB/fine gain to raw Q4 evidence during acquisition, and
+performs zero PHY writes while clean video is locked. See
+`docs/arc-receive-chain.md` for the recovered PHY ABI and state model.
+
 The current Range v2 work is documented in:
 - `docs/range-v2.md` — implementation and validation overview;
 - `docs/range-v2-knowledge.md` — preserved control/demod engineering knowledge;
@@ -103,7 +109,7 @@ ESP32-C5 RF / MODEM_DIAG Bus (40 MS/s Q4/I4)
 PARLIO RX @ 40 MS/s (POS sample edge, pure continuous hardware GDMA)
         │
         ▼
-Circular GDMA Ring (16 KiB in HP SRAM, Zero-EOF patched)
+Circular GDMA Ring (32 KiB in HP SRAM, Zero-EOF patched)
         │
         ▼
 Phase5 BitScrambler Demodulator (fm.bsasm: 50 ns discriminator, embedded LUT)
@@ -130,7 +136,9 @@ After startup, the CPU does not process pixels; the entire pipeline runs continu
 - Eliminates both the erratic hunting of stock packet AGC and the "noise trap" of blind power measurement (where background thermal noise keeps measured power elevated even in deep fades).
 - Computes real-time integer FM phase coherence:
   $$Q_{\text{phase}} = \frac{\text{count}(P \ge 8 \land \text{Dot} > 0 \land |\text{Cross}| \le \text{Dot})}{255} \times 100\%$$
-- **Dynamic Gain Adaptation**: As signal degrades ($Q_{\text{phase}} < 68\%$ or $P_{\text{median}} < 18$) without clipping, the receiver actively steps RF gain up towards Gain 62 to lift weak carriers above the ADC quantizer floor.
+- **ARC Gain Adaptation**: ARC separates the vendor RF stage from downstream
+  BB/fine gain. Persistent loss selects the first entry of the highest RF stage;
+  acquisition then fits Q4 utilization one valid vendor index at a time.
 - **Fast Overload Safety Rem**: Instant gain cut ($\Delta G = -4 / -6$) if clipping occurs ($N_{\text{clip}} \ge 4$ and $P_{\text{median}} > 18$).
 - **Deadband Lock**: Zero register writes when locked in the clean target zone ($Q_{\text{phase}} \ge 70\%, P_{\text{median}} \in [18, 30]$).
 
@@ -162,7 +170,7 @@ Connect a 6-bit binary-weighted resistor DAC ladder to the XIAO pins, meeting at
 ### Recommended Analog Filters:
 1. **Shunt Termination**: 200 Ω resistor from `VIDEO` to `GND`. When connected to goggles with standard 75 Ω termination, this forms a matched 0–1.0 V standard CVBS level.
 2. **De-Emphasis Filter**: A **470 pF ceramic capacitor** placed in parallel across `VIDEO` and `GND` creates a 10–14 dB high-frequency de-emphasis low-pass filter, dramatically reducing triangular FM noise and snow.
-3. **BOOT Button**: The built-in BOOT button (GPIO 28) switches channels on short click. A long press opens the standalone PAL/NTSC menu; short presses move between pages and a long press applies the selected action. On the CHANNEL page, a long press scans all 48 channels and selects the strongest coherent carrier.
+3. **BOOT Button**: The built-in BOOT button (GPIO 28) switches channels on short click. A long press opens the standalone PAL/NTSC menu; short presses move between pages and a long press applies the selected action. On the CHANNEL page, a long press scans all 48 channels and selects the strongest coherent carrier. If a persisted Safe Flight setting blocks normal menu entry, hold BOOT for three seconds to restore GOLDEN/6BIT@40/ARC and open the recovery menu.
 4. **Persistent settings**: Channel, RF bandwidth mode, AFC/output/video-standard modes, AGC/manual gain and the BOOT-menu preference are stored in NVS and restored after restart.
 
 ---

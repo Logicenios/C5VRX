@@ -127,7 +127,7 @@ The RF menu has two hold durations on the RF page:
 
 - normal long press: cycle BW40 / BW20 / AUTO;
 - hold for about 2 seconds: cycle BALANCED / RANGE EXP / BLOCKER EXP /
-  RECOVERY / AUTO EXP / HW AGC EXP.
+  RECOVERY / AUTO EXP / ARC / FUSION EXP / RANGE V2.
 
 For controlled comparisons, keep channel, antenna, VTX scene and attenuation
 identical. Reset evidence with `r` before each profile and mark a visible
@@ -135,8 +135,9 @@ freeze with `l`.
 
 `AUTO EXP` is evidence-gated: FFT optimization stays dormant until the `F`
 probe reports a material raw-Q4 improvement during the same boot.
-`HW AGC EXP` owns the vendor gain loop, so G/FFT/BW characterization sweeps
-refuse to start until another profile is selected.
+The old `HW AGC EXP` profile was removed after its one-argument
+`phy_agc_max_gain_set()` declaration proved ABI-invalid. `H` now prints the
+read-only ARC vendor table/filter/ADC/IQ oracle and performs no PHY writes.
 
 ## #28 quiet lag baseline
 

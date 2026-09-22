@@ -21,7 +21,12 @@
 #define MENU_PREFIX_BYTES 448u
 #define MENU_TAIL_BYTES (2560u - MENU_PREFIX_BYTES)
 #define MENU_PHASES 8u
-#define MENU_MAX_NODES 6348u
+/* One complete two-field frame is enough for the monochrome menu.  Closing
+ * the burst phase over that frame keeps the waveform cyclic without the old
+ * eight-field descriptor chain (which needed ~76 KiB and could not be
+ * allocated after Wi-Fi/PHY startup on the C5). */
+#define MENU_FIELDS 2u
+#define MENU_MAX_NODES 1600u
 
 typedef enum { VIDEO_STD_NTSC, VIDEO_STD_PAL } video_standard_t;
 

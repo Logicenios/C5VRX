@@ -122,18 +122,14 @@ knob:
 The purpose is a self-characterizing receiver, not a fast software loop that
 continually perturbs the PHY.
 
-### HW AGC EXP
+### Retired HW AGC experiment
 
-This deliberately invasive comparison mode releases the production forced
-gain, enables Espressif AGC and sets the C5-only AGC maximum-gain ceiling to
-62. C5VRX software gain control is put in MANUAL so both controllers cannot
-fight each other. Q4 and transport metrics continue to run for comparison.
-
-The boot path previously disables both packet AGC and `rfagc`; because the
-exact relationship between `phy_enable_agc()` and the separate RF-AGC disable
-is undocumented, this mode is an experiment, not a claim that the complete
-RF+BB AGC chain has been restored. Gain/FFT/BW lab sweeps refuse to start
-while HW AGC owns the chain.
+The former HW AGC profile was removed by ARC. Binary analysis of the pinned
+C5 PHY proved that `phy_agc_max_gain_set()` consumes two arguments describing
+the ends of two generated gain tables; the old one-argument declaration had an
+invalid ABI. `phy_enable_agc()` also does not reverse the separate
+`phy_rfagc_disable()` state. The replacement `H` oracle is strictly read-only
+and is documented in [arc-receive-chain.md](arc-receive-chain.md).
 
 ## Read-only observability added in this PR
 
@@ -170,18 +166,13 @@ The ESP32-C5 ROM symbol map also exposes receive-side functions including:
 - `phy_rx_filter_mode`
 - RX DC/IQ calibration/correction helpers
 
-These names prove that the PHY contains more controls than one aggregate gain
-index. They do **not** prove the C ABI, valid value ranges, stage meaning, or
-that a call is safe while continuous MODEM_DIAG video is running.
+ARC has since reconstructed the gain-table ABI and stage representation; see
+[arc-receive-chain.md](arc-receive-chain.md). It still does not invoke the
+PBUS, sense, filter or calibration writers directly. Read-only
+`phy_get_noise_floor()` / `phy_get_rssi()` observations remain confined to the
+AUTO experiment, and ARC does not poll them during LOCK.
 
-Two lower-risk C5 interfaces have now been promoted only inside explicit
-experimental profiles: `phy_agc_max_gain_set()` / `phy_enable_agc()` for the
-isolated HW-AGC comparison, and read-only `phy_get_noise_floor()` /
-`phy_get_rssi()` observations for AUTO bias. Their outputs are range-checked
-before use and the default BALANCED profile never polls them.
-
-For that reason this PR deliberately does not invoke them. The promotion rule
-is:
+The remaining promotion rule is:
 
 1. establish the function ABI or the exact register changes;
 2. test it in a bounded lab build;
