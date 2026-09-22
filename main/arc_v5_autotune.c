@@ -8,7 +8,9 @@
 #endif
 
 #define ARC_V5_FAST_CONFIRM             2u
-#define ARC_V5_VERIFY_TICKS             3u
+#define ARC_V5_CONTROL_PERIOD_MS       50u
+#define ARC_V5_VERIFY_MIN_TICKS        10u /* proven 500 ms gain-settle hold */
+#define ARC_V5_VERIFY_MAX_TICKS        20u /* bound persisted timing influence */
 #define ARC_V5_NO_CARRIER_RETURN_TICKS 20u
 #define ARC_V5_SAVE_MIN_DIRTY           4u
 #define ARC_V5_SAVE_INTERVAL_MS     60000u
@@ -53,7 +55,7 @@ static void factory_model(arc_v5_autotune_t *a)
         a->model[g].dq_q8 = (int16_t)(3 * 256);
         a->model[g].dorigin_q8 = (int16_t)(-24 * 256);
         a->model[g].dclip_q8 = 0;
-        a->model[g].settle_ms = 150u;
+        a->model[g].settle_ms = 500u;
     }
 }
 
@@ -122,11 +124,21 @@ static int ceil_div_pos(int num, int den)
     return (num + den - 1) / den;
 }
 
+static unsigned exact_up_confidence(const arc_v5_autotune_t *a)
+{
+    return a->gain < ARC_V5_GAIN_STATES ? a->model[a->gain].samples : 0u;
+}
+
+static unsigned exact_down_confidence(const arc_v5_autotune_t *a)
+{
+    return a->gain > 0u ? a->model[a->gain - 1u].samples : 0u;
+}
+
 static int predicted_steps_up(const arc_v5_autotune_t *a,
                               const arc_v5_observation_t *o)
 {
     const arc_v5_gain_model_t *m = &a->model[a->gain];
-    unsigned confidence = arc_v5_model_confidence(a, a->gain);
+    unsigned confidence = exact_up_confidence(a);
     if (confidence < 8u) return 0;
 
     int steps = 1;
@@ -150,7 +162,7 @@ static int predicted_steps_down(const arc_v5_autotune_t *a,
                                 const arc_v5_observation_t *o)
 {
     const arc_v5_gain_model_t *m = &a->model[a->gain > 0 ? a->gain - 1u : 0u];
-    unsigned confidence = arc_v5_model_confidence(a, a->gain);
+    unsigned confidence = exact_down_confidence(a);
     if (confidence < 8u) return 0;
 
     int steps = 1;
@@ -285,7 +297,7 @@ static void learn_transition(arc_v5_autotune_t *a,
         model_ema(&m->dorigin_q8, dorigin_q8, m->samples);
         model_ema(&m->dclip_q8, dclip_q8, m->samples);
         if (m->samples < UINT16_MAX) ++m->samples;
-        unsigned measured_ms = a->verify_ticks * 50u;
+        unsigned measured_ms = a->verify_ticks * ARC_V5_CONTROL_PERIOD_MS;
         if (m->settle_ms == 0u) m->settle_ms = (uint16_t)measured_ms;
         else m->settle_ms = (uint16_t)((m->settle_ms * 7u + measured_ms) / 8u);
     }
@@ -293,6 +305,44 @@ static void learn_transition(arc_v5_autotune_t *a,
     ++a->learned_updates;
     ++a->dirty_updates;
     ++a->model_generation;
+}
+
+static unsigned verify_ticks_required(const arc_v5_autotune_t *a)
+{
+    unsigned ticks = ARC_V5_VERIFY_MIN_TICKS;
+    int lo = a->pending_from < a->pending_to ? a->pending_from : a->pending_to;
+    int hi = a->pending_from < a->pending_to ? a->pending_to : a->pending_from;
+
+    if (hi - lo <= 4) {
+        for (int g = lo; g < hi && g < (int)ARC_V5_GAIN_STATES; ++g) {
+            unsigned edge_ticks =
+                (a->model[g].settle_ms + ARC_V5_CONTROL_PERIOD_MS - 1u) /
+                ARC_V5_CONTROL_PERIOD_MS;
+            if (edge_ticks > ticks) ticks = edge_ticks;
+        }
+    }
+
+    if (ticks > ARC_V5_VERIFY_MAX_TICKS) ticks = ARC_V5_VERIFY_MAX_TICKS;
+    return ticks;
+}
+
+static void clean_zero_write_hold(arc_v5_autotune_t *a)
+{
+    a->state = ARC_V5_LOCK;
+    a->weak_votes = a->strong_votes = 0u;
+
+    /* Keep the V3 safety state synchronized without letting its narrower
+     * classifier create PHY writes while Fusion says the signal is healthy. */
+    a->v3.gain = a->gain;
+    a->v3.state = ARC_V3_LOCK;
+    a->v3.settle = 0u;
+    a->v3.same_class_ticks = 0u;
+    a->v3.bad_lock_ticks = 0u;
+    a->v3.rf_limit_ticks = 0u;
+    a->v3.severe_ticks = 0u;
+    a->v3.history_count = 0u;
+    a->v3.history_pos = 0u;
+    a->v3.filtered_valid = 0u;
 }
 
 static uint8_t begin_transition(arc_v5_autotune_t *a,
@@ -353,12 +403,16 @@ uint8_t arc_v5_autotune_tick(arc_v5_autotune_t *a,
             o->q_phase < 45)
             return begin_transition(a, a->pending_from, o);
 
-        if (a->verify_ticks < ARC_V5_VERIFY_TICKS)
+        if (a->verify_ticks < verify_ticks_required(a))
             return a->gain;
 
         learn_transition(a, o);
-        a->state = o->context == ARC_V5_CONTEXT_CLEAN ? ARC_V5_LOCK : ARC_V5_HOLD;
-        a->v3.settle = 0u;
+        if (o->context == ARC_V5_CONTEXT_CLEAN)
+            clean_zero_write_hold(a);
+        else {
+            a->state = ARC_V5_HOLD;
+            a->v3.settle = 0u;
+        }
     }
 
     bool weak = o->context == ARC_V5_CONTEXT_WEAK &&
@@ -377,23 +431,33 @@ uint8_t arc_v5_autotune_tick(arc_v5_autotune_t *a,
         a->weak_votes = a->strong_votes = 0u;
     }
 
-    unsigned confidence = arc_v5_model_confidence(a, a->gain);
-    unsigned confirm = confidence >= 24u ? ARC_V5_FAST_CONFIRM : 3u;
+    unsigned up_confidence = exact_up_confidence(a);
+    unsigned down_confidence = exact_down_confidence(a);
+    unsigned weak_confirm = up_confidence >= 24u ? ARC_V5_FAST_CONFIRM : 3u;
+    unsigned strong_confirm = down_confidence >= 24u ? ARC_V5_FAST_CONFIRM : 3u;
     bool severe_factory_weak =
         o->q_phase < 35 || o->origin_permille > 550;
 
     /* Cold/unknown regions stay on V3 unless raw Q4 is already near collapse.
-     * Once local response confidence exists, the predictive path may act
-     * earlier and skip several discovery steps. */
-    if (weak && a->weak_votes >= confirm && a->gain < a->table.max_index &&
-        (confidence >= 8u || severe_factory_weak)) {
+     * Once the exact edge being extrapolated has confidence, the predictive
+     * path may act earlier and skip several discovery steps. */
+    if (weak && a->weak_votes >= weak_confirm && a->gain < a->table.max_index &&
+        (up_confidence >= 8u || severe_factory_weak)) {
         uint8_t target = prediction_target(a, o, +1);
         return begin_transition(a, target, o);
     }
 
-    if (strong && a->strong_votes >= confirm && confidence >= 8u) {
+    if (strong && a->strong_votes >= strong_confirm && down_confidence >= 8u) {
         uint8_t target = prediction_target(a, o, -1);
         return begin_transition(a, target, o);
+    }
+
+    /* Fusion CLEAN is the authoritative zero-write zone. V3 deliberately has
+     * a narrower target envelope, so invoking it here would reintroduce gain
+     * hunting during otherwise healthy video. */
+    if (o->context == ARC_V5_CONTEXT_CLEAN) {
+        clean_zero_write_hold(a);
+        return a->gain;
     }
 
     /* Stable/unknown territory falls back to the proven ARC V3 controller.
@@ -409,12 +473,10 @@ uint8_t arc_v5_autotune_tick(arc_v5_autotune_t *a,
     uint8_t v3_target = arc_v3_controller_tick(&a->v3, &v3o);
     if (v3_target != a->gain) {
         uint8_t target = v3_target;
-        if (confidence >= 24u) {
-            if (v3_target > a->gain && weak)
-                target = prediction_target(a, o, +1);
-            else if (v3_target < a->gain && strong)
-                target = prediction_target(a, o, -1);
-        }
+        if (v3_target > a->gain && weak && up_confidence >= 24u)
+            target = prediction_target(a, o, +1);
+        else if (v3_target < a->gain && strong && down_confidence >= 24u)
+            target = prediction_target(a, o, -1);
         return begin_transition(a, target, o);
     }
 
