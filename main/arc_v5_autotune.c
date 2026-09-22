@@ -258,6 +258,12 @@ static void learn_transition(arc_v5_autotune_t *a,
     int abs_dg = iabs_i(dg);
     int sign = dg > 0 ? 1 : -1;
 
+    /* The vendor table is not linear in dB. A broad G54->G70 validation is
+     * useful safety evidence, but it must not pretend every unseen edge had
+     * the same response. Only local transitions are allowed to shape the
+     * persistent per-edge calibration curve. */
+    if (abs_dg > 4) return;
+
     int dp = (after->p_median - a->pending_before.p_median) * sign;
     int dq = (after->q_phase - a->pending_before.q_phase) * sign;
     int dorigin = (after->origin_permille - a->pending_before.origin_permille) * sign;
@@ -270,7 +276,7 @@ static void learn_transition(arc_v5_autotune_t *a,
 
     int lo = a->pending_from < a->pending_to ? a->pending_from : a->pending_to;
     int hi = a->pending_from < a->pending_to ? a->pending_to : a->pending_from;
-    if (hi >= ARC_V5_GAIN_STATES) hi = ARC_V5_GAIN_STATES - 1;
+    if (hi >= (int)ARC_V5_GAIN_STATES) hi = (int)ARC_V5_GAIN_STATES - 1;
 
     for (int g = lo; g < hi; ++g) {
         arc_v5_gain_model_t *m = &a->model[g];
@@ -373,13 +379,19 @@ uint8_t arc_v5_autotune_tick(arc_v5_autotune_t *a,
 
     unsigned confidence = arc_v5_model_confidence(a, a->gain);
     unsigned confirm = confidence >= 24u ? ARC_V5_FAST_CONFIRM : 3u;
+    bool severe_factory_weak =
+        o->q_phase < 35 || o->origin_permille > 550;
 
-    if (weak && a->weak_votes >= confirm && a->gain < a->table.max_index) {
+    /* Cold/unknown regions stay on V3 unless raw Q4 is already near collapse.
+     * Once local response confidence exists, the predictive path may act
+     * earlier and skip several discovery steps. */
+    if (weak && a->weak_votes >= confirm && a->gain < a->table.max_index &&
+        (confidence >= 8u || severe_factory_weak)) {
         uint8_t target = prediction_target(a, o, +1);
         return begin_transition(a, target, o);
     }
 
-    if (strong && a->strong_votes >= confirm) {
+    if (strong && a->strong_votes >= confirm && confidence >= 8u) {
         uint8_t target = prediction_target(a, o, -1);
         return begin_transition(a, target, o);
     }
