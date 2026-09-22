@@ -4003,9 +4003,9 @@ static void analog_agc_task(void *arg)
                 .origin_permille = origin_permille,
                 .winding_permille = winding_permille,
             };
-            s_last_arc_v3_q4_state = arc_v3_classify(&v3_obs);
             target_gain = arc_v3_controller_tick(&arc_v3_controller, &v3_obs);
             s_last_arc_v3_state = arc_v3_controller.state;
+            s_last_arc_v3_q4_state = arc_v3_controller.last_class;
             s_shadow_gain = target_gain;
             s_agc_state = arc_v3_controller.state == ARC_V3_LOCK ?
                           AGC_STATE_TRACK : AGC_STATE_LEARN;
@@ -4579,6 +4579,16 @@ static void console_diag_task(void *arg)
                         printf(" ARC V3 State:               %s (Q4=%s)\n",
                                arc_v3_state_name(s_last_arc_v3_state),
                                arc_v3_q4_state_name(s_last_arc_v3_q4_state));
+                        if (arc_v3_controller.filtered_valid) {
+                            printf(" ARC V3 Filter:              P=%d Q=%d%% Clip=%d.%d%% Origin=%d.%d%% guard=%u\n",
+                                   arc_v3_controller.filtered.p_median,
+                                   arc_v3_controller.filtered.q_phase,
+                                   arc_v3_controller.filtered.clip_permille / 10,
+                                   arc_v3_controller.filtered.clip_permille % 10,
+                                   arc_v3_controller.filtered.origin_permille / 10,
+                                   arc_v3_controller.filtered.origin_permille % 10,
+                                   arc_v3_controller.up_guard_ticks);
+                        }
                     }
                     printf(" FM Vector Metrics:          P_median=%d, Q_phase=%d%%, Clip=%d.%d%%, Origin=%d.%d%%\n",
                            s_last_p_median, s_last_q_phase,
