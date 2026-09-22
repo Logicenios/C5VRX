@@ -484,7 +484,8 @@ check("ARC V5 prediction is confidence bounded",
       "confidence >= 64u ? 12" in arc_v5 and
       "confidence >= 24u ? 8" in arc_v5 and
       "confidence < 8u" in arc_v5 and
-      "ARC_V5_VERIFY_TICKS" in arc_v5)
+      "ARC_V5_VERIFY_MIN_TICKS" in arc_v5 and
+      "ARC_V5_CONTROL_PERIOD_MS" in arc_v5)
 
 check("ARC V3 exposes an explicit RF limit at the vendor-table ceiling",
       "ARC_V3_RF_LIMIT" in arc_v3 and
