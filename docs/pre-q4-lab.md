@@ -598,6 +598,92 @@ stability oracle; overload recovery must establish a clean anchor first.
 The next ARC V3 iteration should implement these policy changes in the lab
 engine before any production promotion.
 
+### ARC V3 gain-first live experiment
+
+The far/medium/close `U` runs identify a concrete production-ARC failure:
+
+```text
+far G62:
+P~1, Q~0, origin~100%
+        |
+        +-- current ARC requires useful phase/sync evidence before gain-up
+        +-- persistent no-sync explicitly returns to survival_gain (G62)
+        |
+        +--> controller can remain permanently quantizer-starved
+```
+
+This is a control-loop trap, not evidence that the RF carrier is absent. In the
+far hardware run, raising generated vendor gain converted the same class of
+weak input into coherent Q4. Medium and close runs show the inverse problem:
+G62 can also be far too hot.
+
+PR ARC V3 therefore adds a separate `ARC V3 EXP` live profile. It does not
+replace production ARC yet.
+
+The experiment deliberately freezes every other frontend actuator:
+
+```text
+BW = BW40
+offset = 0 kHz
+FFT = normal
+demod = independently selectable
+```
+
+Only a valid vendor-generated gain-table index may move.
+
+The controller is raw-Q4-first and does not require semantic video sync to
+escape starvation:
+
+```text
+STARVED
+  hard: P<=4, Q<15, origin>=800 -> +4 indices
+  ordinary below-target         -> +1 index
+
+TARGET
+  clip<=16 pm
+  P=8..34
+  Q>=55
+  origin<=350 pm
+  winding<300 pm
+  -> after persistence: LOCK
+
+HIGH / OVERLOAD
+  above target / clipping -> -1
+  severe clip/P           -> immediate -4
+
+table max + persistent STARVED
+  -> RF_LIMIT
+```
+
+The target is intentionally headroom-biased. The controller stops increasing
+gain as soon as raw Q4 contains enough coherent phase information; it does not
+optimize toward P=24 and it does not continue into BW/AFC search.
+
+LOCK uses a slightly wider hold window and produces zero PHY writes while the
+raw Q4 vector remains useful. This prevents normal video modulation or sparse
+semantic-sync windows from causing gain hunting.
+
+The old `ARC` profile remains available unchanged for direct A/B. Select the
+new test profile through the normal profile cycle or serial key `Y`.
+
+Expected first live test:
+
+```text
+far:
+  old ARC -> remains near G62 / Q4-starved
+  ARC V3 -> climbs through vendor states until Q4 enters TARGET
+
+medium:
+  ARC V3 -> descends from overloaded G62 and freezes near the first clean state
+
+close:
+  ARC V3 -> rapidly cuts gain until clipping disappears
+```
+
+Promotion criterion is not a specific G number. The test succeeds if the live
+controller follows the raw-Q4 state across distance, preserves clean LOCK, and
+extends matched-quality range without persistent oscillation.
+
 ### Demodulator boundary
 
 `U` does not mix frontend discovery with demodulator selection. Q4 placement is
