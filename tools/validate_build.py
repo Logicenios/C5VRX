@@ -51,7 +51,7 @@ c_names = [f.name for f in c_files]
 video_c = read(MAIN / "video.c")
 menu_lifecycle = video_c.split("static void video_set_menu_mode", 1)[1].split("static void menu_cycle_standard_mode", 1)[0]
 
-check("production receiver and dedicated menu raster modules", set(c_names) == {"main.c", "arc_phy.c", "rf.c", "video.c", "menu_raster.c"},
+check("production receiver and dedicated menu/auto-lab modules", set(c_names) == {"main.c", "arc_phy.c", "rx_auto_lab.c", "rf.c", "video.c", "menu_raster.c"},
       f"found: {c_names}")
 check("main.c present", "main.c" in c_names)
 check("rf.c present", "rf.c" in c_names)
@@ -431,6 +431,44 @@ check("ARC preserves clean LOCK and uses maximum RF-stage survival",
 check("incorrect one-argument AGC maximum call is absent",
       "phy_agc_max_gain_set" not in all_c and
       "rf_set_experimental_hw_agc" not in all_c)
+
+rx_auto = read(MAIN / "rx_auto_lab.c") + read(MAIN / "rx_auto_lab.h")
+check("ARC V3 RX AUTO LAB is explicit opt-in console instrumentation",
+      "lab_run_rx_auto" in video_c and
+      "} else if (c == 'U') {" in video_c and
+      "C5VRX_RX_AUTO_RESULT" in video_c and
+      "C5VRX_RX_AUTO_PROOF" in video_c and
+      "C5VRX_RX_AUTO_REF" in video_c)
+check("RX AUTO uses reference-guarded candidate search and repeated proof",
+      "rx_auto_measure_against_reference" in video_c and
+      "RX_AUTO_PROOF_ROUNDS      5u" in video_c and
+      "proof_stable >= 4u" in video_c and
+      "proof_wins >= 4u" in video_c and
+      "rx_auto_reference_stable" in rx_auto)
+check("RX AUTO separates gain, bandwidth and centering stages",
+      "RX_AUTO_GAIN" in video_c and
+      "RX_AUTO_BW" in video_c and
+      "RX_AUTO_CENTER_COARSE" in video_c and
+      "RX_AUTO_CENTER_FINE" in video_c and
+      "top_gain[RX_AUTO_TOP_COUNT]" in video_c)
+check("RX AUTO hard-rejects clipping/transport instead of maximizing P",
+      "o->transport_faults != 0 || o->clip_permille > 30" in rx_auto and
+      "p_distance" in rx_auto and
+      "return iabs(p - 24)" in rx_auto and
+      "RX_AUTO_SWEET" in rx_auto)
+check("RX AUTO has explicit RF_LIMIT and overload classifiers",
+      "rx_auto_is_rf_limit" in rx_auto and
+      "o->p_median <= 4" in rx_auto and
+      "o->origin_permille >= 800" in rx_auto and
+      "rx_auto_is_overload" in rx_auto and
+      'status = "RF_LIMIT"' in video_c and
+      'status = "OVERLOAD"' in video_c)
+check("RX AUTO freezes only a proven winner and restores failed experiments",
+      "rx_auto_freeze_winner" in video_c and
+      "s_agc_mode = ANALOG_AGC_MANUAL" in video_c and
+      "s_afc_mode = AFC_MODE_HOLD" in video_c and
+      "rx_auto_restore_saved(&saved)" in video_c and
+      "No setting is persisted" in read(ROOT / "docs" / "pre-q4-lab.md"))
 
 # ---- Web flasher / release safety ----
 web_app = read(ROOT / "web" / "app.js")
