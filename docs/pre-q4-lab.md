@@ -418,6 +418,186 @@ C5VRX_RX_AUTO_RESULT status=ACQUIRED gain=... bw=... offset_khz=...
 
 If the winner is not proven, the pre-`U` receiver state is restored.
 
+### First ARC V3 hardware evidence — far / medium / close (2026-09-22)
+
+Three complete `U` runs were captured without changing the firmware: one far,
+one medium and one close. Together they show that the optimum generated vendor
+gain state moves by **tens of indices** with RF input and that the old G62
+"survival" assumption is not valid as a universal operating point.
+
+#### Far: G62 is quantizer-starved, high generated gain restores coherence
+
+The far run started with a stable dead G62 reference:
+
+```text
+G62: P=1  Q=0   origin=1000  clip=0  -> POOR
+```
+
+The reference remained stable while the candidate states improved progressively:
+
+```text
+G74: P=5   Q=13  origin=435  clip=0  -> POOR
+G75: P=5   Q=41  origin=213  clip=0  -> POOR
+G76: P=9   Q=74  origin=62   clip=0  -> USABLE
+G77: P=10  Q=87  origin=20   clip=0  -> USABLE
+G78: P=17  Q=99  origin=0    clip=0  -> SWEET
+G79: P=17  Q=99  origin=0    clip=0  -> SWEET
+G80: P=18  Q=99  origin=0    clip=0  -> SWEET
+G81: P=29  Q=99  origin=0    clip=0  -> SWEET
+```
+
+This is direct evidence that useful RF information still existed upstream while
+G62 was collapsing almost entirely into the Q4 origin. Raising the generated
+gain within the receive table recovered a well-filled, coherent raw-Q4 vector.
+The previous conclusion from the earlier one-pass `G` sweep ("higher BB/fine
+gain cannot recover the far state") is therefore **not generally valid**; the
+reference-guarded `U` run is stronger evidence.
+
+The first `U` scorer selected G81 because its P landed closest to the nominal
+P target, but the 5x proof exposed reduced headroom:
+
+```text
+winner G81 proof:
+  rounds 1-2: clipping / REJECT
+  rounds 3-5: SWEET
+result: INCONCLUSIVE, proof_wins=3/5, frozen=0
+```
+
+The hardware implication is to prefer the **lowest generated gain that is
+already robustly SWEET**, rather than maximizing P or choosing the numerically
+largest clean-looking state. In this run G78 was the first clearly SWEET state
+and retained more headroom than G81.
+
+#### Medium: optimum moves down to roughly G56-G57
+
+At the medium position the initial G62 reference was already heavily clipped,
+so `U` entered overload descent. The useful region moved far lower:
+
+```text
+G62: heavy clipping / REJECT
+G58: clean but high, USABLE/SWEET depending window
+G57: P=17  Q=99  origin=0  clip=0  -> SWEET
+G56: P=13  Q=99  origin=0  clip=0  -> USABLE
+G54: P=17  Q=99  origin=0  clip=0  -> SWEET in one coarse window
+G50: Q4 starts becoming under-filled
+```
+
+The refinement around the transition was especially informative:
+
+```text
+G55: P=13 Q=99 clip=0  -> USABLE
+G56: P=13 Q=99 clip=0  -> USABLE
+G57: P=17 Q=99 clip=0  -> SWEET
+G58: P=36 Q=100 clip=0 -> USABLE
+G59: P=52 Q=100 clip=228 pm -> REJECT
+G60: P=58 Q=99  clip=281 pm -> REJECT
+G61: P=53 Q=100 clip=298 pm -> REJECT
+```
+
+This run exposed a flaw in the first `U` proof method: overload mode continued
+to use G62 as the fading reference. Because G62 itself was clipping by hundreds
+of permille, the reference wandered enough to mark otherwise clean candidates
+unstable. A future overload search must first find a **clean safe anchor** and
+then use that anchor for REF -> candidate -> REF checks.
+
+#### Close: optimum moves down again to roughly G46-G47
+
+At close range the initial high-stage reference was even more overloaded:
+
+```text
+G62: REJECT, heavy clipping
+G58: REJECT, heavy clipping
+G54: REJECT, heavy clipping
+G50: usable transition region
+G46-G47: clean usable region
+G42 and below: under-filled / POOR
+```
+
+The refinement shows a sharp upper edge:
+
+```text
+G47: P=45 Q=100 clip=15 pm  -> USABLE
+G48: P=61 Q=99  clip=347 pm -> REJECT
+G49: P=65 Q=99  clip=435 pm -> REJECT
+G50: P=65 Q=99  clip=500 pm -> REJECT
+```
+
+The run later ended at G46 with approximately `P=17 Q=99`, confirming that the
+clean operating region had moved well below both the medium and far settings.
+
+#### Cross-distance result
+
+The observed useful regions were approximately:
+
+```text
+close   -> G46-G47
+medium  -> G56-G57
+far     -> G78-G80
+```
+
+These are not production constants and must not be hardcoded. They demonstrate
+the topology: the generated vendor state must move strongly with received
+signal level to keep the raw 4-bit IQ representation inside its useful window.
+
+The same G62 state can therefore be catastrophically wrong in **both**
+directions:
+
+```text
+far:   G62 -> P~1, Q~0, origin~100%    (quantizer-starved)
+close: G62 -> very high P, heavy clip  (overloaded)
+```
+
+This is the strongest hardware evidence so far that the main range problem is
+substantially influenced by **pre-Q4 gain placement**, not only by the
+post-Q4 demodulator.
+
+#### BW / carrier-search caution exposed by the same runs
+
+The first `U` implementation always continued into BW and carrier-centering
+search after finding a good gain state. Hardware data shows that this can
+over-fit time-varying RF conditions.
+
+Examples:
+
+- medium: both BW40 and BW20 produced SWEET states around G56-G58;
+- far: one G78 BW20 window improved from a poor BW40 window to SWEET, but other
+  candidates did not show the same deterministic relationship;
+- close: multiple offsets from roughly -750 to +750 kHz produced SWEET windows,
+  while the same nominal offset could later degrade badly during proof.
+
+Therefore the production-oriented search order should be conservative:
+
+```text
+GAIN FIRST
+  -> if a robust SWEET state exists: HOLD / LOCK
+  -> only if gain alone cannot recover a usable state:
+       try BW
+       then carrier centering
+  -> if all fail: RF_LIMIT
+```
+
+A SWEET-to-SWEET actuator change is not, by itself, evidence that the new
+setting is better. BW or carrier offset should only move when the improvement
+is material and repeatable.
+
+#### Controller implication
+
+The hardware evidence now supports a Q4-target controller with three primary
+states:
+
+```text
+STARVED  -> raise effective generated gain
+SWEET    -> hold / zero PHY writes
+OVERLOAD -> lower effective generated gain
+```
+
+Selection should stop at the **lowest sufficient SWEET state with margin**,
+rather than targeting maximum P. A clipped reference must never be used as the
+stability oracle; overload recovery must establish a clean anchor first.
+
+The next ARC V3 iteration should implement these policy changes in the lab
+engine before any production promotion.
+
 ### Demodulator boundary
 
 `U` does not mix frontend discovery with demodulator selection. Q4 placement is
