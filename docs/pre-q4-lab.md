@@ -845,6 +845,73 @@ making better use of the remaining weak-signal phase information downstream;
 digital amplitude scaling after Q4 cannot reconstruct phase that was already
 lost in quantization.
 
+### 25 mW relative-power walk
+
+A second close -> far -> close hardware walk was captured with the VTX reduced
+from **200 mW to 25 mW**. That is an 8x power reduction:
+
+```text
+10 * log10(25 / 200) = -9.03 dB
+```
+
+The exact raw `[CARRIER]` capture is preserved in
+`docs/live_walkaround_log.txt`. This capture contains P/Q/G only; it does not
+contain origin/clip/winding, so those metrics must not be reconstructed or
+assumed.
+
+Observed gain trajectory:
+
+```text
+close -> far:
+G29 -> G37 -> G58/G64/G60/G57 -> G81
+
+far plateau:
+G81 for 24 consecutive logged carrier samples
+
+far -> close:
+G81 -> G75 -> G67 -> G51 -> G40 -> G28
+```
+
+Even on the G81 far plateau, raw phase coherence was often still strong:
+
+```text
+G81 P13 Q93
+G81 P26 Q99
+G81 P17 Q98
+G81 P16 Q94
+G81 P26 Q100
+G81 P25 Q99
+```
+
+Lower-Q windows also occurred at the same ceiling state (roughly Q60-Q77), so
+the far point is now clearly **gain-ceiling limited**, but it is not yet a
+clean, sustained raw-Q4 information collapse.
+
+This 25 mW run is the first hardware walk with a known relative transmit-power
+change. Relative to the earlier 200 mW strong/extra-close observations around
+G14-G18, the 25 mW close end around G28-G29 is consistent with significantly
+more generated pre-Q4 gain being required after a -9.03 dB RF reduction.
+
+That comparison is useful calibration evidence, but it is **not yet a global
+gain-index-to-dB conversion**. The two walks were not performed with a
+calibrated attenuator at a fixed geometry, and vendor gain indices cross
+different RF/BB/fine states. Multipath and antenna orientation can also shift
+the optimum state substantially.
+
+The correct next calibration experiment is therefore a fixed-geometry power
+ladder, for example:
+
+```text
+200 mW   0.00 dB relative
+100 mW  -3.01 dB
+ 50 mW  -6.02 dB
+ 25 mW  -9.03 dB
+```
+
+At each step, record the settled gain together with P/Q/origin/clip/winding.
+That produces a repeatable **relative RF power -> required generated gain**
+curve without pretending that distance itself is a receiver observable.
+
 ### Demodulator boundary
 
 `U` does not mix frontend discovery with demodulator selection. Q4 placement is
