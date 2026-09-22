@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include "arc_phy.h"
 
+#define ARC_V3_FILTER_SAMPLES 5u
+
 typedef enum {
     ARC_V3_ACQUIRE = 0,
     ARC_V3_LOCK,
@@ -28,11 +30,24 @@ typedef struct {
     arc_gain_table_t table;
     uint8_t gain;
     arc_v3_state_t state;
+
+    /* Physical-write hold plus robust temporal decision state. */
     unsigned settle;
     unsigned same_class_ticks;
     unsigned bad_lock_ticks;
     unsigned rf_limit_ticks;
+    unsigned severe_ticks;
+    unsigned up_guard_ticks;
     arc_v3_q4_state_t last_class;
+
+    /* Five completed control windows are reduced component-wise by median
+     * before ordinary gain decisions. Raw windows never directly request
+     * gain-up; only repeated severe overload may use the fast path. */
+    arc_v3_observation_t history[ARC_V3_FILTER_SAMPLES];
+    unsigned history_count;
+    unsigned history_pos;
+    arc_v3_observation_t filtered;
+    uint8_t filtered_valid;
 } arc_v3_controller_t;
 
 void arc_v3_controller_reset(arc_v3_controller_t *arc,
