@@ -8,7 +8,8 @@
 
 #define ARC_V5_GAIN_STATES (ARC_VENDOR_GAIN_MAX + 1u)
 #define ARC_V5_MODEL_MAGIC 0x35564341u /* "ACV5" little-endian */
-#define ARC_V5_MODEL_VERSION 1u
+/* v2 invalidates early PR62 models learned before the proven 500 ms settle gate. */
+#define ARC_V5_MODEL_VERSION 2u
 
 typedef enum {
     ARC_V5_CONTEXT_NO_CARRIER = 0,
