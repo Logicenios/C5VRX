@@ -2526,9 +2526,16 @@ static void lab_run_rx_auto(void)
             rx_auto_observation_t after = rx_auto_collect_observation();
 
             bool stable = rx_auto_reference_stable(&before, &after);
-            bool wins = stable &&
-                        rx_auto_better(&winner, &before) &&
-                        rx_auto_better(&winner, &after);
+            bool baseline_is_winner =
+                best_center.gain == ref_gain &&
+                best_center.bw40 &&
+                best_center.offset_khz == 0;
+            bool winner_usable =
+                rx_auto_classify(&winner) >= RX_AUTO_USABLE;
+            bool wins = stable && winner_usable &&
+                        (baseline_is_winner ||
+                         (rx_auto_better(&winner, &before) &&
+                          rx_auto_better(&winner, &after)));
             if (stable) ++proof_stable;
             if (wins) ++proof_wins;
             proof_last = winner;
