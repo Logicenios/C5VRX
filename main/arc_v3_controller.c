@@ -1,6 +1,15 @@
 #include "arc_v3_controller.h"
 
-#define ARC_V3_SETTLE_TICKS 10u
+#include <stdbool.h>
+
+#define ARC_V3_SETTLE_TICKS             10u
+#define ARC_V3_LOCK_BAD_TICKS            6u
+#define ARC_V3_UP_CONFIRM_TICKS          5u
+#define ARC_V3_HARD_UP_CONFIRM_TICKS     3u
+#define ARC_V3_OVERLOAD_CONFIRM_TICKS    2u
+#define ARC_V3_HIGH_CONFIRM_TICKS        3u
+#define ARC_V3_UP_GUARD_TICKS           20u
+#define ARC_V3_RF_LIMIT_CONFIRM_TICKS    8u
 
 static uint8_t clamp_gain(const arc_v3_controller_t *arc, int gain)
 {
@@ -27,8 +36,72 @@ static int lock_hold_good(const arc_v3_observation_t *o)
     return o->clip_permille <= 24 &&
            o->p_median >= 6 && o->p_median <= 40 &&
            o->q_phase >= 45 &&
-           o->origin_permille <= 450 &&
-           o->winding_permille < 300;
+           o->origin_permille <= 500 &&
+           o->winding_permille < 320;
+}
+
+static int median_int(const int *values, unsigned count)
+{
+    int tmp[ARC_V3_FILTER_SAMPLES];
+
+    for (unsigned i = 0; i < count; ++i)
+        tmp[i] = values[i];
+
+    for (unsigned i = 1; i < count; ++i) {
+        int v = tmp[i];
+        unsigned j = i;
+        while (j > 0u && tmp[j - 1u] > v) {
+            tmp[j] = tmp[j - 1u];
+            --j;
+        }
+        tmp[j] = v;
+    }
+
+    return tmp[count / 2u];
+}
+
+static void filter_push(arc_v3_controller_t *arc,
+                        const arc_v3_observation_t *o)
+{
+    arc->history[arc->history_pos] = *o;
+    arc->history_pos = (arc->history_pos + 1u) % ARC_V3_FILTER_SAMPLES;
+    if (arc->history_count < ARC_V3_FILTER_SAMPLES)
+        ++arc->history_count;
+
+    if (arc->history_count < ARC_V3_FILTER_SAMPLES) {
+        arc->filtered_valid = 0u;
+        return;
+    }
+
+    int p[ARC_V3_FILTER_SAMPLES];
+    int q[ARC_V3_FILTER_SAMPLES];
+    int clip[ARC_V3_FILTER_SAMPLES];
+    int origin[ARC_V3_FILTER_SAMPLES];
+    int winding[ARC_V3_FILTER_SAMPLES];
+
+    for (unsigned i = 0; i < ARC_V3_FILTER_SAMPLES; ++i) {
+        p[i] = arc->history[i].p_median;
+        q[i] = arc->history[i].q_phase;
+        clip[i] = arc->history[i].clip_permille;
+        origin[i] = arc->history[i].origin_permille;
+        winding[i] = arc->history[i].winding_permille;
+    }
+
+    arc->filtered = (arc_v3_observation_t) {
+        .p_median = median_int(p, ARC_V3_FILTER_SAMPLES),
+        .q_phase = median_int(q, ARC_V3_FILTER_SAMPLES),
+        .clip_permille = median_int(clip, ARC_V3_FILTER_SAMPLES),
+        .origin_permille = median_int(origin, ARC_V3_FILTER_SAMPLES),
+        .winding_permille = median_int(winding, ARC_V3_FILTER_SAMPLES),
+    };
+    arc->filtered_valid = 1u;
+}
+
+static void filter_reset(arc_v3_controller_t *arc)
+{
+    arc->history_count = 0u;
+    arc->history_pos = 0u;
+    arc->filtered_valid = 0u;
 }
 
 static void note_class(arc_v3_controller_t *arc, arc_v3_q4_state_t cls)
@@ -44,10 +117,22 @@ static void note_class(arc_v3_controller_t *arc, arc_v3_q4_state_t cls)
 static uint8_t write_next(arc_v3_controller_t *arc, uint8_t next)
 {
     if (next != arc->gain) {
+        bool down = next < arc->gain;
+
         arc->gain = next;
         arc->settle = ARC_V3_SETTLE_TICKS;
         arc->same_class_ticks = 0u;
         arc->rf_limit_ticks = 0u;
+        arc->bad_lock_ticks = 0u;
+        arc->severe_ticks = 0u;
+        filter_reset(arc);
+
+        /* Hardware walk-back data showed a bad short fade can otherwise
+         * reverse a legitimate downward trajectory (e.g. G66 -> G81).
+         * Downward movement therefore creates a one-second no-up window.
+         * True persistent starvation still wins once that guard expires. */
+        if (down)
+            arc->up_guard_ticks = ARC_V3_UP_GUARD_TICKS;
     }
     return arc->gain;
 }
@@ -66,16 +151,9 @@ void arc_v3_controller_reset(arc_v3_controller_t *arc,
 
 arc_v3_q4_state_t arc_v3_classify(const arc_v3_observation_t *o)
 {
-    /* A large rail population is stronger evidence than P alone. */
     if (o->clip_permille >= 32 || o->p_median > 45)
         return ARC_V3_Q4_OVERLOAD;
 
-    /*
-     * Hardware U-runs show that useful video does not require P~=24.
-     * The safe target is deliberately low-gain/headroom biased:
-     * enough Q4 occupancy/coherence to preserve phase, but no incentive to
-     * keep amplifying once the raw vector is already usable.
-     */
     if (o->clip_permille <= 16 &&
         o->p_median >= 8 && o->p_median <= 34 &&
         o->q_phase >= 55 &&
@@ -83,28 +161,34 @@ arc_v3_q4_state_t arc_v3_classify(const arc_v3_observation_t *o)
         o->winding_permille < 300)
         return ARC_V3_Q4_TARGET;
 
-    /* Above the target window but not yet hard-clipped: move downward. */
     if (o->clip_permille > 16 || o->p_median > 34)
         return ARC_V3_Q4_HIGH;
 
-    /* Everything below target is treated as Q4 starvation. Semantic video
-     * sync is intentionally absent here: the far hardware run had Q=0 at G62
-     * but became coherent only after raising generated gain. */
     return ARC_V3_Q4_STARVED;
 }
 
 uint8_t arc_v3_controller_tick(arc_v3_controller_t *arc,
                                const arc_v3_observation_t *o)
 {
-    /* Emergency overload protection may shorten normal settle, but never use
-     * the first two 50 ms observations after a PHY write: those can still
-     * describe the previous gain state. */
+    if (arc->up_guard_ticks)
+        --arc->up_guard_ticks;
+
+    filter_push(arc, o);
+
+    /* Clipping is the one raw-window signal allowed a faster path. Even then,
+     * require two consecutive severe windows and never trust the first two
+     * observations after a PHY write. */
     bool severe_overload = o->clip_permille >= 80 || o->p_median > 60;
+    if (severe_overload) {
+        if (arc->severe_ticks < 255u) ++arc->severe_ticks;
+    } else {
+        arc->severe_ticks = 0u;
+    }
+
     bool emergency_ready = arc->settle == 0u ||
                            arc->settle <= ARC_V3_SETTLE_TICKS - 2u;
-    if (severe_overload && emergency_ready) {
+    if (arc->severe_ticks >= 2u && emergency_ready) {
         arc->state = ARC_V3_ACQUIRE;
-        arc->bad_lock_ticks = 0u;
         return write_next(arc, step_gain(arc, -4));
     }
 
@@ -113,28 +197,35 @@ uint8_t arc_v3_controller_tick(arc_v3_controller_t *arc,
         return arc->gain;
     }
 
-    arc_v3_q4_state_t cls = arc_v3_classify(o);
+    if (!arc->filtered_valid)
+        return arc->gain;
+
+    const arc_v3_observation_t *f = &arc->filtered;
+    arc_v3_q4_state_t cls = arc_v3_classify(f);
     note_class(arc, cls);
 
     if (arc->state == ARC_V3_RF_LIMIT) {
-        if (cls == ARC_V3_Q4_STARVED) return arc->gain;
+        if (cls == ARC_V3_Q4_STARVED)
+            return arc->gain;
+
         arc->state = ARC_V3_ACQUIRE;
         arc->rf_limit_ticks = 0u;
-        arc->same_class_ticks = 1u;
     }
 
     if (arc->state == ARC_V3_LOCK) {
-        if (lock_hold_good(o)) {
+        if (lock_hold_good(f)) {
             arc->bad_lock_ticks = 0u;
             return arc->gain; /* Zero-write clean LOCK invariant. */
         }
 
-        if (++arc->bad_lock_ticks < 3u)
+        if (++arc->bad_lock_ticks < ARC_V3_LOCK_BAD_TICKS)
             return arc->gain;
 
+        /* Keep the already accumulated filtered-class persistence. Six bad
+         * rolling medians are enough evidence; do not make ACQUIRE start over
+         * from one raw sample. */
         arc->state = ARC_V3_ACQUIRE;
         arc->bad_lock_ticks = 0u;
-        arc->same_class_ticks = 3u; /* current class is already persistent */
     }
 
     if (cls == ARC_V3_Q4_TARGET) {
@@ -146,27 +237,40 @@ uint8_t arc_v3_controller_tick(arc_v3_controller_t *arc,
     }
 
     if (cls == ARC_V3_Q4_OVERLOAD) {
-        if (arc->same_class_ticks < 2u) return arc->gain;
+        if (arc->same_class_ticks < ARC_V3_OVERLOAD_CONFIRM_TICKS)
+            return arc->gain;
         return write_next(arc, step_gain(arc, -1));
     }
 
     if (cls == ARC_V3_Q4_HIGH) {
-        if (arc->same_class_ticks < 3u) return arc->gain;
+        if (arc->same_class_ticks < ARC_V3_HIGH_CONFIRM_TICKS)
+            return arc->gain;
         return write_next(arc, step_gain(arc, -1));
     }
 
-    /* STARVED: unlike production ARC v2, lack of semantic sync can never pin
-     * the controller back to the first highest-RF-stage entry. */
+    /* STARVED is deliberately asymmetric with overload:
+     * - it is based on the five-window median, never one bad fade;
+     * - gain-up requires more persistence than gain-down;
+     * - after a legitimate downward move, a one-second reversal guard blocks
+     *   the G66 -> G81 style bounce observed while walking toward the VTX. */
     if (arc->gain >= arc->table.max_index) {
         if (arc->rf_limit_ticks < 255u) ++arc->rf_limit_ticks;
-        if (arc->rf_limit_ticks >= 6u) arc->state = ARC_V3_RF_LIMIT;
+        if (arc->rf_limit_ticks >= ARC_V3_RF_LIMIT_CONFIRM_TICKS)
+            arc->state = ARC_V3_RF_LIMIT;
         return arc->gain;
     }
 
-    if (arc->same_class_ticks < 2u) return arc->gain;
+    bool hard = hard_starved(f);
+    unsigned confirm = hard ?
+        ARC_V3_HARD_UP_CONFIRM_TICKS : ARC_V3_UP_CONFIRM_TICKS;
 
-    int delta = hard_starved(o) ? 4 : 1;
-    return write_next(arc, step_gain(arc, delta));
+    if (arc->same_class_ticks < confirm)
+        return arc->gain;
+
+    if (arc->up_guard_ticks != 0u)
+        return arc->gain;
+
+    return write_next(arc, step_gain(arc, hard ? 4 : 1));
 }
 
 const char *arc_v3_state_name(arc_v3_state_t state)
