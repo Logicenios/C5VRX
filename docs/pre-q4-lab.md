@@ -69,6 +69,95 @@ A useful result is a repeatable improvement in raw-Q4 metrics or required RF
 attenuation in `PREQ4_TX_QUIET`, not merely the expected loss of visible CVBS
 while TX is intentionally disabled.
 
+## First hardware evidence — 2026-09-22
+
+PR #56 was exercised on A1 / 5865 MHz with `6BIT@40`, BW40 and the PRE-Q4
+self-noise probe at multiple physical VTX distances. The probe itself froze the
+receiver at G62 while each ACTIVE -> QUIET -> RESTORED sequence ran.
+
+### Weak-signal observations
+
+Two near-threshold runs did **not** improve when PARLIO/DAC TX was made quiet:
+
+```text
+run A
+ACTIVE:   P=1  Q=45  origin=521  risk=545
+QUIET:    P=1  Q=42  origin=554  risk=582
+RESTORED: P=1  Q=43  origin=530  risk=568
+
+run B
+ACTIVE:   P=1  Q=40  origin=563  risk=604
+QUIET:    P=1  Q=40  origin=572  risk=611
+RESTORED: P=1  Q=32  origin=646  risk=703
+```
+
+A dominant TX/DAC self-noise mechanism would normally be expected to move
+`Q` upward and `origin_pm` / risk downward during the QUIET interval. That
+pattern was not observed.
+
+### Medium-signal observation
+
+One medium run changed in the opposite direction:
+
+```text
+ACTIVE:   P=17  Q=86  origin=37   syncQ=72  risk=93
+QUIET:    P=16  Q=77  origin=150  syncQ=0   risk=194
+RESTORED: P=20  Q=91  origin=9    syncQ=0   risk=56
+```
+
+The receiver therefore did not show a repeatable raw-Q4 improvement merely from
+removing the live video-output activity. The ACTIVE -> QUIET -> RESTORED spread
+is large enough that ordinary 5.8 GHz fading / multipath over the several-second
+sequence is a plausible confounder.
+
+### Strong-signal runs are not sensitivity evidence
+
+Several close-range measurements reached approximately:
+
+```text
+P = 80..85
+Q = 90..96
+clip_pm = 784..959
+origin_pm = 0
+```
+
+Those windows are heavily clipped at G62. They are useful for proving that the
+probe can stop and restore TX without transport faults, but they must not be
+used to estimate a self-noise sensitivity penalty.
+
+### Current conclusion
+
+The first hardware evidence provides **no reproducible evidence that the
+PARLIO/resistor-DAC output is the dominant range limiter**.
+
+In particular:
+
+- a large multi-dB self-noise penalty is not supported by these runs;
+- a small effect remains possible because the present A/B sequence is vulnerable
+  to time-varying multipath and does not yet estimate an RF-equivalent dB delta;
+- the result does **not** prove that board-level digital coupling is exactly zero;
+- PRE-Q4 work should now prioritize the complete highest-RF-stage gain sweep,
+  then vendor RXDC/IQ state, ADC/filter tuple and acquisition-only centering if
+  those controls pass their individual proof gates.
+
+### Better automatic self-noise experiment
+
+A future automatic detector should avoid one-shot ACTIVE -> QUIET -> RESTORED
+classification. It should:
+
+1. let ARC find a non-clipping receive gain first;
+2. freeze that exact valid vendor gain tuple;
+3. run a short repeated `ACTIVE -> QUIET -> ACTIVE -> QUIET -> ACTIVE`
+   sequence;
+4. reject windows with heavy clipping or obvious physical fade;
+5. compare medians / robust deltas for `Q`, `origin_pm`, IQ geometry and risk;
+6. classify self-noise only when the QUIET improvement is repeatable in both
+   directions;
+7. never probe while clean video is in LOCK.
+
+Until that repeated test exists, the manual `S` result is evidence against a
+large self-noise problem, not a calibrated upper bound in dB.
+
 ## 2. Highest-RF-stage gain sweep
 
 ARC reconstructed the generated vendor table rather than treating gain as one
