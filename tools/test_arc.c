@@ -43,6 +43,19 @@ int main(void)
     arc_iq_correction_t iq = arc_iq_correction_decode(
         (7u << 29) | (0x7fu << 22) | (0x20u << 16));
     assert(iq.enable == 7 && iq.coef0 == -1 && iq.coef1 == -32);
+    iq = arc_iq_correction_decode((1u << 29) | (0x40u << 22) | (0x1fu << 16));
+    assert(iq.enable == 1 && iq.coef0 == -64 && iq.coef1 == 31);
+
+    const uint8_t alternate_spans[ARC_RX_STAGE_COUNT] = {8, 7, 6, 5, 4, 3, 2, 1, 0};
+    arc_gain_table_from_bytes(&table, alternate_spans, 47);
+    assert(table.runtime_spans_valid && table.max_index == 47);
+    assert(arc_gain_highest_rf_stage_start(&table) == 36);
+    arc_gain_tuple_t alternate_last;
+    assert(arc_gain_tuple_decode(&table, 47, &alternate_last));
+    assert(alternate_last.rf_stage == 8 && alternate_last.rf_code == 127);
+    assert(alternate_last.bb_code == 3 && alternate_last.fine_code == 0);
+
+    arc_gain_table_from_bytes(&table, spans, 89);
 
     arc_controller_t arc;
     arc_controller_reset(&arc, &table, 62);
@@ -53,11 +66,32 @@ int main(void)
     };
     assert(arc_controller_tick(&arc, &clean) == 62);
     assert(arc.state == ARC_LOCK);
+    arc_controller_t locked = arc;
     for (unsigned i = 0; i < 100; ++i) assert(arc_controller_tick(&arc, &clean) == 62);
+    assert(arc.gain == locked.gain && arc.survival_gain == locked.survival_gain);
+    assert(arc.table.max_index == locked.table.max_index);
+    for (unsigned i = 0; i < ARC_RX_STAGE_COUNT; ++i)
+        assert(arc.table.spans[i] == locked.table.spans[i]);
 
-    arc_observation_t lost = {.origin_permille = 900};
-    for (unsigned i = 0; i < 29; ++i) (void)arc_controller_tick(&arc, &lost);
+    /* No-sync noise with plausible phase must never increase gain. */
+    arc_observation_t lost = {
+        .q_phase = 35, .p_median = 8, .origin_permille = 300,
+    };
+    for (unsigned i = 0; i < 40; ++i) {
+        uint8_t before = arc.gain;
+        uint8_t after = arc_controller_tick(&arc, &lost);
+        assert(after <= before);
+    }
     assert(arc.gain == 61);
+    for (unsigned i = 0; i < 100; ++i)
+        assert(arc_controller_tick(&arc, &lost) == 61);
+
+    /* Severe clipping bypasses the ordinary post-write settle interval. */
+    arc_controller_reset(&arc, &table, 61);
+    assert(arc.settle == 10);
+    arc_observation_t clipped = {.clip_permille = 100, .p_median = 40};
+    assert(arc_controller_tick(&arc, &clipped) == 57);
+    assert(arc.settle == 10);
 
     puts("ARC PHY/controller tests passed");
     return 0;

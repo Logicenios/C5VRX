@@ -55,6 +55,10 @@ typedef struct {
 } rf_phy_snapshot_t;
 
 void rf_get_phy_snapshot(rf_phy_snapshot_t *snapshot);
+/* Vendor-calibrated, read-only receive tuple captured atomically with the ARC
+ * gain table after PHY init or a successful channel retune. It is diagnostic
+ * state only; undocumented fields are never swept or reapplied in LOCK. */
+const rf_phy_snapshot_t *rf_get_arc_receive_tuple(void);
 
 /**
  * Force/release the PHY FFT scaling stage. This is exposed only so the lab can
@@ -75,6 +79,9 @@ bool rf_try_get_noise_floor_dbm(int *dbm);
 bool rf_try_get_wideband_rssi_dbm(int *dbm);
 const arc_gain_table_t *rf_get_arc_gain_table(void);
 uint8_t rf_get_arc_survival_gain(void);
+/* Changes after every successful PHY init/channel retune and lets the ARC
+ * supervisor discard controller state derived from an older vendor table. */
+uint32_t rf_get_arc_generation(void);
 
 /**
  * FPV Channel and Carrier Frequency Fine-Tuning:

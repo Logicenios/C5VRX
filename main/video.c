@@ -42,6 +42,7 @@
 #include "hal/usb_serial_jtag_ll.h"
 
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -1983,13 +1984,22 @@ static void lab_run_frequency_probe(void)
 static void lab_print_arc_oracle(void)
 {
     const arc_gain_table_t *table = rf_get_arc_gain_table();
-    printf("C5VRX_ARC_ORACLE max=%u source=%s survival=%u spans=",
+    const rf_phy_snapshot_t *tuple = rf_get_arc_receive_tuple();
+    printf("C5VRX_ARC_ORACLE generation=%" PRIu32 " max=%u source=%s survival=%u spans=",
+           rf_get_arc_generation(),
            table->max_index,
            table->runtime_spans_valid ? "vendor" : "fallback",
            rf_get_arc_survival_gain());
     for (unsigned i = 0; i < ARC_RX_STAGE_COUNT; ++i)
         printf("%s%u", i ? "," : "", table->spans[i]);
     printf("\n");
+    printf("C5VRX_ARC_CAPTURE gain=%u rf_stage=%u rf_code=%u bb=%u fine=%u "
+           "filter=%u adc=%u iq=%u/%d/%d\n",
+           tuple->gain_tuple.gain_index, tuple->gain_tuple.rf_stage,
+           tuple->gain_tuple.rf_code, tuple->gain_tuple.bb_code,
+           tuple->gain_tuple.fine_code, tuple->rx_filter_mode,
+           tuple->adc_rate_sel, tuple->iq_correction.enable,
+           tuple->iq_correction.coef0, tuple->iq_correction.coef1);
     lab_print_row("ARC_ORACLE", NULL);
 }
 
@@ -2880,6 +2890,7 @@ static void analog_agc_task(void *arg)
         s_rx_profile == RX_PROFILE_RANGE_V2_EXP ? 2u : 34u);
     arc_controller_t arc_controller;
     arc_controller_reset(&arc_controller, rf_get_arc_gain_table(), s_current_gain);
+    uint32_t seen_arc_generation = rf_get_arc_generation();
     uint32_t receive_generation = s_receive_generation;
     int boot_grace_ticks = 20;
 
@@ -2991,6 +3002,18 @@ static void analog_agc_task(void *arg)
                 s_rx_profile == RX_PROFILE_RANGE_V2_EXP ? 2u : 34u);
             arc_controller_reset(&arc_controller, rf_get_arc_gain_table(),
                                  s_current_gain);
+        }
+
+        /* rf_set_channel() recaptures the vendor table after every successful
+         * retune. Reset even when the caller did not change profile generation
+         * so no controller can retain a tuple from the previous channel. */
+        uint32_t arc_generation = rf_get_arc_generation();
+        if (seen_arc_generation != arc_generation) {
+            seen_arc_generation = arc_generation;
+            target_gain = rf_get_arc_survival_gain();
+            apply_rx_gain_tracked(target_gain);
+            arc_controller_reset(&arc_controller, rf_get_arc_gain_table(),
+                                 target_gain);
         }
 
         if (menu_was_active) {

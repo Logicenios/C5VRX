@@ -90,6 +90,11 @@ extern int lmac_stop_hw_txq(void);
 
 static const char *TAG = "c5vrx3_rf";
 static arc_gain_table_t s_arc_gain_table;
+static rf_phy_snapshot_t s_arc_receive_tuple;
+static uint32_t s_arc_generation;
+static uint8_t s_current_gain_val = 52u;
+
+static void arc_capture_vendor_state(void);
 
 /**
  * Disable all 5 LMAC MAC TX hardware queues.
@@ -408,7 +413,7 @@ esp_err_t rf_start(void)
     /* Vendor PHY initialization has now generated both valid RX gain tables
      * and completed its own calibration. Capture that state read-only before
      * C5VRX freezes receiver ownership. */
-    arc_phy_capture_gain_table(&s_arc_gain_table);
+    arc_capture_vendor_state();
 
     /* Disable PHY PLL / RXCAL tracking timer if compiled in, so it never
      * recalibrates RF / RX hardware during continuous analog video reception.
@@ -435,8 +440,6 @@ extern void phy_fft_scale_force(bool force_en, int8_t force_value);
  * while live because they reconfigure clocks and receive state. */
 extern int phy_get_noise_floor(void) __attribute__((weak));
 extern int phy_get_rssi(void) __attribute__((weak));
-
-static uint8_t s_current_gain_val = 52u;
 
 /* Standard FPV Channel Table: 6 Bands x 8 Channels = 48 Channels
  * RaceBand (R), Boscam A (A), Boscam B (B), Boscam E (E), FatShark (F), LowBand (L) */
@@ -566,6 +569,20 @@ void rf_get_phy_snapshot(rf_phy_snapshot_t *snapshot)
     }
 }
 
+static void arc_capture_vendor_state(void)
+{
+    arc_phy_capture_gain_table(&s_arc_gain_table);
+    rf_get_phy_snapshot(&s_arc_receive_tuple);
+    /* Publish last so readers never associate a new generation with a tuple
+     * that is still being filled. The controller is the sole retune owner. */
+    ++s_arc_generation;
+}
+
+const rf_phy_snapshot_t *rf_get_arc_receive_tuple(void)
+{
+    return &s_arc_receive_tuple;
+}
+
 void rf_set_fft_scale_force(bool force, int8_t value)
 {
     /* The symbol is exported by the ESP32-C5 ROM PHY and is also used by
@@ -602,6 +619,11 @@ const arc_gain_table_t *rf_get_arc_gain_table(void)
 uint8_t rf_get_arc_survival_gain(void)
 {
     return arc_gain_highest_rf_stage_start(&s_arc_gain_table);
+}
+
+uint32_t rf_get_arc_generation(void)
+{
+    return s_arc_generation;
 }
 
 const fpv_channel_t *rf_get_current_channel(void)
@@ -711,6 +733,12 @@ esp_err_t rf_set_channel(size_t index)
     phy_rfagc_disable();
     phy_wifi_fbw_sel(s_analog_bw40 ? 1u : 0u);
     phy_force_rx_gain(true, s_current_gain_val);
+
+    /* A channel change may make the vendor PHY regenerate its active RX gain
+     * table and calibrated receive state. Recapture only after the retune and
+     * all receive-state reassertions succeeded, then publish one generation
+     * change so ARC cannot keep stale spans/maxima or temporal state. */
+    arc_capture_vendor_state();
 
     /* Commit logical state only after the supported bootstrap succeeded. */
     s_current_band = new_band;

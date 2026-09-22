@@ -145,9 +145,14 @@ The IQ correction register is `0x600a0438`:
 ```
 
 Normal vendor PHY calibration already derives and writes these coefficients.
-ARC captures them read-only in every PHY snapshot. The coefficients remain
-named `coef0` and `coef1` because the binary proves their width and use but not
-a safe public phase/magnitude label.
+The raw signed register ranges are `-64..+63` and `-32..+31`; the vendor
+calibration routine uses the narrower symmetric clamps `+-63` and `+-31`.
+ARC captures the vendor-calibrated values read-only after initial PHY setup and
+again after every successful retune, together with the coupled ADC/filter state
+and decoded gain tuple. A monotonically increasing receive generation makes the
+controller discard stale temporal state. The coefficients remain named `coef0`
+and `coef1` because the binary proves their width and use but not a safe public
+phase/magnitude label.
 
 RXDC follows the same ownership principle: vendor initialization may calibrate
 it, but the invasive estimator/calibration loops do not run during live video.
@@ -173,8 +178,11 @@ LOCK
 
 The controller observes transport, sync, Q4 power/coherence, clipping, origin
 occupancy and endpoint-winding risk hierarchically. A large amplitude cannot
-hide clipping or bad phase geometry. Gain changes settle for 500 ms. Clean
-LOCK never performs gain, filter, AFC, estimator or calibration writes.
+hide clipping or bad phase geometry. Gain changes normally settle for 500 ms,
+but severe clipping bypasses that hold and immediately removes four gain
+indices. Persistent no-sync pins the survival index regardless of noisy Q4
+phase scores. Clean LOCK never performs gain, filter, AFC, estimator or
+calibration writes.
 
 The `H` console command prints the captured table, current decoded tuple,
 filter/ADC state and vendor IQ correction without changing PHY ownership.

@@ -52,8 +52,6 @@ static inline uint8_t arc_step_gain(const arc_controller_t *arc, int delta)
 static inline uint8_t arc_controller_tick(arc_controller_t *arc,
                                           const arc_observation_t *o)
 {
-    if (arc->settle) { --arc->settle; return arc->gain; }
-
     bool clean = o->sync && o->sync_quality >= 70 && o->q_phase >= 65 &&
                  o->p_median >= 14 && o->p_median <= 34 &&
                  o->clip_permille <= 16 && o->origin_permille < 500 &&
@@ -71,12 +69,34 @@ static inline uint8_t arc_controller_tick(arc_controller_t *arc,
         return arc->gain;
     }
 
+    /* Front-end protection above must remain live during settling. All
+     * ordinary decisions wait for the new hardware state to stabilize. */
+    if (arc->settle) { --arc->settle; return arc->gain; }
+
+    /* Absence of convincing video semantics is not evidence that more
+     * downstream gain will recover a carrier. After a persistent loss, pin
+     * the first entry of the highest RF stage and hold it until sync returns.
+     * This prevents noisy Q4 phase scores from walking G61 toward G89. */
+    if (!o->sync) {
+        if (arc->lost_ticks < 10u) ++arc->lost_ticks;
+        arc->weak_ticks = arc->hot_ticks = 0u;
+        if (arc->lost_ticks >= 10u) {
+            if (arc->gain != arc->survival_gain) {
+                arc->gain = arc->survival_gain;
+                arc->settle = 10u;
+            }
+            arc->state = ARC_ACQUIRE;
+        }
+        return arc->gain;
+    }
+    arc->lost_ticks = 0u;
+
     if (arc->state == ARC_LOCK) {
         if (clean) {
             arc->weak_ticks = arc->hot_ticks = arc->lost_ticks = 0u;
             return arc->gain; /* LOCK invariant: clean IQ causes no PHY writes. */
         }
-        if (!o->sync || o->sync_quality < 40) {
+        if (o->sync_quality < 40) {
             if (++arc->lost_ticks < 10u) return arc->gain;
         } else if (weak) {
             if (++arc->weak_ticks < 15u) return arc->gain;
@@ -102,11 +122,6 @@ static inline uint8_t arc_controller_tick(arc_controller_t *arc,
     } else if (weak && o->q_phase >= 18) {
         if (++arc->weak_ticks >= 4u) next = arc_step_gain(arc, +1);
         arc->hot_ticks = 0u;
-    } else if (!o->sync && o->q_phase < 18 && o->origin_permille > 800) {
-        /* Carrier loss selects maximum RF sensitivity with minimum downstream
-         * gain in that RF stage. It does not fill Q4 with amplified noise. */
-        if (++arc->lost_ticks >= 20u) next = arc->survival_gain;
-        arc->hot_ticks = arc->weak_ticks = 0u;
     } else {
         arc->weak_ticks = arc->hot_ticks = arc->lost_ticks = 0u;
     }
