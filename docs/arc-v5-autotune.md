@@ -16,7 +16,7 @@ persistent local gain-response model
         +-- low confidence ---> ARC V3 search
         |
         v
-short VERIFY
+VERIFY >= 500 ms
         |
         +-- wrong direction --> immediate bounded rollback
         |
@@ -62,9 +62,11 @@ model automatically.
 
 1. NO_CARRIER never trains the model.
 2. Diagnostics/manual gain own the actuator because V5 only ticks while AGC is ACTIVE.
-3. Wrong-direction predictive moves can roll back during VERIFY.
-4. Low-confidence regions fall back to the existing ARC V3 behavior.
-5. The live 40 MS/s path remains hardware paced; V5 runs only on completed control windows.
+3. Wrong-direction predictive moves can roll back during VERIFY, but accepted learning waits for at least the hardware-proven 500 ms settle interval.
+4. Fusion CLEAN is an authoritative zero-write hold, even when V3's narrower classifier would prefer a trim.
+5. Predictive confidence is required on the exact gain edge being extrapolated; neighboring confidence is not enough.
+6. Low-confidence regions fall back to the existing ARC V3 behavior.
+7. The live 40 MS/s path remains hardware paced; V5 runs only on completed control windows.
 
 ## Factory calibration
 
