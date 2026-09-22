@@ -739,6 +739,112 @@ starvation remains able to reverse direction once the guard expires.
 LOCK now tolerates a broader filtered target region and requires six persistent
 bad filtered observations before leaving the zero-write state.
 
+### Post-fix hardware validation and calibration anchors
+
+The temporal ARC V3 fix was re-tested with repeated moving hardware walks.
+The strongest validation was a **close -> far -> close** trajectory. The
+observed gain sequence followed the physical RF trend in both directions:
+
+```text
+close -> far:
+G16 -> G54 -> G74/G73 -> G78 -> G79 -> G81
+
+far -> close:
+G81 -> G77 -> G69 -> G56 -> G45 -> G42 -> G39
+```
+
+The previously observed large short-fade reversal (`G66 -> G81` while
+walking toward the VTX) was not reproduced in this run. Long plateaus at a
+useful gain state are now common, which is consistent with the five-window
+median, asymmetric persistence and reversal guard doing their intended job.
+
+A separate medium -> extra-close walk similarly descended through:
+
+```text
+G62/G68 -> G54 -> G50 -> G46 -> G38 -> G35 -> G31 -> G14/G17
+```
+
+At the far end of the close/far/close test the raw-Q4 vector was still often
+healthy even at the vendor ceiling, for example:
+
+```text
+G78 P10 Q88
+G79 P17 Q99
+G81 P25 Q99
+G81 P17 Q99
+```
+
+The operator also reported that the point previously treated as "far" now
+produced good video. This is strong practical evidence that earlier usable
+range was being limited substantially by gain placement before Q4. It is **not
+yet a calibrated sensitivity result**: no RF input power or step attenuation
+was measured.
+
+Across all current hardware walks, the empirical operating regions are now:
+
+```text
+very strong / ~1 cm   -> G14-G18
+strong / close        -> roughly G35-G46
+medium-close          -> roughly G50-G56
+medium / weak         -> roughly G60-G74
+very weak / far       -> roughly G77-G81
+```
+
+These ranges are **calibration anchors, not a distance table**. Indoor
+multipath, antenna orientation and VTX power can move the optimum state. The
+useful conclusion is that the correct vendor state spans almost the entire
+generated table and moves monotonically enough to support a calibrated search
+policy.
+
+A future C5VRX gain calibration layer should therefore map **raw-Q4 condition
+to search anchors**, not meters to gain. A first coarse ladder supported by
+hardware evidence is:
+
+```text
+G16 -> G40 -> G54 -> G70 -> G78 -> G81
+```
+
+Example policy:
+
+```text
+hard-starved at G54 -> jump toward G70
+still starved       -> try G78
+TARGET               -> refine locally / LOCK
+
+overloaded at G78   -> jump toward G70
+still high          -> try G54
+TARGET               -> refine locally / LOCK
+```
+
+The existing ARC V3 controller intentionally remains more conservative than
+this proposed calibration search. The next calibration step should collect
+per-state P/Q/origin/clip/winding statistics and, ideally, repeat them against
+known RF attenuation. That would turn the empirical ladder into a reproducible
+gain-transition table without assuming that vendor gain indices are linear dB.
+
+The new working model for the original range problem is therefore:
+
+```text
+weak RF
+  -> insufficient pre-Q4 generated gain
+  -> Q4/I4 vector collapses around the origin
+  -> phase information is quantized away
+  -> FM/CVBS quality collapses early
+
+ARC V3:
+weak RF
+  -> raise vendor gain until Q4 is usefully occupied
+  -> hold with temporal hysteresis
+  -> preserve phase information for the demodulator
+```
+
+Once ARC V3 reaches G81 and sustained Q4 coherence still collapses, that point
+is much closer to the **real receiver sensitivity boundary**. Beyond that
+point, further improvement must come from the RF/ADC/filter chain or from
+making better use of the remaining weak-signal phase information downstream;
+digital amplitude scaling after Q4 cannot reconstruct phase that was already
+lost in quantization.
+
 ### Demodulator boundary
 
 `U` does not mix frontend discovery with demodulator selection. Q4 placement is
