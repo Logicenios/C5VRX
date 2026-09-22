@@ -75,6 +75,12 @@ int main(void)
         (void)tick_values(&a, 17, 99, 0, 0);
     assert(a.gain == 57 && a.state == ARC_V3_LOCK);
 
+    /* Do not chain emergency cuts from stale post-write observations. */
+    arc_v3_controller_reset(&a, &t, 62);
+    assert(tick_values(&a, 65, 99, 400, 0) == 62);
+    assert(tick_values(&a, 65, 99, 400, 0) == 62);
+    assert(tick_values(&a, 65, 99, 400, 0) == 58);
+
     /* Close hardware pattern: repeated strong overload keeps moving down. */
     arc_v3_controller_reset(&a, &t, 62);
     a.settle = 0;
