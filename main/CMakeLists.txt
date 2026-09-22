@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "arc_phy.c"
         "arc_v3_controller.c"
+        "arc_v5_autotune.c"
         "rx_auto_lab.c"
         "rf.c"
         "video.c"
