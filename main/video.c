@@ -37,6 +37,7 @@
 #include "fusion_temporal.h"
 #include "fusion_optimizer.h"
 #include "arc_controller.h"
+#include "rx_auto_lab.h"
 #include "trajectory_v2_lut.h"
 #include "hal/parlio_ll.h"
 #include "hal/usb_serial_jtag_ll.h"
@@ -158,6 +159,13 @@ BITSCRAMBLER_PROGRAM(s_fm_traj_program, "fm_traj");
 #define LAB_FFT_DWELL_MS   750u      /* short bounded dwell; lab-only, never production */
 #define LAB_BW_SETTLE_MS   800u      /* allow analog filter change before measurement */
 #define LAB_PREQ4_SETTLE_MS 850u      /* raw-Q4 settle after TX/noise-state change */
+#define RX_AUTO_SAMPLE_COUNT       5u
+#define RX_AUTO_SAMPLE_SPACING_MS 60u
+#define RX_AUTO_GAIN_SETTLE_MS    600u
+#define RX_AUTO_BW_SETTLE_MS      800u
+#define RX_AUTO_OFFSET_SETTLE_MS  650u
+#define RX_AUTO_TOP_COUNT         3u
+#define RX_AUTO_PROOF_ROUNDS      5u
 
 typedef enum {
     VIDEO_STD_MODE_AUTO = 0,
@@ -2108,6 +2116,482 @@ static void lab_run_frequency_probe(void)
            best_offset, best_score, saved_offset);
 }
 
+
+typedef struct {
+    uint8_t gain;
+    bool bw40;
+    int offset_khz;
+    rx_auto_observation_t obs;
+    bool valid;
+    bool ref_stable;
+} rx_auto_candidate_t;
+
+typedef struct {
+    uint8_t gain;
+    uint8_t shadow_gain;
+    analog_agc_mode_t agc_mode;
+    agc_state_t agc_state;
+    rf_bw_mode_t bw_mode;
+    bool bw40;
+    afc_mode_t afc_mode;
+    int offset_khz;
+    bool quiet;
+    bool profile_fft;
+    int8_t profile_fft_value;
+} rx_auto_saved_state_t;
+
+static int rx_auto_median_int(int *v, unsigned n)
+{
+    for (unsigned i = 1; i < n; ++i) {
+        int x = v[i];
+        unsigned j = i;
+        while (j > 0 && v[j - 1] > x) {
+            v[j] = v[j - 1];
+            --j;
+        }
+        v[j] = x;
+    }
+    return v[n / 2u];
+}
+
+static uint32_t rx_auto_transport_delta(const hw_transport_counters_t *base,
+                                        const hw_transport_counters_t *now)
+{
+    return lab_delta(now->parl_rx_wovf_count, base->parl_rx_wovf_count) +
+           lab_delta(now->parl_tx_rempty_count, base->parl_tx_rempty_count) +
+           lab_delta(now->parl_tx_eof_count, base->parl_tx_eof_count) +
+           lab_delta(now->gdma_in_fault_count, base->gdma_in_fault_count) +
+           lab_delta(now->gdma_out_fault_count, base->gdma_out_fault_count) +
+           lab_delta(now->bs_fifo_empty_count, base->bs_fifo_empty_count) +
+           lab_delta(now->bs_eof_overload_count, base->bs_eof_overload_count);
+}
+
+static rx_auto_observation_t rx_auto_collect_observation(void)
+{
+    int p[RX_AUTO_SAMPLE_COUNT];
+    int q[RX_AUTO_SAMPLE_COUNT];
+    int clip[RX_AUTO_SAMPLE_COUNT];
+    int origin[RX_AUTO_SAMPLE_COUNT];
+    int skew[RX_AUTO_SAMPLE_COUNT];
+    int cross[RX_AUTO_SAMPLE_COUNT];
+    int winding[RX_AUTO_SAMPLE_COUNT];
+    int sync[RX_AUTO_SAMPLE_COUNT];
+    hw_transport_counters_t base = lab_counter_snapshot();
+
+    for (unsigned i = 0; i < RX_AUTO_SAMPLE_COUNT; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(RX_AUTO_SAMPLE_SPACING_MS));
+        p[i] = s_last_p_median;
+        q[i] = s_last_q_phase;
+        clip[i] = s_last_clip_permille;
+        origin[i] = s_last_origin_permille;
+        skew[i] = s_last_iq_skew_permille;
+        cross[i] = s_last_iq_cross_permille;
+        winding[i] = s_last_winding_permille;
+        sync[i] = s_last_sync_quality;
+    }
+
+    hw_transport_counters_t now = lab_counter_snapshot();
+    return (rx_auto_observation_t) {
+        .p_median = rx_auto_median_int(p, RX_AUTO_SAMPLE_COUNT),
+        .q_phase = rx_auto_median_int(q, RX_AUTO_SAMPLE_COUNT),
+        .clip_permille = rx_auto_median_int(clip, RX_AUTO_SAMPLE_COUNT),
+        .origin_permille = rx_auto_median_int(origin, RX_AUTO_SAMPLE_COUNT),
+        .iq_skew_permille = rx_auto_median_int(skew, RX_AUTO_SAMPLE_COUNT),
+        .iq_cross_permille = rx_auto_median_int(cross, RX_AUTO_SAMPLE_COUNT),
+        .winding_permille = rx_auto_median_int(winding, RX_AUTO_SAMPLE_COUNT),
+        .sync_quality = rx_auto_median_int(sync, RX_AUTO_SAMPLE_COUNT),
+        .transport_faults = rx_auto_transport_delta(&base, &now),
+    };
+}
+
+static void rx_auto_print_observation(const char *stage,
+                                      const rx_auto_candidate_t *candidate)
+{
+    printf("C5VRX_RX_AUTO_OBS stage=%s gain=%u bw=%u offset_khz=%d "
+           "class=%s ref_stable=%u p=%d q=%d clip_pm=%d origin_pm=%d "
+           "iq_skew_pm=%d iq_cross_pm=%d winding_pm=%d sync_q=%d faults=%lu\n",
+           stage, candidate->gain, candidate->bw40 ? 40u : 20u,
+           candidate->offset_khz,
+           rx_auto_class_name(rx_auto_classify(&candidate->obs)),
+           candidate->ref_stable ? 1u : 0u,
+           candidate->obs.p_median, candidate->obs.q_phase,
+           candidate->obs.clip_permille, candidate->obs.origin_permille,
+           candidate->obs.iq_skew_permille, candidate->obs.iq_cross_permille,
+           candidate->obs.winding_permille, candidate->obs.sync_quality,
+           (unsigned long)candidate->obs.transport_faults);
+}
+
+static void rx_auto_apply_config(uint8_t gain, bool bw40, int offset_khz,
+                                 unsigned settle_ms)
+{
+    if (s_current_bw40 != bw40) apply_rf_bandwidth(bw40);
+    if (rf_get_frequency_offset_khz() != offset_khz)
+        apply_frequency_offset_khz_tracked(offset_khz);
+    if (s_current_gain != gain) lab_apply_vendor_gain(gain);
+    vTaskDelay(pdMS_TO_TICKS(settle_ms));
+}
+
+static void rx_auto_insert_top(rx_auto_candidate_t top[RX_AUTO_TOP_COUNT],
+                               const rx_auto_candidate_t *candidate)
+{
+    if (!candidate->valid || !candidate->ref_stable ||
+        rx_auto_classify(&candidate->obs) == RX_AUTO_REJECT)
+        return;
+
+    for (unsigned i = 0; i < RX_AUTO_TOP_COUNT; ++i) {
+        if (!top[i].valid || rx_auto_better(&candidate->obs, &top[i].obs)) {
+            for (unsigned j = RX_AUTO_TOP_COUNT - 1u; j > i; --j)
+                top[j] = top[j - 1u];
+            top[i] = *candidate;
+            top[i].valid = true;
+            return;
+        }
+    }
+}
+
+static bool rx_auto_measure_against_reference(const char *stage,
+                                              uint8_t gain, bool bw40,
+                                              int offset_khz,
+                                              unsigned settle_ms,
+                                              uint8_t ref_gain,
+                                              rx_auto_observation_t *ref_before,
+                                              rx_auto_candidate_t *candidate)
+{
+    rx_auto_apply_config(gain, bw40, offset_khz, settle_ms);
+    hw_transport_counters_t base = lab_counter_snapshot();
+    candidate->gain = gain;
+    candidate->bw40 = bw40;
+    candidate->offset_khz = offset_khz;
+    candidate->obs = rx_auto_collect_observation();
+    candidate->valid = true;
+    lab_print_row(stage, &base);
+
+    rx_auto_apply_config(ref_gain, true, 0, RX_AUTO_GAIN_SETTLE_MS);
+    rx_auto_observation_t ref_after = rx_auto_collect_observation();
+    candidate->ref_stable = rx_auto_reference_stable(ref_before, &ref_after);
+    rx_auto_print_observation(stage, candidate);
+
+    printf("C5VRX_RX_AUTO_REF stage=%s stable=%u before_p=%d before_q=%d "
+           "before_origin=%d before_clip=%d after_p=%d after_q=%d "
+           "after_origin=%d after_clip=%d\n",
+           stage, candidate->ref_stable ? 1u : 0u,
+           ref_before->p_median, ref_before->q_phase,
+           ref_before->origin_permille, ref_before->clip_permille,
+           ref_after.p_median, ref_after.q_phase,
+           ref_after.origin_permille, ref_after.clip_permille);
+    *ref_before = ref_after;
+    return candidate->ref_stable;
+}
+
+static void rx_auto_restore_saved(const rx_auto_saved_state_t *saved)
+{
+    if (s_current_bw40 != saved->bw40) apply_rf_bandwidth(saved->bw40);
+    if (rf_get_frequency_offset_khz() != saved->offset_khz)
+        apply_frequency_offset_khz_tracked(saved->offset_khz);
+    if (s_current_gain != saved->gain) lab_apply_vendor_gain(saved->gain);
+
+    s_shadow_gain = saved->shadow_gain;
+    s_rf_bw_mode = saved->bw_mode;
+    s_afc_mode = saved->afc_mode;
+    s_agc_state = saved->agc_state;
+    s_agc_mode = saved->agc_mode;
+    s_lab_quiet = saved->quiet;
+
+    if (saved->profile_fft && saved->profile_fft_value != 0) {
+        s_last_phy_write_us = esp_timer_get_time();
+        s_last_phy_write_kind = PHY_WRITE_FFT;
+        rf_set_fft_scale_force(true, saved->profile_fft_value);
+        s_profile_fft_forced = true;
+    }
+}
+
+static void rx_auto_freeze_winner(const rx_auto_candidate_t *winner,
+                                  bool saved_quiet)
+{
+    rx_auto_apply_config(winner->gain, winner->bw40, winner->offset_khz, 200u);
+    s_shadow_gain = winner->gain;
+    s_agc_mode = ANALOG_AGC_MANUAL;
+    s_agc_state = AGC_STATE_TRACK;
+    s_rf_bw_mode = winner->bw40 ? RF_BW_MODE_BW40 : RF_BW_MODE_BW20;
+    s_afc_mode = AFC_MODE_HOLD;
+    s_lab_quiet = saved_quiet;
+}
+
+static void rx_auto_refine_overload(uint8_t ref_gain,
+                                    rx_auto_observation_t *ref_before,
+                                    rx_auto_candidate_t top[RX_AUTO_TOP_COUNT],
+                                    unsigned *stable_count)
+{
+    if (!top[0].valid) return;
+    int center = top[0].gain;
+    int lo = center - 3;
+    int hi = center + 3;
+    if (lo < 2) lo = 2;
+    if (hi > ref_gain) hi = ref_gain;
+
+    for (int gain = lo; gain <= hi; ++gain) {
+        rx_auto_candidate_t candidate = {0};
+        if (rx_auto_measure_against_reference("RX_AUTO_GAIN_REFINE",
+                                              (uint8_t)gain, true, 0,
+                                              RX_AUTO_GAIN_SETTLE_MS,
+                                              ref_gain, ref_before,
+                                              &candidate)) {
+            ++*stable_count;
+            rx_auto_insert_top(top, &candidate);
+        }
+    }
+}
+
+/* ARC V3 / RX AUTO LAB
+ *
+ * This is deliberately an opt-in characterization engine, not production ARC.
+ * It separates Q4 placement from true RF sensitivity:
+ *   1) repeated reference-guarded gain candidate search;
+ *   2) BW40/BW20 only on the best gain candidates;
+ *   3) carrier centering only on the best gain+BW tuple;
+ *   4) alternating baseline/winner proof;
+ *   5) ACQUIRED / OVERLOAD / RF_LIMIT / UNSTABLE classification.
+ *
+ * Clean live reception remains untouched until the user explicitly invokes U.
+ */
+static void lab_run_rx_auto(void)
+{
+    if (s_gain_sweep.active || s_menu_active || s_pre_q4_probe_active) {
+        printf("C5VRX_RX_AUTO_REFUSED reason=%s\n",
+               s_gain_sweep.active ? "gain_sweep_active" :
+               s_menu_active ? "menu_active" : "preq4_busy");
+        return;
+    }
+
+    const arc_gain_table_t *table = rf_get_arc_gain_table();
+    const uint8_t ref_gain = rf_get_arc_survival_gain();
+    if (ref_gain > table->max_index) {
+        printf("C5VRX_RX_AUTO_REFUSED reason=invalid_vendor_table first=%u max=%u\n",
+               ref_gain, table->max_index);
+        return;
+    }
+
+    const rx_auto_saved_state_t saved = {
+        .gain = s_current_gain,
+        .shadow_gain = s_shadow_gain,
+        .agc_mode = s_agc_mode,
+        .agc_state = s_agc_state,
+        .bw_mode = s_rf_bw_mode,
+        .bw40 = s_current_bw40,
+        .afc_mode = s_afc_mode,
+        .offset_khz = rf_get_frequency_offset_khz(),
+        .quiet = s_lab_quiet,
+        .profile_fft = s_profile_fft_forced,
+        .profile_fft_value = s_fft_best_value,
+    };
+
+    s_pre_q4_probe_active = true;
+    s_agc_mode = ANALOG_AGC_MANUAL;
+    s_agc_state = AGC_STATE_LEARN;
+    s_rf_bw_mode = RF_BW_MODE_BW40;
+    s_afc_mode = AFC_MODE_HOLD;
+    s_lab_quiet = true;
+
+    if (s_profile_fft_forced) {
+        s_last_phy_write_us = esp_timer_get_time();
+        s_last_phy_write_kind = PHY_WRITE_FFT;
+        rf_set_fft_scale_force(false, 0);
+        s_profile_fft_forced = false;
+    }
+
+    lab_reset_correlation();
+    rx_auto_apply_config(ref_gain, true, 0, RX_AUTO_GAIN_SETTLE_MS);
+    rx_auto_observation_t ref_before = rx_auto_collect_observation();
+
+    const bool overload_mode = rx_auto_is_overload(&ref_before);
+    printf("C5VRX_RX_AUTO_BEGIN first=%u max=%u baseline_class=%s "
+           "mode=%s samples=%u proof_rounds=%u demod=%u\n",
+           ref_gain, table->max_index,
+           rx_auto_class_name(rx_auto_classify(&ref_before)),
+           overload_mode ? "OVERLOAD_DESCENT" : "HIGH_STAGE",
+           RX_AUTO_SAMPLE_COUNT, RX_AUTO_PROOF_ROUNDS,
+           (unsigned)s_demod_mode);
+
+    rx_auto_candidate_t top_gain[RX_AUTO_TOP_COUNT] = {0};
+    unsigned stable_gain_count = 0;
+    unsigned unstable_gain_count = 0;
+    unsigned rf_limit_votes = 0;
+
+    if (overload_mode) {
+        for (int gain = ref_gain; gain >= 2; gain -= 4) {
+            rx_auto_candidate_t candidate = {0};
+            bool stable = rx_auto_measure_against_reference(
+                "RX_AUTO_GAIN", (uint8_t)gain, true, 0,
+                RX_AUTO_GAIN_SETTLE_MS, ref_gain, &ref_before, &candidate);
+            if (stable) {
+                ++stable_gain_count;
+                if (rx_auto_is_rf_limit(&candidate.obs)) ++rf_limit_votes;
+                rx_auto_insert_top(top_gain, &candidate);
+            } else {
+                ++unstable_gain_count;
+            }
+        }
+        rx_auto_refine_overload(ref_gain, &ref_before, top_gain,
+                                &stable_gain_count);
+    } else {
+        for (unsigned gain = ref_gain; gain <= table->max_index; ++gain) {
+            rx_auto_candidate_t candidate = {0};
+            bool stable = rx_auto_measure_against_reference(
+                "RX_AUTO_GAIN", (uint8_t)gain, true, 0,
+                RX_AUTO_GAIN_SETTLE_MS, ref_gain, &ref_before, &candidate);
+            if (stable) {
+                ++stable_gain_count;
+                if (rx_auto_is_rf_limit(&candidate.obs)) ++rf_limit_votes;
+                rx_auto_insert_top(top_gain, &candidate);
+            } else {
+                ++unstable_gain_count;
+            }
+        }
+    }
+
+    printf("C5VRX_RX_AUTO_GAIN_DONE stable=%u unstable=%u rf_limit_votes=%u "
+           "top0=%d top1=%d top2=%d\n",
+           stable_gain_count, unstable_gain_count, rf_limit_votes,
+           top_gain[0].valid ? (int)top_gain[0].gain : -1,
+           top_gain[1].valid ? (int)top_gain[1].gain : -1,
+           top_gain[2].valid ? (int)top_gain[2].gain : -1);
+
+    rx_auto_candidate_t best_bw = {0};
+    for (unsigned i = 0; i < RX_AUTO_TOP_COUNT; ++i) {
+        if (!top_gain[i].valid) continue;
+        for (unsigned bw_i = 0; bw_i < 2u; ++bw_i) {
+            bool bw40 = bw_i == 0u;
+            rx_auto_candidate_t candidate = {0};
+            if (rx_auto_measure_against_reference(
+                    "RX_AUTO_BW", top_gain[i].gain, bw40, 0,
+                    RX_AUTO_BW_SETTLE_MS, ref_gain, &ref_before, &candidate) &&
+                rx_auto_classify(&candidate.obs) != RX_AUTO_REJECT &&
+                (!best_bw.valid || rx_auto_better(&candidate.obs, &best_bw.obs))) {
+                best_bw = candidate;
+                best_bw.valid = true;
+            }
+        }
+    }
+
+    rx_auto_candidate_t best_center = best_bw;
+    if (best_bw.valid) {
+        static const int coarse_offsets[] = {
+            -1000, -750, -500, -250, 0, 250, 500, 750, 1000
+        };
+        for (unsigned i = 0; i < sizeof(coarse_offsets) / sizeof(coarse_offsets[0]); ++i) {
+            rx_auto_candidate_t candidate = {0};
+            if (rx_auto_measure_against_reference(
+                    "RX_AUTO_CENTER_COARSE", best_bw.gain, best_bw.bw40,
+                    coarse_offsets[i], RX_AUTO_OFFSET_SETTLE_MS,
+                    ref_gain, &ref_before, &candidate) &&
+                rx_auto_classify(&candidate.obs) != RX_AUTO_REJECT &&
+                (!best_center.valid ||
+                 rx_auto_better(&candidate.obs, &best_center.obs))) {
+                best_center = candidate;
+                best_center.valid = true;
+            }
+        }
+
+        int center = best_center.offset_khz;
+        for (int delta = -200; delta <= 200; delta += 100) {
+            int offset = center + delta;
+            if (offset < -1000 || offset > 1000) continue;
+            rx_auto_candidate_t candidate = {0};
+            if (rx_auto_measure_against_reference(
+                    "RX_AUTO_CENTER_FINE", best_bw.gain, best_bw.bw40,
+                    offset, RX_AUTO_OFFSET_SETTLE_MS,
+                    ref_gain, &ref_before, &candidate) &&
+                rx_auto_classify(&candidate.obs) != RX_AUTO_REJECT &&
+                rx_auto_better(&candidate.obs, &best_center.obs)) {
+                best_center = candidate;
+                best_center.valid = true;
+            }
+        }
+    }
+
+    unsigned proof_wins = 0;
+    unsigned proof_stable = 0;
+    rx_auto_observation_t proof_last = {0};
+    if (best_center.valid) {
+        for (unsigned round = 0; round < RX_AUTO_PROOF_ROUNDS; ++round) {
+            rx_auto_apply_config(ref_gain, true, 0, RX_AUTO_GAIN_SETTLE_MS);
+            rx_auto_observation_t before = rx_auto_collect_observation();
+
+            rx_auto_apply_config(best_center.gain, best_center.bw40,
+                                 best_center.offset_khz,
+                                 RX_AUTO_BW_SETTLE_MS);
+            rx_auto_observation_t winner = rx_auto_collect_observation();
+
+            rx_auto_apply_config(ref_gain, true, 0, RX_AUTO_GAIN_SETTLE_MS);
+            rx_auto_observation_t after = rx_auto_collect_observation();
+
+            bool stable = rx_auto_reference_stable(&before, &after);
+            bool wins = stable &&
+                        rx_auto_better(&winner, &before) &&
+                        rx_auto_better(&winner, &after);
+            if (stable) ++proof_stable;
+            if (wins) ++proof_wins;
+            proof_last = winner;
+
+            printf("C5VRX_RX_AUTO_PROOF round=%u stable=%u wins=%u "
+                   "base0_p=%d base0_q=%d win_p=%d win_q=%d win_clip=%d "
+                   "win_origin=%d win_class=%s base1_p=%d base1_q=%d\n",
+                   round + 1u, stable ? 1u : 0u, wins ? 1u : 0u,
+                   before.p_median, before.q_phase,
+                   winner.p_median, winner.q_phase, winner.clip_permille,
+                   winner.origin_permille,
+                   rx_auto_class_name(rx_auto_classify(&winner)),
+                   after.p_median, after.q_phase);
+        }
+    }
+
+    bool acquired = best_center.valid &&
+                    proof_stable >= 4u &&
+                    proof_wins >= 4u &&
+                    rx_auto_classify(&proof_last) >= RX_AUTO_USABLE;
+
+    const char *status = "INCONCLUSIVE";
+    if (acquired) {
+        status = "ACQUIRED";
+    } else if (overload_mode && (!best_center.valid ||
+               rx_auto_classify(&best_center.obs) == RX_AUTO_REJECT)) {
+        status = "OVERLOAD";
+    } else if (stable_gain_count > 0u &&
+               rf_limit_votes * 4u >= stable_gain_count * 3u) {
+        status = "RF_LIMIT";
+    } else if (unstable_gain_count > stable_gain_count) {
+        status = "UNSTABLE";
+    }
+
+    if (acquired) {
+        rx_auto_freeze_winner(&best_center, saved.quiet);
+    } else {
+        rx_auto_restore_saved(&saved);
+    }
+    s_pre_q4_probe_active = false;
+
+    printf("C5VRX_RX_AUTO_RESULT status=%s gain=%d bw=%d offset_khz=%d "
+           "class=%s proof_wins=%u proof_stable=%u stable_gain=%u "
+           "unstable_gain=%u rf_limit_votes=%u frozen=%u\n",
+           status,
+           best_center.valid ? (int)best_center.gain : -1,
+           best_center.valid ? (best_center.bw40 ? 40 : 20) : -1,
+           best_center.valid ? best_center.offset_khz : 0,
+           best_center.valid ?
+               rx_auto_class_name(rx_auto_classify(&best_center.obs)) : "NONE",
+           proof_wins, proof_stable, stable_gain_count,
+           unstable_gain_count, rf_limit_votes, acquired ? 1u : 0u);
+
+    if (acquired) {
+        printf("C5VRX_RX_AUTO_NEXT frontend_frozen=1 action=demod_ab "
+               "note=keep_RF_tuple_fixed_when_comparing_Golden_Adjacent_Alpha\n");
+    } else if (status[0] == 'R' && status[1] == 'F') {
+        printf("C5VRX_RX_AUTO_NEXT frontend_frozen=0 action=pre_q4 "
+               "tests=fresh_calibration_then_RXDC_IQ_ADC_filter\n");
+    }
+}
+
+
 /* Print the vendor-generated receive model without changing any PHY state. */
 static void lab_print_arc_oracle(void)
 {
@@ -3868,6 +4352,8 @@ static void console_diag_task(void *arg)
                     lab_print_arc_oracle();
                 } else if (c == 'G') {
                     lab_run_far_gain_probe();
+                } else if (c == 'U') {
+                    lab_run_rx_auto();
                 } else if (c == 'S') {
                     lab_run_tx_self_noise_probe();
                 } else if (c == 'K') {
@@ -4111,6 +4597,7 @@ static void console_diag_task(void *arg)
                     printf("  'F'/'W':     FFT-scale Q4 probe / fixed-gain BW40-vs-BW20 probe\n");
                     printf("  'A'/'H':     AFC centering sweep / read-only ARC PHY oracle\n");
                     printf("  'G':         PRE-Q4 highest-RF-stage vendor gain sweep (survival..table max)\n");
+                    printf("  'U':         ARC V3 RX AUTO LAB (gain -> BW -> center -> repeated A/B proof)\n");
                     printf("  'S':         PRE-Q4 self-noise A/B (live TX vs DAC/PARLIO electrically quiet)\n");
                     printf("  'K':         Erase stored PHY calibration and reboot for a fresh vendor calibration\n");
                     printf("  'X':         Cycle RX profile (Balanced/Range/Blocker/Recovery/Auto/ARC/Fusion/Range V2)\n");
