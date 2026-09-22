@@ -2166,7 +2166,8 @@ static uint32_t rx_auto_transport_delta(const hw_transport_counters_t *base,
            lab_delta(now->bs_eof_overload_count, base->bs_eof_overload_count);
 }
 
-static rx_auto_observation_t rx_auto_collect_observation(void)
+static rx_auto_observation_t rx_auto_collect_observation(
+    const hw_transport_counters_t *fault_base)
 {
     int p[RX_AUTO_SAMPLE_COUNT];
     int q[RX_AUTO_SAMPLE_COUNT];
@@ -2176,7 +2177,8 @@ static rx_auto_observation_t rx_auto_collect_observation(void)
     int cross[RX_AUTO_SAMPLE_COUNT];
     int winding[RX_AUTO_SAMPLE_COUNT];
     int sync[RX_AUTO_SAMPLE_COUNT];
-    hw_transport_counters_t base = lab_counter_snapshot();
+    hw_transport_counters_t local_base = lab_counter_snapshot();
+    if (!fault_base) fault_base = &local_base;
 
     for (unsigned i = 0; i < RX_AUTO_SAMPLE_COUNT; ++i) {
         vTaskDelay(pdMS_TO_TICKS(RX_AUTO_SAMPLE_SPACING_MS));
@@ -2200,7 +2202,7 @@ static rx_auto_observation_t rx_auto_collect_observation(void)
         .iq_cross_permille = rx_auto_median_int(cross, RX_AUTO_SAMPLE_COUNT),
         .winding_permille = rx_auto_median_int(winding, RX_AUTO_SAMPLE_COUNT),
         .sync_quality = rx_auto_median_int(sync, RX_AUTO_SAMPLE_COUNT),
-        .transport_faults = rx_auto_transport_delta(&base, &now),
+        .transport_faults = rx_auto_transport_delta(fault_base, &now),
     };
 }
 
@@ -2257,17 +2259,18 @@ static bool rx_auto_measure_against_reference(const char *stage,
                                               rx_auto_observation_t *ref_before,
                                               rx_auto_candidate_t *candidate)
 {
-    rx_auto_apply_config(gain, bw40, offset_khz, settle_ms);
     hw_transport_counters_t base = lab_counter_snapshot();
+    rx_auto_apply_config(gain, bw40, offset_khz, settle_ms);
     candidate->gain = gain;
     candidate->bw40 = bw40;
     candidate->offset_khz = offset_khz;
-    candidate->obs = rx_auto_collect_observation();
+    candidate->obs = rx_auto_collect_observation(&base);
     candidate->valid = true;
     lab_print_row(stage, &base);
 
+    hw_transport_counters_t ref_base = lab_counter_snapshot();
     rx_auto_apply_config(ref_gain, true, 0, RX_AUTO_GAIN_SETTLE_MS);
-    rx_auto_observation_t ref_after = rx_auto_collect_observation();
+    rx_auto_observation_t ref_after = rx_auto_collect_observation(&ref_base);
     candidate->ref_stable = rx_auto_reference_stable(ref_before, &ref_after);
     rx_auto_print_observation(stage, candidate);
 
@@ -2401,7 +2404,7 @@ static void lab_run_rx_auto(void)
 
     lab_reset_correlation();
     rx_auto_apply_config(ref_gain, true, 0, RX_AUTO_GAIN_SETTLE_MS);
-    rx_auto_observation_t ref_before = rx_auto_collect_observation();
+    rx_auto_observation_t ref_before = rx_auto_collect_observation(NULL);
 
     const bool overload_mode = rx_auto_is_overload(&ref_before);
     printf("C5VRX_RX_AUTO_BEGIN first=%u max=%u baseline_class=%s "
@@ -2514,16 +2517,19 @@ static void lab_run_rx_auto(void)
     rx_auto_observation_t proof_last = {0};
     if (best_center.valid) {
         for (unsigned round = 0; round < RX_AUTO_PROOF_ROUNDS; ++round) {
+            hw_transport_counters_t base0 = lab_counter_snapshot();
             rx_auto_apply_config(ref_gain, true, 0, RX_AUTO_GAIN_SETTLE_MS);
-            rx_auto_observation_t before = rx_auto_collect_observation();
+            rx_auto_observation_t before = rx_auto_collect_observation(&base0);
 
+            hw_transport_counters_t win_base = lab_counter_snapshot();
             rx_auto_apply_config(best_center.gain, best_center.bw40,
                                  best_center.offset_khz,
                                  RX_AUTO_BW_SETTLE_MS);
-            rx_auto_observation_t winner = rx_auto_collect_observation();
+            rx_auto_observation_t winner = rx_auto_collect_observation(&win_base);
 
+            hw_transport_counters_t base1 = lab_counter_snapshot();
             rx_auto_apply_config(ref_gain, true, 0, RX_AUTO_GAIN_SETTLE_MS);
-            rx_auto_observation_t after = rx_auto_collect_observation();
+            rx_auto_observation_t after = rx_auto_collect_observation(&base1);
 
             bool stable = rx_auto_reference_stable(&before, &after);
             bool baseline_is_winner =
