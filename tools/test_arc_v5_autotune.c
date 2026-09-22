@@ -32,7 +32,7 @@ static void teach_local_model(arc_v5_autotune_t *a, unsigned samples)
         a->model[g].dorigin_q8 = -30 * 256;
         a->model[g].dclip_q8 = 8 * 256;
         a->model[g].samples = (uint16_t)samples;
-        a->model[g].settle_ms = 150;
+        a->model[g].settle_ms = 500;
     }
 }
 
@@ -54,15 +54,24 @@ int main(void)
 
     /* A stable clean observation does not create predictive writes. */
     arc_v5_autotune_rearm(&a, &t, 54u, 62u);
-    arc_v5_observation_t clean = obs(20, 98, 0, 40, ARC_V5_CONTEXT_CLEAN);
-    for (unsigned i = 0; i < 8; ++i)
+    arc_v5_observation_t clean = obs(40, 98, 0, 40, ARC_V5_CONTEXT_CLEAN);
+    for (unsigned i = 0; i < 20; ++i)
         (void)arc_v5_autotune_tick(&a, &clean);
+    assert(a.gain == 54u);
+    assert(a.state == ARC_V5_LOCK);
+
+    /* Neighbor confidence must not authorize an unseen edge. */
+    arc_v5_autotune_rearm(&a, &t, 54u, 62u);
+    a.model[53].samples = 64u;
+    a.model[54].samples = 0u;
+    arc_v5_observation_t weak = obs(12, 70, 0, 280, ARC_V5_CONTEXT_WEAK);
+    (void)arc_v5_autotune_tick(&a, &weak);
+    (void)arc_v5_autotune_tick(&a, &weak);
     assert(a.gain == 54u);
 
     /* Once local response confidence exists, V5 reacts in two control windows
      * and skips multiple +1 V3 discovery steps. */
     teach_local_model(&a, 32u);
-    arc_v5_observation_t weak = obs(12, 70, 0, 280, ARC_V5_CONTEXT_WEAK);
     (void)arc_v5_autotune_tick(&a, &weak);
     assert(a.gain == 54u);
     (void)arc_v5_autotune_tick(&a, &weak);
@@ -72,8 +81,11 @@ int main(void)
     /* Verification learns only the short local actuator response. */
     uint8_t predicted = a.gain;
     arc_v5_observation_t after = obs(20, 90, 0, 150, ARC_V5_CONTEXT_CLEAN);
-    for (unsigned i = 0; i < 3; ++i)
+    for (unsigned i = 0; i < 9; ++i)
         (void)arc_v5_autotune_tick(&a, &after);
+    assert(a.gain == predicted);
+    assert(a.learned_updates == 0u);
+    (void)arc_v5_autotune_tick(&a, &after);
     assert(a.gain == predicted);
     assert(a.learned_updates >= 1u);
     assert(a.dirty_updates >= 1u);
