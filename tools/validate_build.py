@@ -48,6 +48,8 @@ for bsasm_file in bsasm_files:
 c_files = list(MAIN.glob("*.c"))
 all_c = "\n".join(read(f) for f in c_files)
 c_names = [f.name for f in c_files]
+video_c = read(MAIN / "video.c")
+menu_lifecycle = video_c.split("static void video_set_menu_mode", 1)[1].split("static void menu_cycle_standard_mode", 1)[0]
 
 check("production receiver and dedicated menu raster modules", set(c_names) == {"main.c", "arc_phy.c", "rf.c", "video.c", "menu_raster.c"},
       f"found: {c_names}")
@@ -137,7 +139,7 @@ check("TRAJ V2 keeps its required 6BIT@40 pairing",
       "s_output_mode = VIDEO_OUTPUT_6BIT_40;" in all_c and
       "start_flight_demodulator" in all_c)
 check("menu lifecycle does not double-disable BitScrambler",
-      all_c.count("bitscrambler_disable(s_flight_bs)") == 1)
+      menu_lifecycle.count("bitscrambler_disable(s_flight_bs)") == 1)
 check("large menu descriptor chain is transient DMA heap, not static BSS",
       "dma_descriptor_t s_menu_nodes[MENU_MAX_NODES]" not in all_c and
       "static dma_descriptor_t *s_menu_nodes;" in all_c and
