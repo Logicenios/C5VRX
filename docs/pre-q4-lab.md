@@ -32,6 +32,7 @@ physically proven.
 | --- | --- |
 | `S` | Self-noise A/B. Measure normal live TX, remove the PARLIO TX unit, hold all six DAC GPIOs static low while RX remains the measurement source, then rebuild the exact live TX pipeline and measure again. |
 | `G` | Sweep from ARC's first entry of the highest vendor RF stage (normally near G61) through the complete generated vendor-table maximum, one index at a time. This distinguishes additional RF sensitivity from downstream BB/fine amplification. |
+| `U` | ARC V3 / RX AUTO LAB. Automatically separates Q4 gain placement from RF sensitivity by running reference-guarded gain scouting, top-candidate BW40/BW20 tests, carrier centering, and repeated baseline/winner proof. |
 | `K` | Erase only Espressif's stored PHY calibration namespace and reboot. The running receiver is never recalibrated in place; the next Wi-Fi/PHY initialization rebuilds vendor calibration state. |
 | `H` | Print the read-only ARC gain/filter/ADC/IQ oracle. |
 | `W` | Existing safe BW40/BW20 A/B using the already-proven bandwidth API. |
@@ -303,7 +304,312 @@ a set of candidate BB/fine operating points during ACQUIRE:
 A repeated controlled-attenuator sweep is the promotion gate for any permanent
 candidate map or skip list.
 
-## 3. Fresh vendor PHY calibration
+## 3. ARC V3 / RX AUTO LAB (`U`)
+
+`U` is the integrated receiver-autotune experiment. It is intentionally a
+console-only lab engine first; it does not replace production ARC until the
+hardware results prove the search policy.
+
+The experiment answers one question:
+
+> Is useful RF information still present but badly placed in Q4/I4, or has the
+> receiver reached a real PRE-Q4 sensitivity limit?
+
+### Search hierarchy
+
+```text
+baseline: MANUAL + BW40 + offset 0 + first highest-RF-stage index
+  -> GAIN SCOUT
+  -> top 3 stable gain candidates
+  -> BW40/BW20 SCOUT
+  -> best gain + bandwidth
+  -> CENTER SCOUT coarse (-1000..+1000 kHz)
+  -> CENTER SCOUT fine (around the coarse winner)
+  -> 5x BASELINE -> WINNER -> BASELINE proof
+  -> ACQUIRED / OVERLOAD / RF_LIMIT / UNSTABLE / INCONCLUSIVE
+```
+
+The gain scout does not trust a single sequential sweep. Every candidate is
+measured between repeated G62-like reference measurements:
+
+```text
+REF -> candidate -> REF
+```
+
+A candidate is not promoted when the two reference observations drift beyond
+the bounded Q/P/origin/clipping tolerances. This makes ordinary 5.8 GHz fading
+visible instead of silently turning it into a fake gain-table conclusion.
+
+At a normal/weak input the scout covers every valid index from
+`survival_gain` through `table->max_index`. If the initial reference is
+already overloaded, `U` switches to a bounded downward coarse search and then
+refines around the best lower-gain result instead of making clipping worse.
+
+### Candidate classification
+
+The selection rules deliberately avoid a weighted "bigger P is better" score.
+
+Hard rejection comes first:
+
+- any transport fault;
+- more than 30 permille Q4 rail clipping.
+
+A `SWEET` candidate then requires:
+
+- `Q >= 65`;
+- `origin <= 250 pm`;
+- `P = 14..34`;
+- bounded I/Q skew and cross terms.
+
+`USABLE` permits a wider Q4 window, while weak/near-origin states remain
+`POOR`. Within the same class, selection is lexicographic: lower clipping,
+higher phase coherence, lower origin occupancy, P closer to the target center,
+better IQ geometry, lower winding, then semantic sync.
+
+This means a saturated `P=80` state cannot beat a clean `P=24` state merely
+because its amplitude is larger.
+
+### RF-limit classification
+
+A state is explicit RF-limit evidence when it has approximately:
+
+```text
+clip <= 8 pm
+P <= 4
+Q < 15
+origin >= 800 pm
+```
+
+If at least 75% of the stable highest-RF-stage gain observations meet that
+condition and the later BW/centering stages cannot produce a repeatably usable
+winner, `U` reports `RF_LIMIT`.
+
+That is the signal to **stop gain hunting**. The next PRE-Q4 work is then fresh
+vendor calibration followed by individually gated RXDC/IQ and ADC/filter
+experiments, not another downstream-gain increase.
+
+### Repeated proof and freeze
+
+A frontend winner is accepted only when at least four of five rounds have
+stable baseline references and the winner beats both surrounding baseline
+observations:
+
+```text
+BASELINE -> WINNER -> BASELINE
+```
+
+On `ACQUIRED`, the winning gain/BW/offset tuple is left live in:
+
+```text
+AGC = MANUAL
+AFC = HOLD
+BW  = fixed winner
+```
+
+No setting is persisted. A reboot or normal profile/configuration action can
+return to the ordinary receiver.
+
+The final line is machine-readable:
+
+```text
+C5VRX_RX_AUTO_RESULT status=ACQUIRED gain=... bw=... offset_khz=...
+                         proof_wins=... proof_stable=... frozen=1
+```
+
+If the winner is not proven, the pre-`U` receiver state is restored.
+
+### First ARC V3 hardware evidence — far / medium / close (2026-09-22)
+
+Three complete `U` runs were captured without changing the firmware: one far,
+one medium and one close. Together they show that the optimum generated vendor
+gain state moves by **tens of indices** with RF input and that the old G62
+"survival" assumption is not valid as a universal operating point.
+
+#### Far: G62 is quantizer-starved, high generated gain restores coherence
+
+The far run started with a stable dead G62 reference:
+
+```text
+G62: P=1  Q=0   origin=1000  clip=0  -> POOR
+```
+
+The reference remained stable while the candidate states improved progressively:
+
+```text
+G74: P=5   Q=13  origin=435  clip=0  -> POOR
+G75: P=5   Q=41  origin=213  clip=0  -> POOR
+G76: P=9   Q=74  origin=62   clip=0  -> USABLE
+G77: P=10  Q=87  origin=20   clip=0  -> USABLE
+G78: P=17  Q=99  origin=0    clip=0  -> SWEET
+G79: P=17  Q=99  origin=0    clip=0  -> SWEET
+G80: P=18  Q=99  origin=0    clip=0  -> SWEET
+G81: P=29  Q=99  origin=0    clip=0  -> SWEET
+```
+
+This is direct evidence that useful RF information still existed upstream while
+G62 was collapsing almost entirely into the Q4 origin. Raising the generated
+gain within the receive table recovered a well-filled, coherent raw-Q4 vector.
+The previous conclusion from the earlier one-pass `G` sweep ("higher BB/fine
+gain cannot recover the far state") is therefore **not generally valid**; the
+reference-guarded `U` run is stronger evidence.
+
+The first `U` scorer selected G81 because its P landed closest to the nominal
+P target, but the 5x proof exposed reduced headroom:
+
+```text
+winner G81 proof:
+  rounds 1-2: clipping / REJECT
+  rounds 3-5: SWEET
+result: INCONCLUSIVE, proof_wins=3/5, frozen=0
+```
+
+The hardware implication is to prefer the **lowest generated gain that is
+already robustly SWEET**, rather than maximizing P or choosing the numerically
+largest clean-looking state. In this run G78 was the first clearly SWEET state
+and retained more headroom than G81.
+
+#### Medium: optimum moves down to roughly G56-G57
+
+At the medium position the initial G62 reference was already heavily clipped,
+so `U` entered overload descent. The useful region moved far lower:
+
+```text
+G62: heavy clipping / REJECT
+G58: clean but high, USABLE/SWEET depending window
+G57: P=17  Q=99  origin=0  clip=0  -> SWEET
+G56: P=13  Q=99  origin=0  clip=0  -> USABLE
+G54: P=17  Q=99  origin=0  clip=0  -> SWEET in one coarse window
+G50: Q4 starts becoming under-filled
+```
+
+The refinement around the transition was especially informative:
+
+```text
+G55: P=13 Q=99 clip=0  -> USABLE
+G56: P=13 Q=99 clip=0  -> USABLE
+G57: P=17 Q=99 clip=0  -> SWEET
+G58: P=36 Q=100 clip=0 -> USABLE
+G59: P=52 Q=100 clip=228 pm -> REJECT
+G60: P=58 Q=99  clip=281 pm -> REJECT
+G61: P=53 Q=100 clip=298 pm -> REJECT
+```
+
+This run exposed a flaw in the first `U` proof method: overload mode continued
+to use G62 as the fading reference. Because G62 itself was clipping by hundreds
+of permille, the reference wandered enough to mark otherwise clean candidates
+unstable. A future overload search must first find a **clean safe anchor** and
+then use that anchor for REF -> candidate -> REF checks.
+
+#### Close: optimum moves down again to roughly G46-G47
+
+At close range the initial high-stage reference was even more overloaded:
+
+```text
+G62: REJECT, heavy clipping
+G58: REJECT, heavy clipping
+G54: REJECT, heavy clipping
+G50: usable transition region
+G46-G47: clean usable region
+G42 and below: under-filled / POOR
+```
+
+The refinement shows a sharp upper edge:
+
+```text
+G47: P=45 Q=100 clip=15 pm  -> USABLE
+G48: P=61 Q=99  clip=347 pm -> REJECT
+G49: P=65 Q=99  clip=435 pm -> REJECT
+G50: P=65 Q=99  clip=500 pm -> REJECT
+```
+
+The run later ended at G46 with approximately `P=17 Q=99`, confirming that the
+clean operating region had moved well below both the medium and far settings.
+
+#### Cross-distance result
+
+The observed useful regions were approximately:
+
+```text
+close   -> G46-G47
+medium  -> G56-G57
+far     -> G78-G80
+```
+
+These are not production constants and must not be hardcoded. They demonstrate
+the topology: the generated vendor state must move strongly with received
+signal level to keep the raw 4-bit IQ representation inside its useful window.
+
+The same G62 state can therefore be catastrophically wrong in **both**
+directions:
+
+```text
+far:   G62 -> P~1, Q~0, origin~100%    (quantizer-starved)
+close: G62 -> very high P, heavy clip  (overloaded)
+```
+
+This is the strongest hardware evidence so far that the main range problem is
+substantially influenced by **pre-Q4 gain placement**, not only by the
+post-Q4 demodulator.
+
+#### BW / carrier-search caution exposed by the same runs
+
+The first `U` implementation always continued into BW and carrier-centering
+search after finding a good gain state. Hardware data shows that this can
+over-fit time-varying RF conditions.
+
+Examples:
+
+- medium: both BW40 and BW20 produced SWEET states around G56-G58;
+- far: one G78 BW20 window improved from a poor BW40 window to SWEET, but other
+  candidates did not show the same deterministic relationship;
+- close: multiple offsets from roughly -750 to +750 kHz produced SWEET windows,
+  while the same nominal offset could later degrade badly during proof.
+
+Therefore the production-oriented search order should be conservative:
+
+```text
+GAIN FIRST
+  -> if a robust SWEET state exists: HOLD / LOCK
+  -> only if gain alone cannot recover a usable state:
+       try BW
+       then carrier centering
+  -> if all fail: RF_LIMIT
+```
+
+A SWEET-to-SWEET actuator change is not, by itself, evidence that the new
+setting is better. BW or carrier offset should only move when the improvement
+is material and repeatable.
+
+#### Controller implication
+
+The hardware evidence now supports a Q4-target controller with three primary
+states:
+
+```text
+STARVED  -> raise effective generated gain
+SWEET    -> hold / zero PHY writes
+OVERLOAD -> lower effective generated gain
+```
+
+Selection should stop at the **lowest sufficient SWEET state with margin**,
+rather than targeting maximum P. A clipped reference must never be used as the
+stability oracle; overload recovery must establish a clean anchor first.
+
+The next ARC V3 iteration should implement these policy changes in the lab
+engine before any production promotion.
+
+### Demodulator boundary
+
+`U` does not mix frontend discovery with demodulator selection. Q4 placement is
+solved first while the currently selected demod remains constant. After
+`ACQUIRED`, the console prints a follow-up marker instructing the hardware A/B
+to keep the frozen RF tuple unchanged while comparing Golden / Exact Adjacent /
+Alpha on the demod branch.
+
+Fresh full PHY calibration also stays a separate reboot A/B: run `U`, run
+`K`, then run the same `U` setup again.
+
+## 4. Fresh vendor PHY calibration
 
 `K` calls the public ESP-IDF
 `esp_phy_erase_cal_data_in_nvs()` API and then reboots. It does **not** run an
@@ -316,7 +622,7 @@ attenuation threshold against the previous boot.
 Do not conclude that calibration helped merely because coefficient values
 changed.
 
-## 4. Still gated
+## 5. Still gated
 
 The ROM contains receive-side functions related to RXDC, IQ correction, ADC,
 filters and gain. This PR deliberately does not promote these writers:
