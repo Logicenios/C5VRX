@@ -78,8 +78,8 @@ check("no true40 in production", "true40" not in all_c)
 check("no wbfm_q4.h in production", "wbfm_q4.h" not in all_c)
 
 # Fixed constants
-check("RAW_RING_BYTES == 16384",
-      bool(re.search(r"RAW_RING_BYTES\s+16384", all_c)))
+check("RAW_RING_BYTES == 32768",
+      bool(re.search(r"RAW_RING_BYTES\s+32768", all_c)))
 check("DAC_IDLE_CODE == 20",
       bool(re.search(r"DAC_IDLE_CODE\s+20", all_c)))
 check("IQ_RATE_HZ == 40000000",
@@ -107,7 +107,8 @@ check("modern menu raster is SRAM-safe 384x56 logical pixels at 3x vertical scal
       "MENU_UI_X_SCALE_DEN 50u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_Y_REPEAT 3u" in read(MAIN / "menu_raster.h") and
       "MENU_UI_BYTES 1600u" in read(MAIN / "menu_raster.h") and
-      "MENU_MAX_NODES 6348u" in read(MAIN / "menu_raster.h") and
+      "MENU_FIELDS 2u" in read(MAIN / "menu_raster.h") and
+      "MENU_MAX_NODES 1600u" in read(MAIN / "menu_raster.h") and
       "s_menu_raster.ui" in all_c)
 check("native menu enabled with safe defaults",
       bool(re.search(r"MENU_RUNTIME_ENABLED\s+1", all_c)) and
@@ -145,6 +146,12 @@ check("large menu descriptor chain is transient DMA heap, not static BSS",
       "MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL" in all_c and
       "menu_free_nodes();" in all_c and
       "s_menu_node_capacity" in all_c)
+check("menu allocation failure preserves live video instead of rebooting",
+      "esp_err_t menu_err = menu_init_buffers();" in all_c and
+      all_c.index("esp_err_t menu_err = menu_init_buffers();") <
+      all_c.index("ESP_ERROR_CHECK(parlio_tx_unit_disable(s_tx));", all_c.index("static void video_set_menu_mode")) and
+      "menu unavailable: %s" in all_c and
+      "if (!s_menu_nodes) return ESP_ERR_NO_MEM;" in all_c)
 check("legacy seven-line text menu removed",
       "MENU_TEXT_BYTES" not in all_c and "MENU_ROWS" not in all_c)
 check("lag diagnostics poll PARLIO GDMA and BitScrambler",

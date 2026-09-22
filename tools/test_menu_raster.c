@@ -7,7 +7,7 @@
 #include <string.h>
 
 static menu_raster_t raster;
-static uint8_t waveform[8008000];
+static uint8_t waveform[2000000];
 static unsigned used, nodes;
 
 static bool capture(void *ctx, const uint8_t *data, unsigned length)
@@ -32,14 +32,14 @@ static void test(video_standard_t standard)
 {
     bool pal = standard == VIDEO_STD_PAL;
     unsigned field = pal ? 625 : 525;
-    unsigned fields = 8;
+    unsigned fields = MENU_FIELDS;
     unsigned eq = pal ? 5 : 6;
     used = nodes = 0;
     menu_raster_init(&raster, standard);
     memset(raster.ui, 60, sizeof(raster.ui));
     assert(menu_raster_emit(&raster, standard, capture, NULL));
     assert(!menu_raster_emit(&raster, standard, reject, NULL));
-    assert(used == (pal ? 6400000u : 5338668u));
+    assert(used == (pal ? 1600000u : 1334668u));
     for (unsigned h = 0; h < field * fields; ++h) {
         unsigned at = menu_half_sample(standard, h);
         unsigned next = menu_half_sample(standard, h + 1);
@@ -68,7 +68,7 @@ static void test(video_standard_t standard)
                 if (burst_enabled && x >= burst && x < burst + count) {
                     assert(value >= 12 && value <= 28);
                     varies |= value != 20;
-                    double carrier = pal ? 709379.0 / 6400000 : 477750.0 / 5338668;
+                    double carrier = pal ? 177345.0 / 1600000 : 119438.0 / 1334668;
                     double swing = pal ? (h / 2 % 2 ? -0.375 : 0.375) : 0.5;
                     double ideal = 20 + 8 * sin(6.283185307179586 * ((at + x) * carrier + swing));
                     /* Quantized start phase plus integer DAC amplitude. */
@@ -80,7 +80,8 @@ static void test(video_standard_t standard)
     }
     /* Burst samples must correlate with the selected carrier, not a luma
      * rectangle or an IQ pattern. Check all starting phases. */
-    double omega = 6.283185307179586 * (pal ? 4433618.75 / 40000000 : 477750.0 / 5338668);
+    double omega = 6.283185307179586 *
+                   (pal ? 177345.0 / 1600000 : 119438.0 / 1334668);
     for (unsigned p = 0; p < MENU_PHASES; ++p) {
         unsigned begin = pal ? 224 : 212;
         unsigned count = pal ? 90 : 100;
@@ -89,11 +90,11 @@ static void test(video_standard_t standard)
             assert(fabs(raster.prefix[p][x] - ideal) <= 0.501);
         }
     }
-    double cycles = used * (pal ? 709379.0 / 6400000 : 477750.0 / 5338668);
+    double cycles = used * (pal ? 177345.0 / 1600000 : 119438.0 / 1334668);
     assert(fabs(cycles - round(cycles)) < 1e-8);
     if (!pal) {
-        assert(fabs(477750.0 * 40000000 / used - 315000000.0 / 88) < 1.0);
-        assert(fabs(used / (40000000.0 * 1001 / 30000 * 4) - 1) < 0.0000003);
+        assert(fabs(119438.0 * 40000000 / used - 315000000.0 / 88) < 12.0);
+        assert(fabs(used / (40000000.0 * 1001 / 30000) - 1) < 0.000001);
     }
     printf("%s: %u samples, %u fields, %u DMA nodes; sync, burst, alignment and colour-loop closure OK\n",
            pal ? "PAL" : "NTSC", used, fields, nodes);

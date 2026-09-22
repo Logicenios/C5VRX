@@ -109,7 +109,7 @@ ESP32-C5 RF / MODEM_DIAG Bus (40 MS/s Q4/I4)
 PARLIO RX @ 40 MS/s (POS sample edge, pure continuous hardware GDMA)
         │
         ▼
-Circular GDMA Ring (16 KiB in HP SRAM, Zero-EOF patched)
+Circular GDMA Ring (32 KiB in HP SRAM, Zero-EOF patched)
         │
         ▼
 Phase5 BitScrambler Demodulator (fm.bsasm: 50 ns discriminator, embedded LUT)

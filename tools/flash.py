@@ -35,7 +35,7 @@ def main():
             sys.exit(1)
 
     print(f"=======================================================")
-    print(f" FLASHING C5VRX-3 (Seamless16K Phase5 Production)")
+    print(f" FLASHING C5VRX-3 (Seamless32K Phase5 Production)")
     print(f" Port: {port}")
     print(f" App:  {app}")
     print(f"=======================================================")

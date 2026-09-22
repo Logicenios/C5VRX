@@ -5,10 +5,10 @@
  * video_start() - Initialize and start the PARLIO RX+TX realtime pipeline.
  *
  * Sets up:
- *   - PARLIO RX @ 40 MHz, POS edge, 8-bit, 16 KiB cyclic DMA ring
+ *   - PARLIO RX @ 40 MHz, POS edge, 8-bit, 32 KiB cyclic DMA ring
  *   - PARLIO TX @ 40 MHz, [D,D] output, loop_transmission
  *   - TX BitScrambler with embedded Phase5 LUT (fm.bsasm)
- *   - One-time RX start, then TX starts after one-block delay
+ *   - One-time RX start, then TX starts after a half-ring delay
  *
  * After video_start() returns ESP_OK, the CPU is done.
  * The hardware pipeline runs forever without any software involvement.

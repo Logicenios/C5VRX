@@ -1,11 +1,11 @@
 /**
- * video.c - Realtime MODEM_DIAG -> PARLIO RX -> 16K ring -> Phase5 TX -> DAC.
+ * video.c - Realtime MODEM_DIAG -> PARLIO RX -> 32K ring -> Phase5 TX -> DAC.
  *
  * Implements the complete production datapath for C5VRX-3:
  *
  *   MODEM_DIAG full Q4/I4 @ 40 MS/s
  *     -> PARLIO RX POS edge @ 40 MHz
- *     -> 16 KiB cyclic raw DMA ring (HP SRAM)
+ *     -> 32 KiB cyclic raw DMA ring (HP SRAM)
  *     -> PARLIO TX + selectable Golden Phase5 / Trajectory v2 BitScrambler
  *     -> [D,D] 6-bit CVBS @ 20 MS/s unique / 40 MHz DAC clock
  *     -> 6-bit resistor DAC
@@ -15,7 +15,7 @@
  * Fixed production constants (NOT configurable at runtime):
  *   IQ rate:        40 MHz
  *   DAC rate:       40 MHz physical ([D,D] = 20 MS/s unique CVBS)
- *   Ring:           16384 bytes (HP SRAM, DMA-aligned)
+ *   Ring:           32768 bytes (HP SRAM, DMA-aligned)
  *   Pedestal:       20   (hardcoded in FM LUT)
  *   Gain:           2    (hardcoded in FM LUT)
  *   Polarity:       current-minus-previous (hardcoded in FM LUT)
@@ -138,7 +138,7 @@ BITSCRAMBLER_PROGRAM(s_fm_traj_program, "fm_traj");
 #define IQ_RATE_HZ       40000000u   /* MODEM_DIAG / PARLIO RX clock */
 #define DAC_RATE_HZ      40000000u   /* default 6-bit PARLIO TX clock */
 #define DAC4_RATE_HZ     80000000u   /* experimental 4-bit PARLIO TX clock */
-#define RAW_RING_BYTES   16384u      /* 16384 byte cyclic ring (16 KiB Seamless Golden) */
+#define RAW_RING_BYTES   32768u      /* 32 KiB cyclic ring; Golden Phase5 datapath */
 #define DAC_IDLE_CODE    20u         /* Black/blanking pedestal; sync is 0 */
 #define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
 #define MENU_RUNTIME_ENABLED 1       /* Native CVBS menu enabled after geometry rework */
@@ -199,10 +199,9 @@ static inline void sync_dma_m2c(const void *addr, size_t size)
 /* Timing and descriptors are immutable while running; only text pixels change.
  * This raster is never linked to the RF ring. */
 static DMA_ATTR __attribute__((aligned(64))) menu_raster_t s_menu_raster;
-/* The full PAL scatter chain is ~76 KiB. Keeping it in static BSS made a
- * ~10% wider menu overflow the C5 static DRAM segment even though descriptors
- * are needed only while the standalone menu owns TX. Allocate the exact chain
- * from internal AHB-DMA descriptor memory while the menu is active instead. */
+/* The two-field PAL/NTSC scatter chain is below 20 KiB. Descriptors are needed
+ * only while the standalone menu owns TX, so allocate the bounded maximum from
+ * internal AHB-DMA descriptor memory and return it on exit. */
 static dma_descriptor_t *s_menu_nodes;
 static unsigned s_menu_node_capacity;
 /* AGC sampling and channel scan are serialized in analog_agc_task, so they
@@ -269,7 +268,7 @@ static const int s_dac4_gpio[4] = {11, 12, 8, 9};
 
 _Static_assert(IQ_RATE_HZ == 40000000u, "IQ rate must be 40 MHz");
 _Static_assert(DAC_RATE_HZ == 40000000u, "DAC rate must be 40 MHz");
-_Static_assert(RAW_RING_BYTES == 16384u, "Ring must be exactly 16384 bytes");
+_Static_assert(RAW_RING_BYTES == 32768u, "Ring must be exactly 32768 bytes");
 _Static_assert(CONTROL_SAMPLE_BYTES <= 4092u, "Control window must fit one GDMA descriptor");
 _Static_assert(FUSION_FAST_SAMPLE_BYTES <= 4092u, "Fusion shadow window must fit one GDMA descriptor");
 
@@ -2312,41 +2311,42 @@ static void menu_free_nodes(void)
 
 static void menu_render_menu(void);
 
-static void menu_init_buffers(void)
+static esp_err_t menu_init_buffers(void)
 {
     menu_raster_init(&s_menu_raster, s_video_std);
 
-    /* Count first, then allocate exactly the PAL/NTSC chain needed by this
-     * raster. The count pass is hardware-independent and avoids reserving the
-     * 6348-node PAL maximum when the active standard is NTSC. */
+    /* Count first and verify the generated chain against the fixed compact
+     * maximum. Reserving the full two-field maximum also makes PAL/NTSC
+     * switching allocation-free while menu DMA owns the raster. */
     unsigned required_nodes = 0;
-    ESP_ERROR_CHECK(menu_raster_emit(&s_menu_raster, s_video_std,
-                                     menu_count_segment, &required_nodes) ?
-                    ESP_OK : ESP_ERR_INVALID_SIZE);
-    ESP_ERROR_CHECK(required_nodes > 0 && required_nodes <= MENU_MAX_NODES ?
-                    ESP_OK : ESP_ERR_INVALID_SIZE);
+    if (!menu_raster_emit(&s_menu_raster, s_video_std,
+                          menu_count_segment, &required_nodes) ||
+        required_nodes == 0 || required_nodes > MENU_MAX_NODES) {
+        return ESP_ERR_INVALID_SIZE;
+    }
 
-    if (s_menu_node_capacity < required_nodes) {
+    if (s_menu_node_capacity < MENU_MAX_NODES) {
         menu_free_nodes();
-        size_t bytes = required_nodes * sizeof(*s_menu_nodes);
+        size_t bytes = MENU_MAX_NODES * sizeof(*s_menu_nodes);
         size_t alloc_bytes = (bytes + 63u) & ~(size_t)63u;
         s_menu_nodes = (dma_descriptor_t *)heap_caps_aligned_alloc(
             64u, alloc_bytes,
             MALLOC_CAP_DMA_DESC_AHB | MALLOC_CAP_INTERNAL);
-        ESP_ERROR_CHECK(s_menu_nodes ? ESP_OK : ESP_ERR_NO_MEM);
-        s_menu_node_capacity = required_nodes;
+        if (!s_menu_nodes) return ESP_ERR_NO_MEM;
+        s_menu_node_capacity = MENU_MAX_NODES;
     }
 
     s_menu_node_count = 0;
-    ESP_ERROR_CHECK(menu_raster_emit(&s_menu_raster, s_video_std,
-                                     menu_append_segment, NULL) ?
-                    ESP_OK : ESP_ERR_INVALID_SIZE);
-    ESP_ERROR_CHECK(s_menu_node_count == required_nodes ?
-                    ESP_OK : ESP_ERR_INVALID_SIZE);
+    if (!menu_raster_emit(&s_menu_raster, s_video_std,
+                          menu_append_segment, NULL) ||
+        s_menu_node_count != required_nodes) {
+        return ESP_ERR_INVALID_SIZE;
+    }
     s_menu_nodes[s_menu_node_count - 1].next = s_menu_nodes;
     menu_render_menu();
     sync_dma_c2m(&s_menu_raster, sizeof(s_menu_raster));
     sync_dma_c2m(s_menu_nodes, s_menu_node_count * sizeof(*s_menu_nodes));
+    return ESP_OK;
 }
 
 static const char *video_standard_name(video_standard_t standard)
@@ -2605,9 +2605,21 @@ static void video_set_menu_mode(bool active)
     if (active && !MENU_RUNTIME_ENABLED) return;
     if (s_menu_active == active) return;
 
-    ESP_ERROR_CHECK(parlio_tx_unit_disable(s_tx));
-
     if (active) {
+        /* Allocate/render before touching the live pipeline. If memory is
+         * unavailable, keep flight video running instead of rebooting. */
+        s_video_std = resolved_menu_standard();
+        esp_err_t menu_err = menu_init_buffers();
+        if (menu_err != ESP_OK) {
+            ESP_LOGE(TAG, "menu unavailable: %s (free=%u largest=%u)",
+                     esp_err_to_name(menu_err),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            menu_free_nodes();
+            return;
+        }
+
+        ESP_ERROR_CHECK(parlio_tx_unit_disable(s_tx));
         /* Live -> menu: stop the live producer once. */
         ESP_ERROR_CHECK(bitscrambler_disable(s_flight_bs));
 
@@ -2615,10 +2627,9 @@ static void video_set_menu_mode(bool active)
         if (s_tx_unit_mode != VIDEO_OUTPUT_6BIT_40) {
             ESP_ERROR_CHECK(replace_tx_unit(VIDEO_OUTPUT_6BIT_40));
         }
-        s_video_std = resolved_menu_standard();
-        menu_init_buffers();
         start_menu_tx();
     } else {
+        ESP_ERROR_CHECK(parlio_tx_unit_disable(s_tx));
         /* Menu -> live: the BitScrambler is already disabled; do not disable twice. */
         if (s_tx_unit_mode != s_output_mode) {
             ESP_ERROR_CHECK(replace_tx_unit(s_output_mode));
@@ -2641,7 +2652,7 @@ static void video_set_menu_mode(bool active)
         ESP_ERROR_CHECK(start_rx());
         AHB_DMA.in_intr[s_rx_dma_ch].ena.val = 0;
         PARL_IO.rx_genrl_cfg.rx_eof_gen_sel = 1;
-        esp_rom_delay_us(8192ULL * 1000000ULL / IQ_RATE_HZ);
+        esp_rom_delay_us((RAW_RING_BYTES / 2ULL) * 1000000ULL / IQ_RATE_HZ);
         ESP_ERROR_CHECK(start_tx());
         quiet_tx_interrupts();
         patch_descriptors_clear_eof(s_rx_dma_ch, true);
@@ -2670,7 +2681,7 @@ static void menu_cycle_standard_mode(void)
         s_video_std = resolved_menu_standard();
     }
     if (s_menu_active) {
-        menu_init_buffers();
+        ESP_ERROR_CHECK(menu_init_buffers());
         start_menu_tx();
     }
     settings_save();
@@ -3901,7 +3912,7 @@ esp_err_t video_start(void)
 
     /* Request half-ring producer/consumer separation before starting TX.
      * The integer-microsecond delay and driver latency need hardware validation. */
-    esp_rom_delay_us(8192ULL * 1000000ULL / IQ_RATE_HZ);
+    esp_rom_delay_us((RAW_RING_BYTES / 2ULL) * 1000000ULL / IQ_RATE_HZ);
 
     if ((err = start_tx()) != ESP_OK) return err;
 
@@ -3948,11 +3959,11 @@ esp_err_t video_start(void)
     /* Print startup stamp (visible on serial monitor at boot). */
     ESP_EARLY_LOGW(TAG,
         "\n=======================================================\n"
-        " C5VRX-3  Seamless 16K Phase5 receiver (Zero-EOF Circular GDMA)\n"
+        " C5VRX-3  Seamless 32K Phase5 receiver (Zero-EOF Circular GDMA)\n"
         " Clock:   PARLIO_CLK_SRC_DEFAULT 40MHz (SPLL internal)\n"
         " Telemetry: Live GDMA ring pointer tracking (rx_ch=%d, tx_ch=%d)\n"
-        " Buffer:  16,384 bytes cyclic ring (Zero-EOF patched: RX=%d TX=%d)\n"
-        " RX:      40 MS/s POS edge, 16,384 bytes pure HW cyclic GDMA\n"
+        " Buffer:  32,768 bytes cyclic ring (Zero-EOF patched: RX=%d TX=%d)\n"
+        " RX:      40 MS/s POS edge, 32,768 bytes pure HW cyclic GDMA\n"
         " Demod:   Phase5 50ns / P%u / G%u / current-minus-previous\n"
         " TX:      40 MHz [D,D] / eof=downstream / tail=0\n"
         " Lock:    GDMA ISRs disabled, RX EOF disabled, suc_eof=0 cleared\n"
