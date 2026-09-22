@@ -187,6 +187,122 @@ At a fixed near-threshold RF input compare:
 The desired FAR state is the one that lowers the equivalent-video RF threshold,
 not the one with the largest Q4 magnitude.
 
+### Hardware gain-sweep evidence — 2026-09-22
+
+Three `G` sweeps were captured at far, medium and close physical VTX
+distances. This runtime table reported:
+
+```text
+first=62
+max=81
+rf_stage=8
+rf_code=127
+```
+
+so G62..G81 all remain inside the highest decoded RF stage and mainly change
+the generated BB/fine tuple.
+
+#### Far sweep: downstream gain cannot recreate lost RF information
+
+At the far position the stream was already effectively collapsed at G62:
+
+```text
+G62: P=1  Q=0  origin=1000  clip=0
+...
+G80: P=2  Q=2  origin=850   clip=0
+G81: P=2  Q=3  origin=822   clip=0
+```
+
+Increasing downstream gain changed the quantized occupancy slightly but did not
+recover coherent phase or sync. This is evidence that BB/fine gain cannot
+replace frontend SNR once the signal has already fallen below the useful Q4
+boundary.
+
+#### Medium sweep: measured response is strongly non-monotonic
+
+The medium-position sweep produced:
+
+```text
+G62: P=17 Q=100 origin=0   clip=0
+G63: P=1  Q=0   origin=937 clip=0
+G64: P=17 Q=95  origin=11  clip=0
+G65: P=32 Q=100 origin=0   clip=0
+G66: P=53 Q=99  origin=0   clip=257
+G67: P=53 Q=100 origin=0   clip=219
+G68: P=29 Q=99  origin=0   clip=0
+G69: P=50 Q=99  origin=0   clip=131
+```
+
+The same decoded RF stage remained selected throughout. The corresponding
+generated tuples stepped through BB/fine states such as:
+
+```text
+G62 -> bb=1  fine=5
+G63 -> bb=1  fine=4
+G64 -> bb=1  fine=3
+G65 -> bb=1  fine=2
+G66 -> bb=1  fine=1
+G67 -> bb=1  fine=0
+G68 -> bb=3  fine=5
+```
+
+The raw-Q4 response therefore must not be assumed to increase smoothly with the
+numeric gain index. G63 in this medium sweep was a particularly severe valley,
+while G64/G65 immediately recovered useful phase geometry. G68 also produced a
+well-filled, non-clipping Q4 state.
+
+This is a hardware observation, not yet proof that G63 is intrinsically bad:
+the sweep takes several seconds and 5.8 GHz multipath can vary over time.
+Repeatability at a fixed attenuated RF source is required before permanently
+blacklisting any index.
+
+#### Close sweep: high states are overload territory
+
+At the close position G62 was already heavily clipped:
+
+```text
+G62: P=73 Q=99 clip=627
+G63: P=58 Q=100 clip=286
+...
+G81: P=98 Q=87 clip=957
+```
+
+This confirms that simply forcing a higher table index is not a general range
+solution. The best state must depend on raw-Q4 occupancy and clipping.
+
+#### ARC implication
+
+The current controller uses numeric `gain + 1` / `gain - 1` steps, while
+persistent no-sync returns to `survival_gain`, which is G62 on this runtime
+table. That policy was intentionally conservative, but the medium sweep shows
+why it can miss a useful downstream operating point:
+
+```text
+G62 usable but weak
+ -> numeric +1
+G63 may look catastrophically worse
+ -> sync / Q4 confidence disappears
+ -> no-sync path returns to G62
+ -> G64/G65 are never explored
+```
+
+Do **not** change production ARC to simply allow G62..G81 unconditionally.
+The next controller experiment should instead treat highest-RF-stage entries as
+a set of candidate BB/fine operating points during ACQUIRE:
+
+1. keep the RF stage fixed at the highest valid stage;
+2. probe a bounded subset of valid generated indices;
+3. score each state using Q4 fill, phase coherence, origin occupancy, clipping,
+   IQ geometry and semantic sync;
+4. reject heavily clipped states and states whose apparent benefit is not
+   repeatable;
+5. choose/freeze the best non-clipping candidate;
+6. preserve the clean-LOCK zero-write invariant;
+7. never infer RF sensitivity from Q4 amplitude alone.
+
+A repeated controlled-attenuator sweep is the promotion gate for any permanent
+candidate map or skip list.
+
 ## 3. Fresh vendor PHY calibration
 
 `K` calls the public ESP-IDF
