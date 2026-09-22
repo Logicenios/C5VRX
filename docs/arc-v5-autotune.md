@@ -41,6 +41,9 @@ For each vendor gain region V5 stores the measured short-horizon response to a
 The learned values are **not a distance table**. They describe the receiver's
 local actuator response. Transitions that look dominated by an RF fade,
 blocker, no-carrier state, or severe clipping are rejected from learning.
+Because vendor gain states are not linear in dB, only local moves of four
+indices or fewer are allowed to update the persistent per-edge curve; larger
+predictive jumps are verification-only evidence.
 
 ## Persistence
 
