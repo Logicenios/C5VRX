@@ -29,6 +29,13 @@ static void feed(arc_v3_controller_t *a,
         (void)arc_v3_controller_tick(a, &o);
 }
 
+static uint8_t tick_values(arc_v3_controller_t *a,
+                           int p, int q, int clip, int origin)
+{
+    arc_v3_observation_t o = obs(p, q, clip, origin);
+    return arc_v3_controller_tick(a, &o);
+}
+
 static void drive_until_gain(arc_v3_controller_t *a,
                              arc_v3_observation_t o,
                              uint8_t wanted,
@@ -98,7 +105,7 @@ int main(void)
     drive_until_gain(&a, obs(65, 99, 400, 0), 58, 20);
     unsigned settle_after_cut = a.settle;
     assert(settle_after_cut > 0u);
-    (void)arc_v3_controller_tick(&a, &TEMP_OBS(65, 99, 400, 0));
+    (void)tick_values(&a, 65, 99, 400, 0);
     assert(a.gain == 58); /* one stale-looking raw window cannot chain a cut */
     drive_until_gain(&a, obs(65, 99, 400, 0), 54, 20);
     drive_until_gain(&a, obs(65, 99, 400, 0), 50, 20);
@@ -111,7 +118,7 @@ int main(void)
     assert(a.up_guard_ticks > 0u);
     uint8_t down_gain = a.gain;
     for (unsigned i = 0; i < 10; ++i) {
-        (void)arc_v3_controller_tick(&a, &TEMP_OBS(1, 0, 0, 1000));
+        (void)tick_values(&a, 1, 0, 0, 1000);
         assert(a.gain == down_gain);
     }
     feed(&a, obs(17, 99, 0, 0), 20);
