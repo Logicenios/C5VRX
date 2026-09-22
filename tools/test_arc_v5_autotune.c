@@ -62,17 +62,16 @@ int main(void)
     /* Once local response confidence exists, V5 reacts in two control windows
      * and skips multiple +1 V3 discovery steps. */
     teach_local_model(&a, 32u);
-    arc_v5_observation_t weak = obs(9, 60, 0, 420, ARC_V5_CONTEXT_WEAK);
+    arc_v5_observation_t weak = obs(12, 70, 0, 280, ARC_V5_CONTEXT_WEAK);
     (void)arc_v5_autotune_tick(&a, &weak);
     assert(a.gain == 54u);
     (void)arc_v5_autotune_tick(&a, &weak);
-    assert(a.gain >= 58u);
-    assert(a.gain <= 62u);
+    assert(a.gain == 58u);
     assert(a.state == ARC_V5_VERIFY);
 
     /* Verification learns only the short local actuator response. */
     uint8_t predicted = a.gain;
-    arc_v5_observation_t after = obs(18, 86, 0, 170, ARC_V5_CONTEXT_CLEAN);
+    arc_v5_observation_t after = obs(20, 90, 0, 150, ARC_V5_CONTEXT_CLEAN);
     for (unsigned i = 0; i < 3; ++i)
         (void)arc_v5_autotune_tick(&a, &after);
     assert(a.gain == predicted);
