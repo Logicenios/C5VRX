@@ -684,6 +684,61 @@ Promotion criterion is not a specific G number. The test succeeds if the live
 controller follows the raw-Q4 state across distance, preserves clean LOCK, and
 extends matched-quality range without persistent oscillation.
 
+### Live ARC V3 walk evidence and temporal fix
+
+The first live `ARC V3 EXP` walk tests confirmed the gain direction over almost
+the full vendor table, but also exposed excessive reaction to individual
+50 ms control windows.
+
+Observed useful regions were approximately:
+
+```text
+~1 cm / ultra-close -> G12-G18
+close               -> G40-G46
+medium              -> G60-G70
+far                 -> G77-G81
+```
+
+These values are **observations, not a hardcoded distance table**. They show
+that the correct generated vendor state can move by more than 60 indices across
+the usable RF dynamic range.
+
+The strongest moving test started far around G79-G81 and then walked back
+toward the VTX. The overall trajectory correctly fell toward lower gain:
+
+```text
+~G80 -> G69 -> G66 -> G55 -> G40 -> G36
+```
+
+but a short fade produced an incorrect reversal:
+
+```text
+G69 -> G66 -> G81 -> G81 -> G67 -> G55
+```
+
+Static traces showed the same state could vary strongly between completed
+control windows while the carrier remained usable. That proves the first live
+ARC V3 implementation was directionally correct but temporally under-filtered.
+
+The controller now uses a five-window component-wise median before ordinary
+gain decisions. Gain-up is deliberately slower than gain-down:
+
+```text
+ordinary STARVED -> 5 filtered confirmations
+hard STARVED     -> 3 filtered confirmations
+HIGH             -> 3 filtered confirmations
+OVERLOAD         -> 2 filtered confirmations
+severe raw clip  -> 2 consecutive raw windows, then emergency -4
+```
+
+A downward gain move also installs a one-second no-up reversal guard. This is
+specifically intended to prevent a short multipath fade from turning a valid
+walk-back trajectory such as `G69 -> G66` into `G81`. Persistent real
+starvation remains able to reverse direction once the guard expires.
+
+LOCK now tolerates a broader filtered target region and requires six persistent
+bad filtered observations before leaving the zero-write state.
+
 ### Demodulator boundary
 
 `U` does not mix frontend discovery with demodulator selection. Q4 placement is
