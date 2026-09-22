@@ -195,3 +195,78 @@
 17:34:08 | [AGC:ACTIVE] State=LEARN  | G_act=62 G_shd=62 | P_med=2  Q_ph= 0% | clip=0  orig=256
 17:34:09 | [AGC:ACTIVE] State=LEARN  | G_act=62 G_shd=62 | P_med=2  Q_ph= 0% | clip=0  orig=256
 17:34:10 | [AGC:ACTIVE] State=LEARN  | G_act=62 G_shd=62 | P_med=2  Q_ph= 0% | clip=0  orig=256
+
+================================================================================
+2026-09-22 ARC V3 EXP — 25 mW VTX — close -> far -> close
+================================================================================
+Context:
+- Same ARC V3 gain-first controller family used for the 200 mW walk tests.
+- VTX power intentionally reduced from 200 mW to 25 mW.
+- Relative TX-power change: 10*log10(25/200) = -9.03 dB.
+- User-reported path: close -> far -> close.
+- These [CARRIER] lines expose P/Q/G only; origin/clip/winding were not present
+  in this capture and must not be inferred.
+- This is a moving indoor walk, not a calibrated step-attenuator test.
+
+Raw capture:
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=26 Q=99% G=29)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=10 Q=88% G=29)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=8 Q=56% G=29)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=8 Q=59% G=29)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=13 Q=96% G=37)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=18 Q=100% G=58)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=26 Q=99% G=64)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=20 Q=99% G=60)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=13 Q=96% G=57)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=9 Q=69% G=57)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=13 Q=93% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=8 Q=60% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=26 Q=99% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=17 Q=98% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=9 Q=64% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=10 Q=73% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=9 Q=62% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=16 Q=94% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=13 Q=91% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=10 Q=75% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=8 Q=62% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=26 Q=100% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=9 Q=66% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=10 Q=74% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=13 Q=91% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=9 Q=69% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=13 Q=92% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=13 Q=94% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=25 Q=99% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=26 Q=99% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=25 Q=99% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=9 Q=73% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=10 Q=77% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=26 Q=99% G=81)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=25 Q=99% G=75)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=13 Q=97% G=75)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=16 Q=100% G=67)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=18 Q=99% G=51)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=34 Q=99% G=51)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=25 Q=99% G=40)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=16 Q=99% G=28)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=8 Q=62% G=28)
+[CARRIER] Locked on A1 (5865 MHz) in Boscam A (A) (P=8 Q=63% G=28)
+
+Observed trajectory summary:
+close -> far: G29 -> G37 -> G58/G64/G60/G57 -> G81
+far plateau:  G81 for 24 consecutive logged carrier samples before descent
+far -> close: G81 -> G75 -> G67 -> G51 -> G40 -> G28
+
+Interpretation guardrails:
+- G81 still frequently produced high Q (90-100%) and P in the useful range,
+  so this walk did not show a sustained raw-Q4 collapse at the table ceiling.
+- The far plateau means the controller was gain-limited there, but not
+  necessarily information-limited in every window.
+- Compared with prior 200 mW strong/extra-close observations around G14-G18,
+  the 25 mW close end around G28-G29 is consistent with substantially more
+  pre-Q4 gain being required after a -9.03 dB TX-power reduction.
+- Do NOT convert that observation into a global dB-per-gain-index constant:
+  position, multipath, antenna orientation, RF-stage transitions and the
+  non-linear vendor gain table are confounders.
+
