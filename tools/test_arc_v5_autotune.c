@@ -71,6 +71,7 @@ int main(void)
 
     /* Once local response confidence exists, V5 reacts in two control windows
      * and skips multiple +1 V3 discovery steps. */
+    arc_v5_autotune_rearm(&a, &t, 54u, 62u);
     teach_local_model(&a, 32u);
     (void)arc_v5_autotune_tick(&a, &weak);
     assert(a.gain == 54u);
