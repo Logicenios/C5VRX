@@ -2789,13 +2789,14 @@ static void open_recovery_menu(void)
     s_video_std_mode = VIDEO_STD_MODE_AUTO;
     s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;
     s_output_mode = VIDEO_OUTPUT_6BIT_40;
-    apply_rx_profile(RX_PROFILE_BALANCED);
+    apply_rx_profile(RX_PROFILE_ARC);
     video_standard_detector_reset();
     s_menu_cursor = 0;
     s_menu_timeout_ticks = 0;
     settings_save();
     video_set_menu_mode(true);
-    printf("[RECOVERY] GOLDEN + 6BIT@40 + BALANCED restored; menu opened\n");
+    printf("[RECOVERY] GOLDEN + 6BIT@40 + ARC restored; menu %s\n",
+           s_menu_active ? "opened" : "unavailable");
 }
 
 static void handle_button_long_click(void)

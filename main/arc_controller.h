@@ -18,6 +18,7 @@ typedef struct {
     unsigned weak_ticks;
     unsigned hot_ticks;
     unsigned lost_ticks;
+    unsigned gain_up_hold; /* Do not reverse overload protection immediately. */
 } arc_controller_t;
 
 typedef struct {
@@ -52,6 +53,7 @@ static inline uint8_t arc_step_gain(const arc_controller_t *arc, int delta)
 static inline uint8_t arc_controller_tick(arc_controller_t *arc,
                                           const arc_observation_t *o)
 {
+    if (arc->gain_up_hold) --arc->gain_up_hold;
     bool clean = o->sync && o->sync_quality >= 70 && o->q_phase >= 65 &&
                  o->p_median >= 14 && o->p_median <= 34 &&
                  o->clip_permille <= 16 && o->origin_permille < 500 &&
@@ -65,7 +67,8 @@ static inline uint8_t arc_controller_tick(arc_controller_t *arc,
         arc->gain = arc_step_gain(arc, -4);
         arc->state = ARC_ACQUIRE;
         arc->settle = 10u;
-        arc->hot_ticks = arc->weak_ticks = 0u;
+        arc->gain_up_hold = 40u; /* Two seconds at the 20 Hz supervisor rate. */
+        arc->hot_ticks = arc->weak_ticks = arc->lost_ticks = 0u;
         return arc->gain;
     }
 
@@ -75,32 +78,46 @@ static inline uint8_t arc_controller_tick(arc_controller_t *arc,
 
     /* Absence of convincing video semantics is not evidence that more
      * downstream gain will recover a carrier. After a persistent loss, pin
-     * the first entry of the highest RF stage and hold it until sync returns.
+     * the first entry of the highest RF stage when Q4 has spare headroom.
      * This prevents noisy Q4 phase scores from walking G61 toward G89. */
     if (!o->sync) {
         if (arc->lost_ticks < 10u) ++arc->lost_ticks;
         arc->weak_ticks = arc->hot_ticks = 0u;
         if (arc->lost_ticks >= 10u) {
-            if (arc->gain != arc->survival_gain) {
-                arc->gain = arc->survival_gain;
+            uint8_t next = arc->gain;
+            /* Missing sync can also mean overload or a sparse sync window.
+             * Never undo a clipping cut just because video detection failed.
+             * Ordinary overload must still be reduced without valid sync. */
+            if (hot) {
+                next = arc_step_gain(arc, -1);
+            } else if (arc->gain > arc->survival_gain ||
+                       (arc->gain_up_hold == 0u &&
+                        o->clip_permille <= 8 && o->p_median < 14 &&
+                        o->origin_permille >= 550)) {
+                next = arc->survival_gain;
+            }
+            if (arc->gain != next) {
+                if (next < arc->gain) arc->gain_up_hold = 40u;
+                arc->gain = next;
                 arc->settle = 10u;
             }
             arc->state = ARC_ACQUIRE;
         }
         return arc->gain;
     }
-    arc->lost_ticks = 0u;
-
     if (arc->state == ARC_LOCK) {
         if (clean) {
             arc->weak_ticks = arc->hot_ticks = arc->lost_ticks = 0u;
             return arc->gain; /* LOCK invariant: clean IQ causes no PHY writes. */
         }
         if (o->sync_quality < 40) {
+            arc->weak_ticks = arc->hot_ticks = 0u;
             if (++arc->lost_ticks < 10u) return arc->gain;
         } else if (weak) {
+            arc->lost_ticks = arc->hot_ticks = 0u;
             if (++arc->weak_ticks < 15u) return arc->gain;
         } else if (hot) {
+            arc->lost_ticks = arc->weak_ticks = 0u;
             if (++arc->hot_ticks < 6u) return arc->gain;
         } else {
             arc->weak_ticks = arc->hot_ticks = arc->lost_ticks = 0u;
@@ -109,6 +126,7 @@ static inline uint8_t arc_controller_tick(arc_controller_t *arc,
         arc->state = ARC_ACQUIRE;
         arc->weak_ticks = arc->hot_ticks = arc->lost_ticks = 0u;
     }
+    arc->lost_ticks = 0u;
 
     if (clean) {
         arc->state = ARC_LOCK;
@@ -119,7 +137,7 @@ static inline uint8_t arc_controller_tick(arc_controller_t *arc,
     if (hot) {
         if (++arc->hot_ticks >= 2u) next = arc_step_gain(arc, -1);
         arc->weak_ticks = 0u;
-    } else if (weak && o->q_phase >= 18) {
+    } else if (weak && o->q_phase >= 18 && arc->gain_up_hold == 0u) {
         if (++arc->weak_ticks >= 4u) next = arc_step_gain(arc, +1);
         arc->hot_ticks = 0u;
     } else {
@@ -127,6 +145,7 @@ static inline uint8_t arc_controller_tick(arc_controller_t *arc,
     }
 
     if (next != arc->gain) {
+        if (next < arc->gain) arc->gain_up_hold = 40u;
         arc->gain = next;
         arc->settle = 10u;
         arc->weak_ticks = arc->hot_ticks = arc->lost_ticks = 0u;

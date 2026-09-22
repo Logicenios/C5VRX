@@ -92,6 +92,68 @@ int main(void)
     arc_observation_t clipped = {.clip_permille = 100, .p_median = 40};
     assert(arc_controller_tick(&arc, &clipped) == 57);
     assert(arc.settle == 10);
+    /* Settling must not immediately reverse the cut on an origin collapse. */
+    arc_observation_t transient = {.p_median = 2, .origin_permille = 950};
+    for (unsigned i = 0; i < 30; ++i)
+        assert(arc_controller_tick(&arc, &transient) == 57);
+
+    /* A clipped carrier often loses sync. Previously this repeatedly cut
+     * G61->G57 and then forced G61 again even with ample Q4 amplitude. */
+    arc_observation_t unsynced_carrier = {
+        .p_median = 24, .q_phase = 35, .origin_permille = 100,
+    };
+    for (unsigned i = 0; i < 200; ++i)
+        assert(arc_controller_tick(&arc, &unsynced_carrier) == 57);
+
+    /* Genuine amplitude collapse may recover sensitivity after the hold. */
+    arc_observation_t collapse = {
+        .p_median = 2, .q_phase = 5, .origin_permille = 950,
+    };
+    assert(arc_controller_tick(&arc, &collapse) == 61);
+    for (unsigned i = 0; i < 100; ++i)
+        assert(arc_controller_tick(&arc, &collapse) == 61);
+
+    /* Moderate overload also needs protection when semantic sync is absent. */
+    arc_controller_reset(&arc, &table, 61);
+    arc_observation_t moderate_hot = {
+        .p_median = 40, .clip_permille = 50, .origin_permille = 0,
+    };
+    for (unsigned i = 0; i < 20; ++i)
+        arc_controller_tick(&arc, &moderate_hot);
+    assert(arc.gain == 60);
+    for (unsigned i = 0; i < 100; ++i)
+        assert(arc_controller_tick(&arc, &unsynced_carrier) == 60);
+
+    /* Sparse sync misses must not release a previously good lock. */
+    arc_controller_reset(&arc, &table, 62);
+    arc.settle = 0;
+    arc_controller_tick(&arc, &clean);
+    for (unsigned i = 0; i < 100; ++i) {
+        assert(arc_controller_tick(&arc, &lost) == 62);
+        assert(arc_controller_tick(&arc, &clean) == 62);
+    }
+    assert(arc.state == ARC_LOCK);
+
+    /* Non-consecutive weak/hot observations must not accumulate as a fade. */
+    arc_observation_t weak = clean;
+    weak.p_median = 8;
+    weak.origin_permille = 600;
+    arc_observation_t hot = clean;
+    hot.p_median = 38;
+    hot.clip_permille = 40;
+    for (unsigned i = 0; i < 100; ++i) {
+        assert(arc_controller_tick(&arc, &weak) == 62);
+        assert(arc_controller_tick(&arc, &hot) == 62);
+    }
+    assert(arc.state == ARC_LOCK);
+
+    /* A continuous weak-sync run must progress; lost_ticks used to be reset
+     * immediately before its increment, so this exit could never complete. */
+    arc_observation_t poor_sync = clean;
+    poor_sync.sync_quality = 30;
+    for (unsigned i = 0; i < 10; ++i)
+        arc_controller_tick(&arc, &poor_sync);
+    assert(arc.state == ARC_ACQUIRE);
 
     puts("ARC PHY/controller tests passed");
     return 0;

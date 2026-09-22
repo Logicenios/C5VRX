@@ -121,8 +121,8 @@ check("three-second BOOT recovery cannot be blocked by persisted menu state",
       "s_menu_boot_btn_enabled = true;" in all_c and
       "s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;" in all_c and
       "s_output_mode = VIDEO_OUTPUT_6BIT_40;" in all_c and
-      "apply_rx_profile(RX_PROFILE_BALANCED);" in all_c and
-      "[RECOVERY] GOLDEN + 6BIT@40 + BALANCED restored" in all_c)
+      "apply_rx_profile(RX_PROFILE_ARC);" in all_c and
+      "[RECOVERY] GOLDEN + 6BIT@40 + ARC restored" in all_c)
 check("experimental BW auto and 4-bit@80 remain opt-in",
       "AUTO EXP" in all_c and "VIDEO_OUTPUT_4BIT_80" in all_c and
       "DAC4_RATE_HZ     80000000u" in all_c)

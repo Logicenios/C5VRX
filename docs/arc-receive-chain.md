@@ -180,8 +180,12 @@ The controller observes transport, sync, Q4 power/coherence, clipping, origin
 occupancy and endpoint-winding risk hierarchically. A large amplitude cannot
 hide clipping or bad phase geometry. Gain changes normally settle for 500 ms,
 but severe clipping bypasses that hold and immediately removes four gain
-indices. Persistent no-sync pins the survival index regardless of noisy Q4
-phase scores. Clean LOCK never performs gain, filter, AFC, estimator or
+indices. After a cut, gain increases are held for two seconds. Persistent
+no-sync reduces excess downstream gain to the survival index, but only raises
+gain toward that index if Q4 power and origin occupancy indicate unused
+headroom. A lost sync detector must not undo overload protection. Moderate
+overload remains actionable even without sync; weak/hot evidence must be
+consecutive before it releases LOCK. Clean LOCK never performs gain, filter, AFC, estimator or
 calibration writes.
 
 The `H` console command prints the captured table, current decoded tuple,
@@ -220,3 +224,64 @@ silicon/board noise figure, whether FFT scaling precedes MODEM_DIAG, or whether
 an RXDC startup calibration improves this continuous analog-FM use. Those are
 physical properties and remain bounded A/B measurements rather than runtime
 search dimensions.
+
+
+## Range complaints after the menu repair
+
+The three-second recovery action previously selected BALANCED and saved it in
+NVS. Flashing an ARC build does not override a valid saved receive profile.
+Recovery now selects ARC with Golden, 6BIT@40, fixed BW40 and AFC off. Existing
+explicitly saved profiles remain respected; select ARC or invoke recovery once
+on the updated firmware. The connected device's actual profile was not read in
+this investigation because COM10 was unavailable.
+
+A deterministic controller regression also reproduced a gain reversal: severe
+clipping cuts G61 to G57, missing sync persists at otherwise adequate amplitude,
+and the old loss branch forces G61 again. The revised loss path checks headroom
+and observes a two-second hold against upward reversal. Tests cover this trace,
+moderate overload without sync, genuine collapse recovery, isolated sync misses,
+and alternating weak/hot observations. These establish controller behavior, not
+a measured sensitivity increase or proof that this caused every reported click.
+
+## Concrete next DSP target
+
+The current default still uses Golden's endpoint discriminator. Runtime IQ
+geometry metrics are observations; neither a larger ring nor more metrics
+corrects the transmitted waveform. The 32 KiB ring doubles buffering and the
+requested half-ring delay to about 409.6 us. It adds no quantizer precision.
+The CPU is already configured at 240 MHz (six cycles per 40 MS/s input sample).
+
+The next implementation should target **fewer catastrophic phase errors with
+unchanged strong-signal detail**, in this order:
+
+1. Establish a fixed receive tuple and record raw Q4 plus PHY-write/transport
+   counters. Compare the same signal with that tuple frozen and with ARC. This
+   separates receiver switching bursts from errors present at fixed settings.
+2. Estimate bounded residual DC/IQ correction during acquisition, using
+   independent captures to reject signal-dependent overfitting. Generate
+   `phase = arg(A * (z - mu))` for all 256 cells and a confidence from the angular
+   uncertainty over each transformed cell. Use the actual truncated Q10 cell:
+   a signed nibble `s` represents `[64*s, 64*s+63]`, not a point at `64*s` or an
+   assumed symmetric cell around it. Rail cells need extra saturation uncertainty.
+3. Prove ownership of a patched embedded BitScrambler program/LUT across stop,
+   load and restart before enabling acquisition-generated tables. Freeze it
+   together with the tuple. CPU writes into the running RX/TX ring are unsafe
+   and are not the proposed correction mechanism.
+4. Use every adjacent phase interval, sum two wrapped increments WITHOUT
+   wrapping the sum, and then reduce to 20 MS/s. The existing Trajectory v2 is
+   a two-bundle approximation that can be evaluated now; its synthetic-prior
+   benchmark is not a measured RF sensitivity improvement. A full exact stage
+   still needs the issue #23 sustained-throughput and boundary-state proof.
+5. Repair only intervals with both low phase confidence and temporal
+   inconsistency. Preserve large, credible FM motion. Evaluate short holdover
+   before a PLL. Report >=16/>=32 DAC-code errors, slip-burst duration, sync and
+   chroma/detail retention on held-out signals, not just average noise power.
+6. Fit any post-demodulation shelving/de-emphasis to the actual VTX waveform.
+   A generic low-pass can hide snow while destroying the desired sharpness.
+
+A controlled attenuation comparison must show lower required input power at
+matched picture quality before this is called a range improvement. If the C5
+cannot sustain the exact pipeline, the remaining choices are a measured
+compressed LUT tradeoff or an additional ADC/DSP/FPGA path. Increasing gain
+cannot reverse RF noise, clipped samples, multipath nulls or Q4 information loss;
+no receiver can guarantee always-sharp video when the carrier is absent.
