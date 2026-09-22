@@ -32,6 +32,7 @@ physically proven.
 | --- | --- |
 | `S` | Self-noise A/B. Measure normal live TX, remove the PARLIO TX unit, hold all six DAC GPIOs static low while RX remains the measurement source, then rebuild the exact live TX pipeline and measure again. |
 | `G` | Sweep from ARC's first entry of the highest vendor RF stage (normally near G61) through the complete generated vendor-table maximum, one index at a time. This distinguishes additional RF sensitivity from downstream BB/fine amplification. |
+| `U` | ARC V3 / RX AUTO LAB. Automatically separates Q4 gain placement from RF sensitivity by running reference-guarded gain scouting, top-candidate BW40/BW20 tests, carrier centering, and repeated baseline/winner proof. |
 | `K` | Erase only Espressif's stored PHY calibration namespace and reboot. The running receiver is never recalibrated in place; the next Wi-Fi/PHY initialization rebuilds vendor calibration state. |
 | `H` | Print the read-only ARC gain/filter/ADC/IQ oracle. |
 | `W` | Existing safe BW40/BW20 A/B using the already-proven bandwidth API. |
@@ -303,7 +304,132 @@ a set of candidate BB/fine operating points during ACQUIRE:
 A repeated controlled-attenuator sweep is the promotion gate for any permanent
 candidate map or skip list.
 
-## 3. Fresh vendor PHY calibration
+## 3. ARC V3 / RX AUTO LAB (`U`)
+
+`U` is the integrated receiver-autotune experiment. It is intentionally a
+console-only lab engine first; it does not replace production ARC until the
+hardware results prove the search policy.
+
+The experiment answers one question:
+
+> Is useful RF information still present but badly placed in Q4/I4, or has the
+> receiver reached a real PRE-Q4 sensitivity limit?
+
+### Search hierarchy
+
+```text
+baseline: MANUAL + BW40 + offset 0 + first highest-RF-stage index
+  -> GAIN SCOUT
+  -> top 3 stable gain candidates
+  -> BW40/BW20 SCOUT
+  -> best gain + bandwidth
+  -> CENTER SCOUT coarse (-1000..+1000 kHz)
+  -> CENTER SCOUT fine (around the coarse winner)
+  -> 5x BASELINE -> WINNER -> BASELINE proof
+  -> ACQUIRED / OVERLOAD / RF_LIMIT / UNSTABLE / INCONCLUSIVE
+```
+
+The gain scout does not trust a single sequential sweep. Every candidate is
+measured between repeated G62-like reference measurements:
+
+```text
+REF -> candidate -> REF
+```
+
+A candidate is not promoted when the two reference observations drift beyond
+the bounded Q/P/origin/clipping tolerances. This makes ordinary 5.8 GHz fading
+visible instead of silently turning it into a fake gain-table conclusion.
+
+At a normal/weak input the scout covers every valid index from
+`survival_gain` through `table->max_index`. If the initial reference is
+already overloaded, `U` switches to a bounded downward coarse search and then
+refines around the best lower-gain result instead of making clipping worse.
+
+### Candidate classification
+
+The selection rules deliberately avoid a weighted "bigger P is better" score.
+
+Hard rejection comes first:
+
+- any transport fault;
+- more than 30 permille Q4 rail clipping.
+
+A `SWEET` candidate then requires:
+
+- `Q >= 65`;
+- `origin <= 250 pm`;
+- `P = 14..34`;
+- bounded I/Q skew and cross terms.
+
+`USABLE` permits a wider Q4 window, while weak/near-origin states remain
+`POOR`. Within the same class, selection is lexicographic: lower clipping,
+higher phase coherence, lower origin occupancy, P closer to the target center,
+better IQ geometry, lower winding, then semantic sync.
+
+This means a saturated `P=80` state cannot beat a clean `P=24` state merely
+because its amplitude is larger.
+
+### RF-limit classification
+
+A state is explicit RF-limit evidence when it has approximately:
+
+```text
+clip <= 8 pm
+P <= 4
+Q < 15
+origin >= 800 pm
+```
+
+If at least 75% of the stable highest-RF-stage gain observations meet that
+condition and the later BW/centering stages cannot produce a repeatably usable
+winner, `U` reports `RF_LIMIT`.
+
+That is the signal to **stop gain hunting**. The next PRE-Q4 work is then fresh
+vendor calibration followed by individually gated RXDC/IQ and ADC/filter
+experiments, not another downstream-gain increase.
+
+### Repeated proof and freeze
+
+A frontend winner is accepted only when at least four of five rounds have
+stable baseline references and the winner beats both surrounding baseline
+observations:
+
+```text
+BASELINE -> WINNER -> BASELINE
+```
+
+On `ACQUIRED`, the winning gain/BW/offset tuple is left live in:
+
+```text
+AGC = MANUAL
+AFC = HOLD
+BW  = fixed winner
+```
+
+No setting is persisted. A reboot or normal profile/configuration action can
+return to the ordinary receiver.
+
+The final line is machine-readable:
+
+```text
+C5VRX_RX_AUTO_RESULT status=ACQUIRED gain=... bw=... offset_khz=...
+                         proof_wins=... proof_stable=... frozen=1
+```
+
+If the winner is not proven, the pre-`U` receiver state is restored.
+
+### Demodulator boundary
+
+`U` does not mix frontend discovery with demodulator selection. Q4 placement is
+solved first while the currently selected demod remains constant. After
+`ACQUIRED`, the console prints a follow-up marker instructing the hardware A/B
+to keep the frozen RF tuple unchanged while comparing Golden / Exact Adjacent /
+Alpha on the demod branch.
+
+Fresh full PHY calibration also stays a separate reboot A/B: run `U`, run
+`K`, then run the same `U` setup again.
+
+## 4. Fresh vendor PHY calibration
 
 `K` calls the public ESP-IDF
 `esp_phy_erase_cal_data_in_nvs()` API and then reboots. It does **not** run an
@@ -316,7 +442,7 @@ attenuation threshold against the previous boot.
 Do not conclude that calibration helped merely because coefficient values
 changed.
 
-## 4. Still gated
+## 5. Still gated
 
 The ROM contains receive-side functions related to RXDC, IQ correction, ADC,
 filters and gain. This PR deliberately does not promote these writers:
