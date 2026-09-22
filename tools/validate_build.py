@@ -51,7 +51,7 @@ c_names = [f.name for f in c_files]
 video_c = read(MAIN / "video.c")
 menu_lifecycle = video_c.split("static void video_set_menu_mode", 1)[1].split("static void menu_cycle_standard_mode", 1)[0]
 
-check("production receiver and dedicated menu/auto-lab modules", set(c_names) == {"main.c", "arc_phy.c", "arc_v3_controller.c", "rx_auto_lab.c", "rf.c", "video.c", "menu_raster.c"},
+check("production receiver and dedicated menu/auto-lab modules", set(c_names) == {"main.c", "arc_phy.c", "arc_v3_controller.c", "arc_v5_autotune.c", "rx_auto_lab.c", "rf.c", "video.c", "menu_raster.c"},
       f"found: {c_names}")
 check("main.c present", "main.c" in c_names)
 check("rf.c present", "rf.c" in c_names)
@@ -463,6 +463,29 @@ check("ARC V3 preserves zero-write Q4 lock and overload protection",
       "lock_hold_good" in arc_v3 and
       "arc->severe_ticks >= 2u" in arc_v3 and
       "step_gain(arc, -4)" in arc_v3)
+arc_v5 = read(MAIN / "arc_v5_autotune.c") + read(MAIN / "arc_v5_autotune.h")
+check("ARC V5 AUTOTUNE is an explicit predictive profile over ARC V3",
+      "RX_PROFILE_ARC_V5_AUTOTUNE_EXP" in video_c and
+      'return "ARC V5 AUTOTUNE"' in video_c and
+      "} else if (c == 'Z') {" in video_c and
+      "arc_v5_autotune_tick" in video_c and
+      "arc_v3_controller_tick" in arc_v5)
+check("ARC V5 persistence is confidence-gated and versioned",
+      "ARC_V5_MODEL_MAGIC" in arc_v5 and
+      "table_fingerprint" in arc_v5 and
+      "arc_v5_export_model" in arc_v5 and
+      'nvs_set_blob(h, "model"' in arc_v5 and
+      "ARC_V5_SAVE_INTERVAL_MS" in arc_v5)
+check("ARC V5 never learns NO_CARRIER and falls back to V3",
+      "ARC_V5_CONTEXT_NO_CARRIER" in arc_v5 and
+      'Never "learn" pure noise' in arc_v5 and
+      "Stable/unknown territory falls back to the proven ARC V3 controller" in arc_v5)
+check("ARC V5 prediction is confidence bounded",
+      "confidence >= 64u ? 12" in arc_v5 and
+      "confidence >= 24u ? 8" in arc_v5 and
+      "confidence < 8u" in arc_v5 and
+      "ARC_V5_VERIFY_TICKS" in arc_v5)
+
 check("ARC V3 exposes an explicit RF limit at the vendor-table ceiling",
       "ARC_V3_RF_LIMIT" in arc_v3 and
       "arc->gain >= arc->table.max_index" in arc_v3 and
