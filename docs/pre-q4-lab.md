@@ -598,6 +598,253 @@ stability oracle; overload recovery must establish a clean anchor first.
 The next ARC V3 iteration should implement these policy changes in the lab
 engine before any production promotion.
 
+### ARC V3 gain-first live experiment
+
+The far/medium/close `U` runs identify a concrete production-ARC failure:
+
+```text
+far G62:
+P~1, Q~0, origin~100%
+        |
+        +-- current ARC requires useful phase/sync evidence before gain-up
+        +-- persistent no-sync explicitly returns to survival_gain (G62)
+        |
+        +--> controller can remain permanently quantizer-starved
+```
+
+This is a control-loop trap, not evidence that the RF carrier is absent. In the
+far hardware run, raising generated vendor gain converted the same class of
+weak input into coherent Q4. Medium and close runs show the inverse problem:
+G62 can also be far too hot.
+
+PR ARC V3 therefore adds a separate `ARC V3 EXP` live profile. It does not
+replace production ARC yet.
+
+The experiment deliberately freezes every other frontend actuator:
+
+```text
+BW = BW40
+offset = 0 kHz
+FFT = normal
+demod = independently selectable
+```
+
+Only a valid vendor-generated gain-table index may move.
+
+The controller is raw-Q4-first and does not require semantic video sync to
+escape starvation:
+
+```text
+STARVED
+  hard: P<=4, Q<15, origin>=800 -> +4 indices
+  ordinary below-target         -> +1 index
+
+TARGET
+  clip<=16 pm
+  P=8..34
+  Q>=55
+  origin<=350 pm
+  winding<300 pm
+  -> after persistence: LOCK
+
+HIGH / OVERLOAD
+  above target / clipping -> -1
+  severe clip/P           -> immediate -4
+
+table max + persistent STARVED
+  -> RF_LIMIT
+```
+
+The target is intentionally headroom-biased. The controller stops increasing
+gain as soon as raw Q4 contains enough coherent phase information; it does not
+optimize toward P=24 and it does not continue into BW/AFC search.
+
+LOCK uses a slightly wider hold window and produces zero PHY writes while the
+raw Q4 vector remains useful. This prevents normal video modulation or sparse
+semantic-sync windows from causing gain hunting.
+
+The old `ARC` profile remains available unchanged for direct A/B. Select the
+new test profile through the normal profile cycle or serial key `Y`.
+
+Expected first live test:
+
+```text
+far:
+  old ARC -> remains near G62 / Q4-starved
+  ARC V3 -> climbs through vendor states until Q4 enters TARGET
+
+medium:
+  ARC V3 -> descends from overloaded G62 and freezes near the first clean state
+
+close:
+  ARC V3 -> rapidly cuts gain until clipping disappears
+```
+
+Promotion criterion is not a specific G number. The test succeeds if the live
+controller follows the raw-Q4 state across distance, preserves clean LOCK, and
+extends matched-quality range without persistent oscillation.
+
+### Live ARC V3 walk evidence and temporal fix
+
+The first live `ARC V3 EXP` walk tests confirmed the gain direction over almost
+the full vendor table, but also exposed excessive reaction to individual
+50 ms control windows.
+
+Observed useful regions were approximately:
+
+```text
+~1 cm / ultra-close -> G12-G18
+close               -> G40-G46
+medium              -> G60-G70
+far                 -> G77-G81
+```
+
+These values are **observations, not a hardcoded distance table**. They show
+that the correct generated vendor state can move by more than 60 indices across
+the usable RF dynamic range.
+
+The strongest moving test started far around G79-G81 and then walked back
+toward the VTX. The overall trajectory correctly fell toward lower gain:
+
+```text
+~G80 -> G69 -> G66 -> G55 -> G40 -> G36
+```
+
+but a short fade produced an incorrect reversal:
+
+```text
+G69 -> G66 -> G81 -> G81 -> G67 -> G55
+```
+
+Static traces showed the same state could vary strongly between completed
+control windows while the carrier remained usable. That proves the first live
+ARC V3 implementation was directionally correct but temporally under-filtered.
+
+The controller now uses a five-window component-wise median before ordinary
+gain decisions. Gain-up is deliberately slower than gain-down:
+
+```text
+ordinary STARVED -> 5 filtered confirmations
+hard STARVED     -> 3 filtered confirmations
+HIGH             -> 3 filtered confirmations
+OVERLOAD         -> 2 filtered confirmations
+severe raw clip  -> 2 consecutive raw windows, then emergency -4
+```
+
+A downward gain move also installs a one-second no-up reversal guard. This is
+specifically intended to prevent a short multipath fade from turning a valid
+walk-back trajectory such as `G69 -> G66` into `G81`. Persistent real
+starvation remains able to reverse direction once the guard expires.
+
+LOCK now tolerates a broader filtered target region and requires six persistent
+bad filtered observations before leaving the zero-write state.
+
+### Post-fix hardware validation and calibration anchors
+
+The temporal ARC V3 fix was re-tested with repeated moving hardware walks.
+The strongest validation was a **close -> far -> close** trajectory. The
+observed gain sequence followed the physical RF trend in both directions:
+
+```text
+close -> far:
+G16 -> G54 -> G74/G73 -> G78 -> G79 -> G81
+
+far -> close:
+G81 -> G77 -> G69 -> G56 -> G45 -> G42 -> G39
+```
+
+The previously observed large short-fade reversal (`G66 -> G81` while
+walking toward the VTX) was not reproduced in this run. Long plateaus at a
+useful gain state are now common, which is consistent with the five-window
+median, asymmetric persistence and reversal guard doing their intended job.
+
+A separate medium -> extra-close walk similarly descended through:
+
+```text
+G62/G68 -> G54 -> G50 -> G46 -> G38 -> G35 -> G31 -> G14/G17
+```
+
+At the far end of the close/far/close test the raw-Q4 vector was still often
+healthy even at the vendor ceiling, for example:
+
+```text
+G78 P10 Q88
+G79 P17 Q99
+G81 P25 Q99
+G81 P17 Q99
+```
+
+The operator also reported that the point previously treated as "far" now
+produced good video. This is strong practical evidence that earlier usable
+range was being limited substantially by gain placement before Q4. It is **not
+yet a calibrated sensitivity result**: no RF input power or step attenuation
+was measured.
+
+Across all current hardware walks, the empirical operating regions are now:
+
+```text
+very strong / ~1 cm   -> G14-G18
+strong / close        -> roughly G35-G46
+medium-close          -> roughly G50-G56
+medium / weak         -> roughly G60-G74
+very weak / far       -> roughly G77-G81
+```
+
+These ranges are **calibration anchors, not a distance table**. Indoor
+multipath, antenna orientation and VTX power can move the optimum state. The
+useful conclusion is that the correct vendor state spans almost the entire
+generated table and moves monotonically enough to support a calibrated search
+policy.
+
+A future C5VRX gain calibration layer should therefore map **raw-Q4 condition
+to search anchors**, not meters to gain. A first coarse ladder supported by
+hardware evidence is:
+
+```text
+G16 -> G40 -> G54 -> G70 -> G78 -> G81
+```
+
+Example policy:
+
+```text
+hard-starved at G54 -> jump toward G70
+still starved       -> try G78
+TARGET               -> refine locally / LOCK
+
+overloaded at G78   -> jump toward G70
+still high          -> try G54
+TARGET               -> refine locally / LOCK
+```
+
+The existing ARC V3 controller intentionally remains more conservative than
+this proposed calibration search. The next calibration step should collect
+per-state P/Q/origin/clip/winding statistics and, ideally, repeat them against
+known RF attenuation. That would turn the empirical ladder into a reproducible
+gain-transition table without assuming that vendor gain indices are linear dB.
+
+The new working model for the original range problem is therefore:
+
+```text
+weak RF
+  -> insufficient pre-Q4 generated gain
+  -> Q4/I4 vector collapses around the origin
+  -> phase information is quantized away
+  -> FM/CVBS quality collapses early
+
+ARC V3:
+weak RF
+  -> raise vendor gain until Q4 is usefully occupied
+  -> hold with temporal hysteresis
+  -> preserve phase information for the demodulator
+```
+
+Once ARC V3 reaches G81 and sustained Q4 coherence still collapses, that point
+is much closer to the **real receiver sensitivity boundary**. Beyond that
+point, further improvement must come from the RF/ADC/filter chain or from
+making better use of the remaining weak-signal phase information downstream;
+digital amplitude scaling after Q4 cannot reconstruct phase that was already
+lost in quantization.
+
 ### Demodulator boundary
 
 `U` does not mix frontend discovery with demodulator selection. Q4 placement is

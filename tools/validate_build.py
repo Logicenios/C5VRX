@@ -51,7 +51,7 @@ c_names = [f.name for f in c_files]
 video_c = read(MAIN / "video.c")
 menu_lifecycle = video_c.split("static void video_set_menu_mode", 1)[1].split("static void menu_cycle_standard_mode", 1)[0]
 
-check("production receiver and dedicated menu/auto-lab modules", set(c_names) == {"main.c", "arc_phy.c", "rx_auto_lab.c", "rf.c", "video.c", "menu_raster.c"},
+check("production receiver and dedicated menu/auto-lab modules", set(c_names) == {"main.c", "arc_phy.c", "arc_v3_controller.c", "rx_auto_lab.c", "rf.c", "video.c", "menu_raster.c"},
       f"found: {c_names}")
 check("main.c present", "main.c" in c_names)
 check("rf.c present", "rf.c" in c_names)
@@ -382,6 +382,7 @@ check("ARC is the production default and legacy RX profiles remain explicit",
       "RX_PROFILE_ARC" in all_c and
       "RX_PROFILE_FUSION_EXP" in all_c and
       "RX_PROFILE_RANGE_V2_EXP" in all_c and
+      "RX_PROFILE_ARC_V3_EXP" in all_c and
       "s_rx_profile = RX_PROFILE_ARC" in all_c and
       "s_rf_bw_mode = RF_BW_MODE_BW40" in all_c)
 check("Range v2 combines Fusion with acquisition-only BW/AFC and full overload headroom",
@@ -431,6 +432,41 @@ check("ARC preserves clean LOCK and uses maximum RF-stage survival",
 check("incorrect one-argument AGC maximum call is absent",
       "phy_agc_max_gain_set" not in all_c and
       "rf_set_experimental_hw_agc" not in all_c)
+
+arc_v3 = read(MAIN / "arc_v3_controller.c") + read(MAIN / "arc_v3_controller.h")
+check("ARC V3 EXP is an explicit gain-only Q4 test profile",
+      "RX_PROFILE_ARC_V3_EXP" in video_c and
+      'return "ARC V3 EXP"' in video_c and
+      "} else if (c == 'Y') {" in video_c and
+      "arc_v3_controller_tick" in video_c and
+      "s_rf_bw_mode = RF_BW_MODE_BW40" in video_c and
+      "s_afc_mode = AFC_MODE_OFF" in video_c)
+check("ARC V3 does not require semantic sync to escape a starved G62",
+      "hard_starved" in arc_v3 and
+      "step_gain(arc, hard ? 4 : 1)" in arc_v3 and
+      "arc->table.max_index" in arc_v3 and
+      "bool sync" not in read(MAIN / "arc_v3_controller.h"))
+check("ARC V3 filters ordinary gain decisions over five raw-Q4 windows",
+      "ARC_V3_FILTER_SAMPLES 5u" in read(MAIN / "arc_v3_controller.h") and
+      "filter_push" in arc_v3 and
+      "median_int" in arc_v3 and
+      "if (!arc->filtered_valid)" in arc_v3 and
+      "const arc_v3_observation_t *f = &arc->filtered" in arc_v3)
+check("ARC V3 gain-up is slower than gain-down and guards direction reversal",
+      "ARC_V3_UP_CONFIRM_TICKS          5u" in arc_v3 and
+      "ARC_V3_OVERLOAD_CONFIRM_TICKS    2u" in arc_v3 and
+      "ARC_V3_UP_GUARD_TICKS           20u" in arc_v3 and
+      "arc->up_guard_ticks != 0u" in arc_v3 and
+      "G66 -> G81" in arc_v3)
+check("ARC V3 preserves zero-write Q4 lock and overload protection",
+      "Zero-write clean LOCK invariant" in arc_v3 and
+      "lock_hold_good" in arc_v3 and
+      "arc->severe_ticks >= 2u" in arc_v3 and
+      "step_gain(arc, -4)" in arc_v3)
+check("ARC V3 exposes an explicit RF limit at the vendor-table ceiling",
+      "ARC_V3_RF_LIMIT" in arc_v3 and
+      "arc->gain >= arc->table.max_index" in arc_v3 and
+      "ARC_V3_RF_LIMIT_CONFIRM_TICKS" in arc_v3)
 
 rx_auto = read(MAIN / "rx_auto_lab.c") + read(MAIN / "rx_auto_lab.h")
 check("ARC V3 RX AUTO LAB is explicit opt-in console instrumentation",

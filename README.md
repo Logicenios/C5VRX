@@ -43,6 +43,18 @@ of the generated vendor gain table, and request a fresh vendor PHY calibration
 on the next boot without promoting undocumented RXDC/IQ/filter writers into
 production.
 
+Hardware walk tests now show that useful generated gain spans almost the full
+vendor table: roughly G14-G18 at extreme close range, G35-G56 through
+close/medium conditions, and G77-G81 at the weakest tested range. The
+gain-first `ARC V3 EXP` profile uses raw-Q4 occupancy/coherence, temporal
+median filtering and asymmetric hysteresis to follow that changing operating
+region without the old G62 starvation trap. In the latest close -> far -> close
+test, the gain trajectory moved from about G16 to G81 and back toward G39, and
+a location that previously represented the practical far limit produced good
+video. These are empirical calibration anchors, not calibrated dB values; the
+next step is a repeatable Q4-state -> gain search table, ideally validated with
+known RF attenuation.
+
 The current Range v2 work is documented in:
 - `docs/range-v2.md` — implementation and validation overview;
 - `docs/range-v2-knowledge.md` — preserved control/demod engineering knowledge;
