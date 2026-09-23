@@ -7,6 +7,14 @@ Upstream history before the refactor is in `git log` (baseline `upstream/main` =
 ## [Unreleased]
 
 ### Added
+- Phase 4 (up to the resource/timing gate): `fpga/` Tang Nano 20K project with an open-source
+  flow (yosys, nextpnr-himbaechel, apicula). Includes the FM front end (bit-exact against
+  `fpga/model/ref.py`), sync/levels/line-locked resampler, NTSC/PAL chroma decoder (comb/notch,
+  PAL-D, killer; bit-exact against `chroma_ref.py`), an SDRAM controller, a triple-buffered
+  field store, 720p50/60 HDMI with AVI InfoFrame, and bob output with nearest-neighbour
+  scaling for now. `.cst` for HDMI, SDRAM, buttons, LEDs and the C5 link.
+- `fpga/sim`: regenerating regressions (`make sim`), including the frame buffer under 59.94→50
+  and 50→60 rate mismatch.
 - Phase 3: C5 → FPGA link. `docs/FPGA_LINK.md` explains the decision. The FPGA reads the
   8 MODEM_DIAG pads directly; PARLIO RX's 40 MHz sample clock is output on GPIO10 as the
   strobe. A 1 Mbaud UART control link on GPIO11/12 uses a versioned, CRC-16-framed

@@ -1,0 +1,4 @@
+build/
+sim/data/
+sim/*.vvp
+model/__pycache__/

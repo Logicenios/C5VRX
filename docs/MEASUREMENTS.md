@@ -101,6 +101,10 @@ each result into a numbered row above.
 | P8 | Board current/temperature of the C5-Zero | "gets warm"; expected, not measured | Phase 2 |
 | P9 | FPGA-link electrical items L3.1–L3.6 (strobe, skew, termination, UART, scan) | docs/FPGA_LINK.md §5 | Phase 3 |
 | P10 | GOLDEN clamped vs fold-back LUT A/B, and XIAO boot on IDF 6.1 | needs the DAC board | Phase 1/2 |
+| P11 | Tang Nano 20K: header bank voltage (schematic), monitor lock on `make prog-pattern` at 720p60/50 in HDMI and DVI modes, LED1 (SDRAM ready) on `make prog-top` | pinlabel figure only; pattern loaded but not yet seen on a monitor | Phase 4 |
+| P12 | Dynamic rPLL retune (cascade 27×50/7×25/13 = 370.879 MHz ↔ 371.25 MHz): IDSEL/FBDSEL encoding, relock time, monitor shows 59.94 Hz | toolchain accepts it (fpga/README.md §5.4a); hardware unverified | Phase 4 |
+| P13 | Link eye at the FPGA: IOB capture on the rising STROBE edge vs falling edge; bit-error check with the C5's own capture | FPGA_LINK §2.3; no PLL left for a ×4 phase scan | Phase 4 |
+| P14 | Latency RF sample → TMDS pixel (e.g. LED flash on camera → photodiode on monitor, or a scope on the VTX video and HDMI) | plan Phase 4 requirement; estimate only (≈ 1 field + 0–1 output frame) | Phase 4 |
 
 ## Levels and hardware network (computed, not measured)
 

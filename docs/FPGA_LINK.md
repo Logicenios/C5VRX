@@ -46,9 +46,10 @@ Carson bandwidth (THEORY §2.3).
 
 ## §2 Electrical interface and signal integrity
 
-Both sides are 3.3 V LVCMOS. On the C5 side all GPIOs are 3.3 V. Which Tang Nano 20K bank
-voltages are free for header pins is decided with the `.cst` in Phase 4, from the Sipeed
-schematic; not assumed here.
+Both sides are 3.3 V LVCMOS. On the C5 side all GPIOs are 3.3 V. On the Tang Nano 20K, Sipeed's
+pinlabel figure marks the header banks 3.3 V; a check against the schematic is lab item P11.
+The Tang Nano 20K pin for every signal (STROBE on GCLKT_1 = pin 77) is in
+[fpga/README.md §2](../fpga/README.md) and `fpga/tangnano20k.cst`.
 
 ### §2.1 Pins (C5-Zero side)
 
