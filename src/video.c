@@ -4781,7 +4781,7 @@ static void console_diag_task(void *arg)
                     printf("  'U':         ARC V3 RX AUTO LAB (gain -> BW -> center -> repeated A/B proof)\n");
                     printf("  'S':         PRE-Q4 self-noise A/B (live TX vs DAC/PARLIO electrically quiet)\n");
                     printf("  'K':         Erase stored PHY calibration and reboot for a fresh vendor calibration\n");
-                    printf("  'X':         Cycle RX profile (Balanced/Range/Blocker/Recovery/Auto/ARC/Fusion/Range V2)\n");
+                    printf("  'X':         Cycle RX profile (ADC-fill profiles only; THEORY §4.3)\n");
                     printf("  'p'/'r':     Machine-readable PHY/Q4 snapshot / reset lag counters\n");
                     printf("  't'/'q':     Vendor timer inventory / quiet unsolicited lock message\n");
                     printf("  'l':         Mark a visible lag/freeze for correlation\n");

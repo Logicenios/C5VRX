@@ -112,6 +112,23 @@ Checks:
 - `range_demod_bench` self-test.
 - `bash -n prepare_pages_site.sh`.
 
+## Hardware results (C5-Zero, 2026-09-23, flashed by you, log captured over USB)
+
+- **Boots** on IDF 6.1.0 with ZCMP off, reaches `app_main`, no watchdog panic
+  (esp-idf#18886 not hit). Log: `board: Waveshare ESP32-C5-Zero (FPGA link) | chip:
+  ESP32-C5 rev v1.0`.
+- **Antenna:** `antenna: EXTERNAL (IPEX) (GPIO26=1, set before PHY init)`. The readback
+  matches.
+- **RF:** `RF ready: 5865 MHz / ch173 / BW40`. Rx ring runs (`rx_ch=0`, 9 descriptors
+  patched, write offset advancing). Transport faults are all 0.
+- **Q4 stream:** noise only (P=0, origin 1000 ‰, DC I −0.14, winding 11 ‰). ARC V3 went
+  ACQUIRE/STARVED and raised the gain G52 → G70. That is consistent with **no carrier on
+  A1**. Whether the new pad set captures a real signal bit-exactly is still open.
+- The board runs warm. That is expected for 240 MHz with continuous Wi-Fi RX and eight pads
+  toggling at the ≈80 MS/s diagnostic-bus rate. No current measurement yet.
+- "No serial" was the monitor attaching after boot. The firmware is silent after boot by
+  design. The unsupported `esp32_exception_decoder` monitor filter was removed.
+
 ## Unverified
 
 - The C5-Zero boots at all: IDF 6.1.0 on your silicon revision, DIO flash, in-package flash.
