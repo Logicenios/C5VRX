@@ -367,7 +367,8 @@ esp_err_t rf_start(void)
         return err;
 
     /* Set BW40 on 5 GHz. Hard failure if not available -- NO BW20 fallback.
-     * BW40 is a fixed hardware requirement for MODEM_DIAG IQ precision. */
+     * The FM signal occupies ~20-27 MHz (Carson, THEORY §2.3); BW20 cuts its
+     * outer sidebands and was measured visibly worse (MEASUREMENTS M33). */
     wifi_bandwidths_t bandwidths = {
         .ghz_2g = WIFI_BW20,
         .ghz_5g = RF_BANDWIDTH,
@@ -420,9 +421,9 @@ esp_err_t rf_start(void)
     extern void phy_wifi_fbw_sel(uint32_t val);
     phy_wifi_fbw_sel(s_analog_bw40 ? 1u : 0u);
 
-    /* Force high-sensitivity sweet-spot gain (index 52).
-     * Provides sensitive reception of weak carriers out of the box while
-     * active AGC dynamically manages gain tracking and overload protection. */
+    /* Boot gain index 52: a placeholder until settings_load() applies the
+     * profile's gain. The right ADC-fill index varies G14..G81 with distance
+     * (MEASUREMENTS M44), so no single index is a "sweet spot" (THEORY §4.2). */
     extern void phy_force_rx_gain(bool enable, uint8_t gain_idx);
     phy_force_rx_gain(true, 52);
 
@@ -457,7 +458,7 @@ extern void phy_fft_scale_force(bool force_en, int8_t force_value);
 extern int phy_get_noise_floor(void) __attribute__((weak));
 extern int phy_get_rssi(void) __attribute__((weak));
 
-/* Standard FPV Channel Table: 6 Bands x 8 Channels = 48 Channels
+/* Canonical FPV channel table (THEORY §3): 6 bands x 8 channels = 48 channels.
  * RaceBand (R), Boscam A (A), Boscam B (B), Boscam E (E), FatShark (F), LowBand (L) */
 static const fpv_channel_t s_fpv_channels[FPV_BAND_COUNT][8] = {
     [FPV_BAND_R] = { /* RaceBand (R1..R8) */
@@ -685,10 +686,9 @@ int rf_get_frequency_offset_khz(void)
 
 void rf_set_frequency_offset_khz(int offset_khz)
 {
-    /* Strict clamping: +/- 1500 kHz (+/- 1.5 MHz) maximum.
-     * Adjacent FPV channels are at least 19-20 MHz apart. Clamping strictly
-     * to +/- 1.5 MHz guarantees 100% that tuning is locked to the selected
-     * channel and can NEVER hop or switch to another channel. */
+    /* AFC bound +/- 1.5 MHz (THEORY §8): adjacent FPV channels are >= 19 MHz
+     * apart (THEORY §3), so the correction stays far inside half a channel.
+     * What phy_chip_set_chan_offset() does to the synthesiser is UNVERIFIED. */
     if (offset_khz < -1500) offset_khz = -1500;
     if (offset_khz > 1500)  offset_khz = 1500;
 

@@ -7,6 +7,7 @@ Run from the C5VRX-3 project root.
 Exit 0: all checks pass.
 Exit 1: one or more checks failed (details printed).
 """
+import subprocess
 import sys
 import re
 from pathlib import Path
@@ -123,8 +124,8 @@ check("three-second BOOT recovery cannot be blocked by persisted menu state",
       "s_menu_boot_btn_enabled = true;" in all_c and
       "s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;" in all_c and
       "s_output_mode = VIDEO_OUTPUT_6BIT_40;" in all_c and
-      "apply_rx_profile(RX_PROFILE_ARC);" in all_c and
-      "[RECOVERY] GOLDEN + 6BIT@40 + ARC restored" in all_c)
+      "apply_rx_profile(RX_PROFILE_DEFAULT);" in all_c and
+      "[RECOVERY] GOLDEN + 6BIT@40 + ARC V3 restored" in all_c)
 check("experimental BW auto and 4-bit@80 remain opt-in",
       "AUTO EXP" in all_c and "VIDEO_OUTPUT_4BIT_80" in all_c and
       "DAC4_RATE_HZ     80000000u" in all_c)
@@ -373,7 +374,7 @@ check("unsafe undocumented gain/filter ROM controls remain out of production",
           "phy_rxiq_set_reg(",
       )))
 
-check("ARC is the production default and legacy RX profiles remain explicit",
+check("ARC V3 (ADC-fill only, THEORY §4.3) is the production default; legacy RX profiles remain explicit",
       "RX_PROFILE_BALANCED = 0" in all_c and
       "RX_PROFILE_RANGE_EXP" in all_c and
       "RX_PROFILE_BLOCKER_EXP" in all_c and
@@ -383,8 +384,21 @@ check("ARC is the production default and legacy RX profiles remain explicit",
       "RX_PROFILE_FUSION_EXP" in all_c and
       "RX_PROFILE_RANGE_V2_EXP" in all_c and
       "RX_PROFILE_ARC_V3_EXP" in all_c and
-      "s_rx_profile = RX_PROFILE_ARC" in all_c and
+      "#define RX_PROFILE_DEFAULT RX_PROFILE_ARC_V3_EXP" in all_c and
+      "s_rx_profile = RX_PROFILE_DEFAULT" in all_c and
       "s_rf_bw_mode = RF_BW_MODE_BW40" in all_c)
+check("video-coupled gain profiles are neither selectable nor restored (THEORY §4.3)",
+      "rx_profile_couples_video_to_gain" in all_c and
+      "p == RX_PROFILE_ARC || p == RX_PROFILE_RANGE_EXP" in all_c and
+      "} while (rx_profile_couples_video_to_gain(next));" in all_c and
+      "!rx_profile_couples_video_to_gain((rx_profile_t)settings.rx_profile)" in all_c)
+check("AFC reference is the post-demod blanking level, not the mean frequency (THEORY §8)",
+      "video_levels_measure(&s_levels_work" in all_c and
+      "s_cfo_khz = (s_cfo_khz * 7 + blanking) / 8;" in all_c and
+      "sum_cross * 6366LL" not in all_c)
+check("GOLDEN LUT in fm.bsasm/fm4.bsasm is generated from THEORY constants (monotone clamp)",
+      subprocess.run([sys.executable, str(ROOT / "tools/gen_phase5_lut.py"), "--check"],
+              capture_output=True).returncode == 0)
 check("Range v2 combines Fusion with acquisition-only BW/AFC and full overload headroom",
       "RX_PROFILE_RANGE_V2_EXP" in all_c and
       'return "RANGE V2"' in all_c and

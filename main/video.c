@@ -10,15 +10,15 @@
  *     -> [D,D] 6-bit CVBS @ 20 MS/s unique / 40 MHz DAC clock
  *     -> 6-bit resistor DAC
  *
- * Reference: Seamless Golden 16K (build-golden-notel) -- proven best live build.
+ * Signal theory: docs/THEORY.md. Hardware evidence: docs/MEASUREMENTS.md.
  *
  * Fixed production constants (NOT configurable at runtime):
- *   IQ rate:        40 MHz
- *   DAC rate:       40 MHz physical ([D,D] = 20 MS/s unique CVBS)
+ *   IQ rate:        40 MHz (PARLIO RX ceiling, MEASUREMENTS M17; THEORY §2.4)
+ *   DAC rate:       40 MHz physical ([D,D] = 20 MS/s unique CVBS; M40)
  *   Ring:           32768 bytes (HP SRAM, DMA-aligned)
- *   Pedestal:       20   (hardcoded in FM LUT)
- *   Gain:           2    (hardcoded in FM LUT)
- *   Polarity:       current-minus-previous (hardcoded in FM LUT)
+ *   Pedestal:       20   (FM LUT, tools/gen_phase5_lut.py; THEORY §5.5, M29)
+ *   Gain:           2    (FM LUT, 9.6 codes/MHz; THEORY §5.5, M29)
+ *   Polarity:       current-minus-previous (FM LUT)
  *   RX sample edge: POS
  *   TX shift edge:  NEG
  *   BS EOF:         downstream (PARLIO TX loop never generates downstream EOF)
@@ -40,6 +40,7 @@
 #include "arc_v3_controller.h"
 #include "arc_v5_autotune.h"
 #include "rx_auto_lab.h"
+#include "video_levels.h"
 #include "trajectory_v2_lut.h"
 #include "hal/parlio_ll.h"
 #include "hal/usb_serial_jtag_ll.h"
@@ -143,13 +144,13 @@ BITSCRAMBLER_PROGRAM(s_fm_traj_program, "fm_traj");
 #define DAC_RATE_HZ      40000000u   /* default 6-bit PARLIO TX clock */
 #define DAC4_RATE_HZ     80000000u   /* experimental 4-bit PARLIO TX clock */
 #define RAW_RING_BYTES   32768u      /* 32 KiB cyclic ring; Golden Phase5 datapath */
-#define DAC_IDLE_CODE    20u         /* Black/blanking pedestal; sync is 0 */
+#define DAC_IDLE_CODE    20u         /* Blanking pedestal = LUT code at 0 Hz (THEORY §5.5); sync is 0 */
 #define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
 #define MENU_RUNTIME_ENABLED 1       /* Native CVBS menu enabled after geometry rework */
 #define CONTROL_SAMPLE_BYTES 4092u  /* one complete, already-finished GDMA descriptor */
 #define FUSION_FAST_SAMPLE_BYTES 512u /* distributed shadow window; never paces live IQ */
 #define FUSION_FAST_PERIOD_MS 6u      /* ~8 observations per 50 ms actuator period */
-#define GAIN_SETTLE_TICKS 10        /* 500 ms decision hold after a physical gain write */
+#define GAIN_SETTLE_TICKS 10        /* 500 ms hold after a gain write (upstream design value, MEASUREMENTS M45) */
 #define GAIN_SEARCH_PROBE_TICKS 20  /* 1.0 s between no-carrier sensitivity probes */
 #define PERIODIC_TELEMETRY 0        /* keep live control path silent; diagnostics are on-demand */
 #define LAB_GAIN_MIN       2u        /* production controller lower bound */
@@ -256,12 +257,24 @@ typedef enum {
     RX_PROFILE_COUNT,
 } rx_profile_t;
 
+/* THEORY §4.3: these profiles feed sync presence / semantic video quality back
+ * into RF gain, which contradicts "amplitude carries no video". They are no
+ * longer selectable or restored from settings; removal is Phase 5 cleanup. */
+static inline bool rx_profile_couples_video_to_gain(rx_profile_t p)
+{
+    return p == RX_PROFILE_ARC || p == RX_PROFILE_RANGE_EXP ||
+           p == RX_PROFILE_RANGE_V2_EXP || p == RX_PROFILE_FUSION_EXP;
+}
+
 static volatile rf_bw_mode_t s_rf_bw_mode = RF_BW_MODE_BW40;
 static volatile bool s_current_bw40 = true;
 static volatile video_output_mode_t s_output_mode = VIDEO_OUTPUT_6BIT_40;
 static video_output_mode_t s_tx_unit_mode = VIDEO_OUTPUT_6BIT_40;
 static volatile demod_mode_t s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;
-static volatile rx_profile_t s_rx_profile = RX_PROFILE_ARC;
+/* THEORY §4.3: RF gain is ADC-fill control only. ARC V3 is the hardware
+ * walk-validated raw-Q4 controller (MEASUREMENTS M44) and the default. */
+#define RX_PROFILE_DEFAULT RX_PROFILE_ARC_V3_EXP
+static volatile rx_profile_t s_rx_profile = RX_PROFILE_DEFAULT;
 static volatile arc_v3_state_t s_last_arc_v3_state = ARC_V3_ACQUIRE;
 static volatile arc_v3_q4_state_t s_last_arc_v3_q4_state = ARC_V3_Q4_STARVED;
 static volatile bool s_last_arc_v3_filtered_valid;
@@ -298,8 +311,9 @@ static const char *TAG = "c5vrx3_video";
 
 /* DMA-aligned ring buffer in HP SRAM.
  * RX GDMA writes at 40 MB/s; TX GDMA reads at 40 MB/s.
- * TX starts one block (4096 bytes = 102.4 µs) behind RX; they share
- * PLL_F240M/6, so separation cannot drift during normal operation. */
+ * TX starts half a ring (16 KiB = 409.6 µs) behind RX (see video_start); both
+ * PARLIO units run from PLL_F240M/6, so separation cannot drift during normal
+ * operation. */
 static DMA_ATTR __attribute__((aligned(64))) uint8_t s_raw_ring[RAW_RING_BYTES];
 
 static parlio_rx_unit_handle_t      s_rx;
@@ -329,7 +343,8 @@ static esp_err_t prepare_rx(void)
             GPIO_NUM_10, GPIO_NUM_5, GPIO_NUM_3, GPIO_NUM_4,
         },
         .flags = {
-            .free_clk    = true,   /* RX clock is derived from PHY, not gated */
+            .free_clk    = true,   /* internal 40 MHz clock, free-running and NOT locked to
+                                    * the ~80 MS/s modem bus (issue #12, THEORY §2.4) */
             .clk_gate_en = false,
             .allow_pd    = false,
         },
@@ -1207,7 +1222,9 @@ static volatile int s_last_fusion_stability = 0;
 static volatile uint32_t s_last_fusion_fast_samples = 0;
 
 static volatile uint32_t s_gain_transition_count = 0;
-static volatile int s_cfo_khz = 0;              /* Carrier Frequency Offset in kHz */
+static volatile int s_cfo_khz = 0;              /* Blanking-level carrier offset in kHz (THEORY §8) */
+static video_levels_work_t s_levels_work;        /* 4.6 KiB static scratch, control task only */
+static video_levels_t s_last_levels;             /* last post-demod S/B/A (THEORY §9) */
 static volatile bool s_channel_scan_active;
 static volatile unsigned s_channel_scan_progress;
 
@@ -1348,7 +1365,7 @@ static void settings_load(void)
     bool legacy_v3 = settings.version == 3u;
     if (err != ESP_OK || length != sizeof(settings) ||
         (!legacy_v3 && settings.version != SETTINGS_VERSION)) {
-        s_rx_profile = RX_PROFILE_ARC;
+        s_rx_profile = RX_PROFILE_DEFAULT;
         s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;
         s_rf_bw_mode = RF_BW_MODE_BW40;
         s_afc_mode = AFC_MODE_OFF;
@@ -1374,10 +1391,12 @@ static void settings_load(void)
     }
     if (s_demod_mode == DEMOD_MODE_TRAJECTORY_V2) s_output_mode = VIDEO_OUTPUT_6BIT_40;
     if (settings.video_std_mode <= VIDEO_STD_MODE_PAL) s_video_std_mode = (video_standard_mode_t)settings.video_std_mode;
-    if (settings.rx_profile < RX_PROFILE_COUNT) {
+    if (settings.rx_profile < RX_PROFILE_COUNT &&
+        !rx_profile_couples_video_to_gain((rx_profile_t)settings.rx_profile)) {
         s_rx_profile = (rx_profile_t)settings.rx_profile;
     } else {
-        s_rx_profile = RX_PROFILE_RANGE_EXP;
+        /* Unknown or video-coupled (THEORY §4.3) persisted profile. */
+        s_rx_profile = RX_PROFILE_DEFAULT;
     }
     if (s_rx_profile == RX_PROFILE_RANGE_EXP ||
         s_rx_profile == RX_PROFILE_FUSION_EXP ||
@@ -2651,7 +2670,8 @@ static void lab_print_arc_oracle(void)
 
 static void apply_rx_profile(rx_profile_t profile)
 {
-    if (profile >= RX_PROFILE_COUNT) profile = RX_PROFILE_BALANCED;
+    if (profile >= RX_PROFILE_COUNT || rx_profile_couples_video_to_gain(profile))
+        profile = RX_PROFILE_DEFAULT;
 
     /* Leave any previous experimental state first. */
     if (s_profile_fft_forced) {
@@ -2771,7 +2791,10 @@ static void apply_rx_profile(rx_profile_t profile)
 
 static void cycle_rx_profile(void)
 {
-    rx_profile_t next = (rx_profile_t)(((unsigned)s_rx_profile + 1u) % RX_PROFILE_COUNT);
+    rx_profile_t next = s_rx_profile;
+    do {
+        next = (rx_profile_t)(((unsigned)next + 1u) % RX_PROFILE_COUNT);
+    } while (rx_profile_couples_video_to_gain(next));
     apply_rx_profile(next);
     settings_save();
     printf("[RX PROFILE] -> %s (BW=%s AFC=%s FFT=%s)\n",
@@ -2789,7 +2812,7 @@ static void leave_experimental_profile(void)
         rf_set_fft_scale_force(false, 0);
         s_profile_fft_forced = false;
     }
-    s_rx_profile = RX_PROFILE_RANGE_EXP;
+    s_rx_profile = RX_PROFILE_DEFAULT;
     ++s_profile_generation;
 }
 
@@ -3582,13 +3605,13 @@ static void open_recovery_menu(void)
     s_video_std_mode = VIDEO_STD_MODE_AUTO;
     s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;
     s_output_mode = VIDEO_OUTPUT_6BIT_40;
-    apply_rx_profile(RX_PROFILE_ARC);
+    apply_rx_profile(RX_PROFILE_DEFAULT);
     video_standard_detector_reset();
     s_menu_cursor = 0;
     s_menu_timeout_ticks = 0;
     settings_save();
     video_set_menu_mode(true);
-    printf("[RECOVERY] GOLDEN + 6BIT@40 + ARC restored; menu %s\n",
+    printf("[RECOVERY] GOLDEN + 6BIT@40 + ARC V3 restored; menu %s\n",
            s_menu_active ? "opened" : "unavailable");
 }
 
@@ -3954,11 +3977,18 @@ static void analog_agc_task(void *arg)
             }
         }
 
-        if (metrics.n_coherent >= (int)(CONTROL_SAMPLE_BYTES / 8u) && metrics.sum_dot > 0) {
-            int instant_cfo = (int)(((int64_t)metrics.sum_cross * 6366LL) / metrics.sum_dot);
-            if (instant_cfo > 2000) instant_cfo = 2000;
-            if (instant_cfo < -2000) instant_cfo = -2000;
-            s_cfo_khz = (s_cfo_khz * 7 + instant_cfo) / 8;
+        /* THEORY §8: the carrier offset is the post-demod BLANKING level, which
+         * the GOLDEN LUT maps to 0 Hz / code 20 (THEORY §5.5). The mean
+         * frequency (sum_cross/sum_dot) moves with picture content and must
+         * not steer the LO. No valid sync -> no update. */
+        s_last_levels = video_levels_measure(&s_levels_work, s_control_sample_buf,
+                                             sizeof(s_control_sample_buf),
+                                             (ring_offset & 1u) ? 0u : 1u);
+        if (s_last_levels.valid) {
+            int blanking = s_last_levels.blanking_khz;
+            if (blanking > 2000) blanking = 2000;
+            if (blanking < -2000) blanking = -2000;
+            s_cfo_khz = (s_cfo_khz * 7 + blanking) / 8;
         }
 
         int sync_quality = 0;
@@ -4614,10 +4644,16 @@ static void console_diag_task(void *arg)
                     printf(" Receiver Channel:           %s (%u MHz)\n", ch->name, ch->freq_mhz);
                     printf(" Tuned Frequency:            %d.%03d MHz (Offset: %+d kHz)\n",
                            tot / 1000, (tot % 1000 >= 0 ? tot % 1000 : -(tot % 1000)), off);
-                    printf(" Carrier Frequency Offset:   %+d kHz (VTX %s)\n",
+                    printf(" Carrier Offset (blanking):  %+d kHz (VTX %s)\n",
                            s_cfo_khz, (s_cfo_khz > 20) ? "high" : (s_cfo_khz < -20) ? "low" : "centered");
+                    /* THEORY §9: post-demod levels. The GOLDEN LUT expects
+                     * A = 2080 kHz (20 codes) and B = 0 kHz (code 20). */
+                    printf(" Video levels (post-demod):  %s S=%+d B=%+d A=%d kHz (LUT nominal A=2080) syncs=%d\n",
+                           s_last_levels.valid ? "valid" : "NO SYNC",
+                           s_last_levels.sync_tip_khz, s_last_levels.blanking_khz,
+                           s_last_levels.sync_amplitude_khz, s_last_levels.syncs);
                     printf(" AFC Mode:                   %s\n",
-                           (s_afc_mode == AFC_MODE_AUTO) ? "AUTO EXPERIMENTAL (uncalibrated estimator)" :
+                           (s_afc_mode == AFC_MODE_AUTO) ? "AUTO (blanking-referenced, acquisition only)" :
                            (s_afc_mode == AFC_MODE_HOLD) ? "HOLD (Offset Frozen)" : "OFF (0 kHz)");
                     printf(" RX Profile:                 %s%s\n",
                            rx_profile_name(),

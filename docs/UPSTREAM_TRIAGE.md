@@ -22,6 +22,17 @@ XIAO + resistor DAC kept as a second board, PlatformIO, receive-only, and correc
 
 Adopting code from an open PR happens only via `git cherry-pick -x`, after a Phase 1+ decision.
 
+## Change log of dispositions
+
+| Date | Phase | Item | Action |
+|---|---|---|---|
+| 2026-09-23 | 1 | #6, #23 | Adopted into `docs/THEORY.md` (§4.1 decode, §5 discriminator, §6 de-emphasis, §10 clicks) |
+| 2026-09-23 | 1 | #52, #58 | ARC V3 made the default profile (ADC-fill only) |
+| 2026-09-23 | 1 | #36, #37, #43, #45, #52 (v1 ARC) | Rejection enacted: video-coupled gain profiles (RANGE, RANGE V2, FUSION, ARC v1) removed from all selectable/restorable paths |
+| 2026-09-23 | 1 | upstream `e7f38f2` (in #25 era) | Fold-back squelch LUT rejected; GOLDEN clamp restored via `tools/gen_phase5_lut.py` |
+| 2026-09-23 | 1 | #13 (AFC part) | AFC AUTO re-referenced to the post-demod blanking level |
+| 2026-09-23 | 1 | #44 | Verdict revised reject → adopt-modified (pioarduino allowed if it performs better) |
+
 ## Issues
 
 | # | Status | Claim | Evidence | Sound? | Verdict | Applies | Reason |
@@ -76,7 +87,7 @@ Adopting code from an open PR happens only via `git cherry-pick -x`, after a Pha
 | 41 | merged | Same-origin firmware mirror on GitHub Pages | HW (CI) | Yes | adopt | ci | Keep. Extend the manifest to multiple boards. |
 | 42 | open | XIAO C5 → UART 4 Mbaud → ESP32-S3 T-Embed "link mode" (CPU grab, CRC-16 framed protocol) | HW (bench video) | Yes, for its purpose | adopt-modified | fpga | Reference for the Phase 3 control link: framing, CRC, versioning. Its CPU frame grabber is not realtime video. |
 | 43 | merged | IQ Fusion Engine + contextual PHY learner | host | Learner uses semantic sync; unproven | reject | both | Complex, no measured benefit, video-driven gain. Fusion metrics may survive as diagnostics. |
-| 44 | open | Optional PlatformIO env via pioarduino fork + custom toolchain installer | argued | Works for them, but non-standard | reject | ci | The plan forbids third-party platform forks. Its claim that the official platform lacks C5/IDF 6 must be re-checked in Phase 2. |
+| 44 | open | Optional PlatformIO env via pioarduino fork + custom toolchain installer | argued | Works for them | adopt-modified | ci | **Revised 2026-09-23:** you allowed pioarduino if it performs better. Phase 2 compares it with the official platform. The custom toolchain installer should become unnecessary with a current pioarduino release. |
 | 45 | merged | Range v2 temporal fusion / weak-signal research | host | Unproven; video-driven | reject | both | No hardware result. Removal candidate in Phase 5. |
 | 46 | merged | Trajectory v2 two-stage learned demod (TRAJ V2) | host (synthetic training) | Unproven | reject | xiao | No hardware A/B (docs/trajectory-v2.md:8). Remove in Phase 5 unless you A/B it and it wins. The AGENTS.md compatibility rule for it goes with it. |
 | 48 | closed (unmerged) | Range V3 phase-model experiments | none | Maintainer: "Broken" | reject | — | Broken. |

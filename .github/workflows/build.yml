@@ -163,6 +163,9 @@ jobs:
           /tmp/test_arc_v3
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_arc_v5_autotune.c main/arc_v5_autotune.c main/arc_v3_controller.c -o /tmp/test_arc_v5_autotune
           /tmp/test_arc_v5_autotune
+          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_video_levels.c -lm -o /tmp/test_video_levels
+          /tmp/test_video_levels
+          python3 tools/gen_phase5_lut.py --check
           python3 tools/train_trajectory_v2.py --write --self-test
           git diff --exit-code -- main/fm_traj.bsasm main/trajectory_v2_lut.h
           python3 tools/range_demod_bench.py --self-test
