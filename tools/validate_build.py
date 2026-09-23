@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-MAIN = ROOT / "main"
+MAIN = ROOT / "src"
 
 failures = []
 passes = []
@@ -52,7 +52,7 @@ c_names = [f.name for f in c_files]
 video_c = read(MAIN / "video.c")
 menu_lifecycle = video_c.split("static void video_set_menu_mode", 1)[1].split("static void menu_cycle_standard_mode", 1)[0]
 
-check("production receiver and dedicated menu/auto-lab modules", set(c_names) == {"main.c", "arc_phy.c", "arc_v3_controller.c", "arc_v5_autotune.c", "rx_auto_lab.c", "rf.c", "video.c", "menu_raster.c"},
+check("production receiver and dedicated menu/auto-lab modules", set(c_names) == {"main.c", "board.c", "arc_phy.c", "arc_v3_controller.c", "arc_v5_autotune.c", "rx_auto_lab.c", "rf.c", "video.c", "menu_raster.c"},
       f"found: {c_names}")
 check("main.c present", "main.c" in c_names)
 check("rf.c present", "rf.c" in c_names)
@@ -543,6 +543,33 @@ check("RX AUTO freezes only a proven winner and restores failed experiments",
       "s_afc_mode = AFC_MODE_HOLD" in video_c and
       "rx_auto_restore_saved(&saved)" in video_c and
       "No setting is persisted" in read(ROOT / "docs" / "pre-q4-lab.md"))
+
+workflow_text_for_pio = read(ROOT / ".github" / "workflows" / "build.yml")
+# ---- PlatformIO multi-board structure (refactor Phase 2, docs/BOARDS.md) ----
+pio_ini = read(ROOT / "platformio.ini")
+check("PlatformIO envs exist per board with per-env sdkconfig defaults",
+      "[env:waveshare_c5zero_fpga]" in pio_ini and "[env:xiao_c5_dac]" in pio_ini and
+      "framework = espidf" in pio_ini and "src_dir = src" in pio_ini and
+      'sdkconfig.defaults;sdkconfig.defaults.waveshare_c5zero_fpga' in pio_ini and
+      'sdkconfig.defaults;sdkconfig.defaults.xiao_c5_dac' in pio_ini and
+      (ROOT / "sdkconfig.defaults.waveshare_c5zero_fpga").is_file() and
+      (ROOT / "sdkconfig.defaults.xiao_c5_dac").is_file() and
+      (ROOT / "boards" / "waveshare_esp32c5_zero.json").is_file())
+board_leaks = [f.name for f in list(MAIN.glob("*.c")) + list(MAIN.glob("*.h"))
+               if "CONFIG_C5VRX_BOARD_" in read(f)]
+check("board selection is confined to src/boards/board.h (no board #ifdefs in DSP/control code)",
+      not board_leaks, f"found in: {board_leaks}")
+main_c = read(MAIN / "main.c")
+check("antenna switch is driven before any PHY init",
+      main_c.find("board_init_early();") >= 0 and
+      main_c.find("board_init_early();") < main_c.find("rf_start()"))
+check("ESP32-C5 ZCMP silicon workaround stays pinned off (esp-idf#18886)",
+      "CONFIG_COMPILER_ENABLE_RISCV_ZCMP=n" in read(ROOT / "sdkconfig.defaults"))
+check("CI builds every board with PlatformIO, not idf.py",
+      "pio run -e ${{ matrix.env }}" in workflow_text_for_pio and
+      "env: [xiao_c5_dac, waveshare_c5zero_fpga]" in workflow_text_for_pio and
+      "idf.py build" not in workflow_text_for_pio and
+      "espressif/idf:" not in workflow_text_for_pio)
 
 # ---- Web flasher / release safety ----
 web_app = read(ROOT / "web" / "app.js")

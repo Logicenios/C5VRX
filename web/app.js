@@ -405,6 +405,17 @@ function getSelectedRemoteBuild() {
   return { release: null, packageType: null };
 }
 
+function findExactAsset(assets, exactName, legacySubstring) {
+  const exact = assets.find(asset => (asset.name || '') === exactName);
+  if (exact) return exact;
+  // Older single-board releases: any name containing the substring, but never a
+  // board-prefixed asset from a multi-board release.
+  return assets.find(asset => {
+    const name = asset.name || '';
+    return name.includes(legacySubstring) && !name.includes('-c5vrx') && !/^[a-z0-9]+_[a-z0-9_]+-/.test(name);
+  });
+}
+
 function findApplicationAsset(assets) {
   // GitHub returns release assets in upload order. Never use the first .bin:
   // bootloader.bin is commonly uploaded before the application image.
@@ -414,7 +425,8 @@ function findApplicationAsset(assets) {
       return name.endsWith('.bin') &&
         !name.includes('bootloader') &&
         !name.includes('partition') &&
-        !name.includes('merged');
+        !name.includes('merged') &&
+        !/^[a-z0-9]+_[a-z0-9_]+-/.test(name);
     });
 }
 
@@ -551,15 +563,18 @@ btnFlash.addEventListener('click', async () => {
       log(`Fetching binaries for ${activeSource === 'pr' ? 'PR build' : 'release'} ${rel.tag_name} (${packageType})...`);
 
       if (packageType === 'merged') {
-        const mergedAsset = assets.find(a => a.name.includes('merged'));
+        // Releases now carry several boards; board-prefixed assets
+        // (e.g. waveshare_c5zero_fpga-*) are not offered here yet. Match the
+        // un-prefixed XIAO DAC names exactly, falling back for old releases.
+        const mergedAsset = findExactAsset(assets, 'c5vrx3_merged.bin', 'merged');
         if (mergedAsset) {
           log(`Downloading ${mergedAsset.name}...`);
           const buf = await fetchReleaseAsset(mergedAsset);
           fileArray.push({ data: new Uint8Array(buf), address: 0x0 });
         } else {
           // Standard 3-part layout
-          const bootloader = assets.find(a => a.name.includes('bootloader'));
-          const ptable = assets.find(a => a.name.includes('partition'));
+          const bootloader = findExactAsset(assets, 'bootloader.bin', 'bootloader');
+          const ptable = findExactAsset(assets, 'partition-table.bin', 'partition');
           const app = findApplicationAsset(assets);
           const missing = [
             !bootloader && 'bootloader',

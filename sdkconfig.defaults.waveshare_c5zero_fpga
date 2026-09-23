@@ -1,0 +1,8 @@
+# Waveshare ESP32-C5-Zero -> Tang Nano 20K (src/boards/waveshare_c5zero_fpga.h).
+CONFIG_C5VRX_BOARD_WAVESHARE_C5ZERO_FPGA=y
+CONFIG_C5VRX_ANTENNA_EXTERNAL=y
+# ESP32-C5HF4: 4 MB in-package flash. DIO 80 MHz is the conservative choice
+# for an untested board (docs/BOARDS.md); QIO is a later lab option.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y

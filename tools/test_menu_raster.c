@@ -1,4 +1,4 @@
-/* Host waveform test: compile with main/menu_raster.c and -lm. */
+/* Host waveform test: compile with src/menu_raster.c and -lm. */
 #include "menu_raster.h"
 #include <assert.h>
 #include <math.h>

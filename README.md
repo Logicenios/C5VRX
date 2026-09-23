@@ -212,83 +212,38 @@ Connecting to the USB serial console (115200 baud) provides live telemetry and s
 
 ## Build & Flash Guide
 
-### Prerequisites
-- **Option A (Docker - Recommended)**: Docker Desktop or Docker engine installed.
-- **Option B (Native ESP-IDF)**: [ESP-IDF v6.0.x](https://docs.espressif.com/projects/esp-idf/en/v6.0/esp32c5/get-started/) installed with Python 3.10+.
+The firmware builds with **PlatformIO** only. The `idf.py` / Docker path was removed in
+refactor Phase 2 (see `docs/refactor/02-platformio.md`). One environment per board:
 
----
+| Environment | Board | Output |
+|---|---|---|
+| `waveshare_c5zero_fpga` | Waveshare ESP32-C5-Zero | FPGA link (Tang Nano 20K), in progress |
+| `xiao_c5_dac` | Seeed XIAO ESP32-C5 | 6-bit resistor DAC, CVBS |
 
-### Step 1: Build the Firmware
+Pins, antenna and flash settings per board: `docs/BOARDS.md`.
 
-#### Option A: Build via Docker (Zero-Install Toolchain)
-No ESP-IDF installation required on your host machine. Run from the repository root:
+### Step 1: Build
 
-**Linux / macOS / Git Bash:**
 ```bash
-docker run --rm -v "${PWD}:/workspace" -w /workspace espressif/idf:v6.0.2 idf.py build
+pip install platformio            # PlatformIO Core 6.2+
+pio run                           # all boards
+pio run -e xiao_c5_dac            # one board
 ```
 
-**Windows PowerShell:**
-```powershell
-docker run --rm -v "${PWD}:/workspace" -w /workspace espressif/idf:v6.0.2 idf.py build
-```
-
-#### Option B: Build with Native ESP-IDF v6.0+
-If you have ESP-IDF installed locally:
-
-**Linux / macOS:**
-```bash
-. $IDF_PATH/export.sh
-idf.py build
-```
-
-**Windows (ESP-IDF PowerShell Environment):**
-```powershell
-export.ps1
-idf.py build
-```
-
-The build produces three critical binaries in `build/`:
-- `build/bootloader/bootloader.bin` (at flash offset `0x2000`)
-- `build/partition_table/partition-table.bin` (at flash offset `0x8000`)
-- `build/c5vrx3.bin` (at flash offset `0x10000`)
-
----
+The pioarduino platform (ESP-IDF 6.1.0) is pinned in `platformio.ini` and installed
+automatically on first build.
 
 ### Step 2: Verify Architectural Constraints
-Before flashing, run the built-in validator to ensure zero DMA/BitScrambler constraint violations:
+
 ```bash
 python tools/validate_build.py
 ```
-*(All architectural checks must pass.)*
 
----
+### Step 3: Flash
 
-### Step 3: Flash to ESP32-C5
-
-#### Option A: Web Flasher (Zero-Install In-Browser Flasher)
-Launch the web flasher directly in your browser (Google Chrome, Microsoft Edge, Brave):
-**[Open C5VRX Web Flasher on GitHub Pages](https://twotoz.github.io/C5VRX/)**
-
-#### Option B: Zero-Friction Auto-Flash (Python Watcher)
-Run the auto-flash watcher:
-```bash
-python tools/auto_flash.py
-```
-*Plug in or reset your Seeed Studio XIAO ESP32-C5 into download mode (hold BOOT while tapping RESET), and the watcher will detect the COM port, flash the firmware, and automatically trigger a watchdog reset into the application!*
-
-#### Option C: Direct Flash Script
-Specify your COM port (or omit to auto-detect):
-```bash
-python tools/flash.py COM10
-```
-
-#### Option D: Native ESP-IDF Flasher
-```bash
-idf.py -p COM10 flash
-```
-
----
+- **Web flasher:** [twotoz.github.io/C5VRX](https://twotoz.github.io/C5VRX/) (XIAO DAC
+  builds).
+- **PlatformIO:** `pio run -e <env> -t upload` (add `-t monitor` for the console).
 
 ### Step 4: Interactive Serial Monitor & Diagnostics
 Launch the dedicated low-latency serial monitor:
@@ -305,7 +260,7 @@ Use the interactive hotkeys (`c` to cycle channels, `+`/`-` for manual gain, `a`
 ├── CMakeLists.txt             # Production top-level ESP-IDF project
 ├── sdkconfig.defaults         # Production build configuration (ESP32-C5 @ 240MHz)
 ├── partitions.csv             # Custom minimal partition table
-├── main/                      # Standalone C5VRX-3 production firmware
+├── src/                       # Firmware (PlatformIO src_dir; boards in src/boards/)
 │   ├── CMakeLists.txt         # Component manifest & BitScrambler registration
 │   ├── main.c                 # Application entry point
 │   ├── rf.c / rf.h            # Wi-Fi PHY RX-only frontend & frequency tuning
@@ -320,8 +275,6 @@ Use the interactive hotkeys (`c` to cycle channels, `+`/`-` for manual gain, `a`
 ├── tools/                     # Production validation & flashing utilities
 │   ├── open_webflasher.py     # Local offline Web Flasher launcher & HTTP server
 │   ├── validate_build.py      # Architectural constraint validator
-│   ├── auto_flash.py          # Auto-detecting flashing watcher
-│   ├── flash.py               # One-click direct flasher
 │   ├── monitor.py             # Low-latency interactive serial console
 │   └── live_logger.py         # Real-time CSV telemetry logger
 ├── docs/                      # Architectural specs & mathematical proofs

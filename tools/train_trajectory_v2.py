@@ -35,8 +35,8 @@ The learned token is optimized with a small L1 Lloyd loop.  This lets clean,
 high-confidence states retain Phase5-quality precision while noisy states use
 the middle sample and amplitude-bearing raw-Q4 byte to infer the trajectory.
 
---write deterministically regenerates main/fm_traj.bsasm and
-main/trajectory_v2_lut.h.  CI then requires a zero git diff.
+--write deterministically regenerates src/fm_traj.bsasm and
+src/trajectory_v2_lut.h.  CI then requires a zero git diff.
 """
 from __future__ import annotations
 
@@ -49,8 +49,8 @@ from pathlib import Path
 from typing import Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
-ASM = ROOT / "main" / "fm_traj.bsasm"
-HEADER = ROOT / "main" / "trajectory_v2_lut.h"
+ASM = ROOT / "src" / "fm_traj.bsasm"
+HEADER = ROOT / "src" / "trajectory_v2_lut.h"
 TAU = 2.0 * math.pi
 TRAIN_SAMPLES = 140_000
 TRAIN_ITERATIONS = 7

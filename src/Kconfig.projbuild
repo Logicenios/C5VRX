@@ -1,0 +1,30 @@
+menu "C5VRX board"
+
+    choice C5VRX_BOARD
+        prompt "Target board"
+        default C5VRX_BOARD_WAVESHARE_C5ZERO_FPGA
+        help
+            Selects the pin map, antenna switch and output backend in
+            src/boards/<board>.h. Each PlatformIO environment sets this in its
+            sdkconfig.defaults.<env> file (docs/BOARDS.md).
+
+        config C5VRX_BOARD_WAVESHARE_C5ZERO_FPGA
+            bool "Waveshare ESP32-C5-Zero -> Tang Nano 20K (FPGA link)"
+        config C5VRX_BOARD_XIAO_C5_DAC
+            bool "Seeed XIAO ESP32-C5 -> 6-bit resistor DAC (CVBS)"
+    endchoice
+
+    choice C5VRX_ANTENNA
+        prompt "Antenna (boards with an RF switch)"
+        default C5VRX_ANTENNA_EXTERNAL
+        help
+            Boards with an onboard/external RF switch drive it before any PHY
+            initialisation (src/board.c). Ignored on boards without a switch.
+
+        config C5VRX_ANTENNA_EXTERNAL
+            bool "External (IPEX / U.FL)"
+        config C5VRX_ANTENNA_ONBOARD
+            bool "Onboard"
+    endchoice
+
+endmenu

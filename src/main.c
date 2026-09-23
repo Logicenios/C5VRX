@@ -6,12 +6,15 @@
  * The hardware runs forever; the application is done.
  */
 
+#include "boards/board.h"
 #include "rf.h"
 #include "video.h"
 #include "esp_log.h"
 
 void app_main(void)
 {
+    /* Antenna switch must be set before any PHY init (docs/BOARDS.md). */
+    board_init_early();
     ESP_ERROR_CHECK(rf_start());
     ESP_ERROR_CHECK(video_start());
     /* Hardware pipeline is running. Application has nothing more to do. */

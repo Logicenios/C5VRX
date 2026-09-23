@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "board.c"
         "arc_phy.c"
         "arc_v3_controller.c"
         "arc_v5_autotune.c"

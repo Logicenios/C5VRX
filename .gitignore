@@ -12,3 +12,8 @@ __pycache__/
 scratch/
 *_log.txt
 packages/
+.pio/
+sdkconfig.*
+!sdkconfig.defaults
+!sdkconfig.defaults.*
+dependencies.lock

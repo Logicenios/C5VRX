@@ -28,6 +28,7 @@
  */
 
 #include "video.h"
+#include "boards/board.h"
 #include "rf.h"
 #include "menu_font.h"
 #include "menu_raster.h"
@@ -145,7 +146,7 @@ BITSCRAMBLER_PROGRAM(s_fm_traj_program, "fm_traj");
 #define DAC4_RATE_HZ     80000000u   /* experimental 4-bit PARLIO TX clock */
 #define RAW_RING_BYTES   32768u      /* 32 KiB cyclic ring; Golden Phase5 datapath */
 #define DAC_IDLE_CODE    20u         /* Blanking pedestal = LUT code at 0 Hz (THEORY §5.5); sync is 0 */
-#define BOOT_BTN_GPIO    GPIO_NUM_28 /* Seeed Studio XIAO ESP32-C5 BOOT Button */
+#define BOOT_BTN_GPIO    ((gpio_num_t)BOARD_BOOT_BUTTON_GPIO) /* src/boards/<board>.h */
 #define MENU_RUNTIME_ENABLED 1       /* Native CVBS menu enabled after geometry rework */
 #define CONTROL_SAMPLE_BYTES 4092u  /* one complete, already-finished GDMA descriptor */
 #define FUSION_FAST_SAMPLE_BYTES 512u /* distributed shadow window; never paces live IQ */
@@ -293,13 +294,12 @@ static volatile int s_last_phy_rssi_dbm = -127;
 static volatile bool s_noise_floor_valid;
 static volatile bool s_phy_rssi_valid;
 
-/* TX GPIO mapping: 6-bit resistor DAC.
- * Order: DAC bit 0 (LSB) .. DAC bit 5 (MSB) on data_gpio_nums[0..5].
- * Bits 6..7 unused (set to -1).
- * Verified against C5VRX-2 realtime.c (standard 8-bit PARLIO TX, non-parlio4). */
-static const int s_dac_gpio[8] = {23, 24, 11, 12, 8, 9, -1, -1};
-/* 4-bit mode drives the four MSB resistor branches: weights 4/8/16/32. */
-static const int s_dac4_gpio[4] = {11, 12, 8, 9};
+/* TX GPIO mapping: 6-bit resistor DAC, bit 0 (LSB) .. bit 5 (MSB) on
+ * data_gpio_nums[0..5]; bits 6..7 unused. 4-bit mode drives the four MSB
+ * branches (weights 4/8/16/32). Pins come from src/boards/<board>.h; boards
+ * without a DAC (BOARD_HAS_DAC_OUTPUT == 0) never create the TX unit. */
+static const int s_dac_gpio[8] = BOARD_DAC6_PINS;
+static const int s_dac4_gpio[4] = BOARD_DAC4_PINS;
 
 _Static_assert(IQ_RATE_HZ == 40000000u, "IQ rate must be 40 MHz");
 _Static_assert(DAC_RATE_HZ == 40000000u, "DAC rate must be 40 MHz");
@@ -336,12 +336,8 @@ static esp_err_t prepare_rx(void)
         .clk_in_gpio_num   = -1,
         .clk_out_gpio_num  = -1,
         .valid_gpio_num    = -1,
-        /* GPIO order must match s_iq_pins[] in rf.c:
-         * Q[9:6] on GPIO 1,0,25,7 then I[9:6] on GPIO 10,5,3,4. */
-        .data_gpio_nums    = {
-            GPIO_NUM_1, GPIO_NUM_0, GPIO_NUM_25, GPIO_NUM_7,
-            GPIO_NUM_10, GPIO_NUM_5, GPIO_NUM_3, GPIO_NUM_4,
-        },
+        /* Q[9:6] then I[9:6]; same board pads that rf.c routes MODEM_DIAG to. */
+        .data_gpio_nums    = BOARD_IQ_PINS,
         .flags = {
             .free_clk    = true,   /* internal 40 MHz clock, free-running and NOT locked to
                                     * the ~80 MS/s modem bus (issue #12, THEORY §2.4) */
@@ -3295,6 +3291,10 @@ static esp_err_t lab_restore_live_tx_pipeline(void)
  * removed and all six resistor-DAC GPIOs are held static low. */
 static void lab_run_tx_self_noise_probe(void)
 {
+    if (!BOARD_HAS_DAC_OUTPUT) {
+        printf("C5VRX_PREQ4_TXNOISE_REFUSED reason=no_dac_on_board\n");
+        return;
+    }
     if (s_gain_sweep.active || s_menu_active || s_pre_q4_probe_active) {
         printf("C5VRX_PREQ4_TXNOISE_REFUSED reason=%s\n",
                s_gain_sweep.active ? "gain_sweep_active" :
@@ -3417,6 +3417,9 @@ static void start_menu_tx(void)
 
 static void video_set_menu_mode(bool active)
 {
+    /* The standalone CVBS menu needs the DAC; on the FPGA board the FPGA owns
+     * the menu/OSD (plan Phase 3/4). */
+    if (!BOARD_HAS_DAC_OUTPUT) return;
     if (s_pre_q4_probe_active) return;
     if (active && !MENU_RUNTIME_ENABLED) return;
     if (s_menu_active == active) return;
@@ -4830,9 +4833,10 @@ esp_err_t video_start(void)
     esp_err_t err;
 
     if ((err = prepare_rx()) != ESP_OK) return err;
-    if ((err = prepare_tx()) != ESP_OK) return err;
-
-    start_flight_demodulator();
+    if (BOARD_HAS_DAC_OUTPUT) {
+        if ((err = prepare_tx()) != ESP_OK) return err;
+        start_flight_demodulator();
+    }
 
     /* Start RX cyclic ring. GDMA begins writing at s_raw_ring[0]. */
     if ((err = start_rx()) != ESP_OK) return err;
@@ -4850,9 +4854,10 @@ esp_err_t video_start(void)
 
     /* Request half-ring producer/consumer separation before starting TX.
      * The integer-microsecond delay and driver latency need hardware validation. */
-    esp_rom_delay_us((RAW_RING_BYTES / 2ULL) * 1000000ULL / IQ_RATE_HZ);
-
-    if ((err = start_tx()) != ESP_OK) return err;
+    if (BOARD_HAS_DAC_OUTPUT) {
+        esp_rom_delay_us((RAW_RING_BYTES / 2ULL) * 1000000ULL / IQ_RATE_HZ);
+        if ((err = start_tx()) != ESP_OK) return err;
+    }
 
     /* Discover AHB_DMA channels assigned to PARL_IO (peripheral ID 9) */
     for (int i = 0; i < 3; i++) {
@@ -4867,22 +4872,24 @@ esp_err_t video_start(void)
     /* Put PARLIO TX into pure continuous hardware mode:
      * Disable all GDMA TX channel interrupts and PARL_IO core interrupts.
      * Prevents PARLIO_LL_EVENT_TX_FIFO_EMPTY and EOF interrupts from stealing CPU cycles! */
-    AHB_DMA.out_intr[0].ena.val = 0;
-    AHB_DMA.out_intr[1].ena.val = 0;
-    AHB_DMA.out_intr[2].ena.val = 0;
+    if (BOARD_HAS_DAC_OUTPUT) {
+        AHB_DMA.out_intr[0].ena.val = 0;
+        AHB_DMA.out_intr[1].ena.val = 0;
+        AHB_DMA.out_intr[2].ena.val = 0;
+    }
     PARL_IO.int_ena.val = 0;
 
     /* Clear suc_eof on ALL GDMA descriptors for both RX and TX to eliminate
      * hardware wrap EOF bubbles completely! The buffer becomes a truly infinite ring. */
     int rx_nodes = patch_descriptors_clear_eof(s_rx_dma_ch, true);
-    int tx_nodes = patch_descriptors_clear_eof(s_tx_dma_ch, false);
+    int tx_nodes = BOARD_HAS_DAC_OUTPUT ? patch_descriptors_clear_eof(s_tx_dma_ch, false) : 0;
 
     /* Issue #28: clear stale startup/driver status once. Subsequent sticky
      * faults are observed by poll_transport_faults() without enabling IRQs. */
     PARL_IO.int_clr.val = UINT32_MAX;
     if (s_rx_dma_ch >= 0) AHB_DMA.in_intr[s_rx_dma_ch].clr.val = UINT32_MAX;
     if (s_tx_dma_ch >= 0) AHB_DMA.out_intr[s_tx_dma_ch].clr.val = UINT32_MAX;
-    BITSCRAMBLER.state[BITSCRAMBLER_DIR_TX].val = 1u << 31;
+    if (BOARD_HAS_DAC_OUTPUT) BITSCRAMBLER.state[BITSCRAMBLER_DIR_TX].val = 1u << 31;
 
     /* Distributed shadow observer: read-only, no PHY writes and no DMA pacing. */
     xTaskCreate(fusion_observer_task, "fusion_obs", 4096, NULL, 2, NULL);
@@ -4897,7 +4904,8 @@ esp_err_t video_start(void)
     /* Print startup stamp (visible on serial monitor at boot). */
     ESP_EARLY_LOGW(TAG,
         "\n=======================================================\n"
-        " C5VRX-3  Seamless 32K Phase5 receiver (Zero-EOF Circular GDMA)\n"
+        " C5VRX  %s\n"
+        " Output:  %s\n"
         " Clock:   PARLIO_CLK_SRC_DEFAULT 40MHz (SPLL internal)\n"
         " Telemetry: Live GDMA ring pointer tracking (rx_ch=%d, tx_ch=%d)\n"
         " Buffer:  32,768 bytes cyclic ring (Zero-EOF patched: RX=%d TX=%d)\n"
@@ -4907,6 +4915,9 @@ esp_err_t video_start(void)
         " Lock:    GDMA ISRs disabled, RX EOF disabled, suc_eof=0 cleared\n"
         " CPU:     done (hardware runs in unbroken infinite loop)\n"
         "=======================================================\n",
+        BOARD_NAME,
+        BOARD_HAS_DAC_OUTPUT ? "DAC/CVBS (GOLDEN Phase5 BitScrambler)"
+                             : "FPGA link (Phase 3 pending: RX ring + RF control only)",
         s_rx_dma_ch, s_tx_dma_ch, rx_nodes, tx_nodes, DAC_IDLE_CODE, 2u);
 
     return ESP_OK;

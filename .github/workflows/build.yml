@@ -147,40 +147,58 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_demod_quality.c -o /tmp/test_demod_quality
+          gcc -std=c11 -Wall -Wextra -Werror -Isrc tools/test_demod_quality.c -o /tmp/test_demod_quality
           /tmp/test_demod_quality
-          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_range_control.c -o /tmp/test_range_control
+          gcc -std=c11 -Wall -Wextra -Werror -Isrc tools/test_range_control.c -o /tmp/test_range_control
           /tmp/test_range_control
-          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_fusion_receiver.c -o /tmp/test_fusion_receiver
+          gcc -std=c11 -Wall -Wextra -Werror -Isrc tools/test_fusion_receiver.c -o /tmp/test_fusion_receiver
           /tmp/test_fusion_receiver
-          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_menu_raster.c main/menu_raster.c -lm -o /tmp/test_menu_raster
+          gcc -std=c11 -Wall -Wextra -Werror -Isrc tools/test_menu_raster.c src/menu_raster.c -lm -o /tmp/test_menu_raster
           /tmp/test_menu_raster
-          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_arc.c main/arc_phy.c -o /tmp/test_arc
+          gcc -std=c11 -Wall -Wextra -Werror -Isrc tools/test_arc.c src/arc_phy.c -o /tmp/test_arc
           /tmp/test_arc
-          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_rx_auto_lab.c main/rx_auto_lab.c -o /tmp/test_rx_auto_lab
+          gcc -std=c11 -Wall -Wextra -Werror -Isrc tools/test_rx_auto_lab.c src/rx_auto_lab.c -o /tmp/test_rx_auto_lab
           /tmp/test_rx_auto_lab
-          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_arc_v3.c main/arc_v3_controller.c -o /tmp/test_arc_v3
+          gcc -std=c11 -Wall -Wextra -Werror -Isrc tools/test_arc_v3.c src/arc_v3_controller.c -o /tmp/test_arc_v3
           /tmp/test_arc_v3
-          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_arc_v5_autotune.c main/arc_v5_autotune.c main/arc_v3_controller.c -o /tmp/test_arc_v5_autotune
+          gcc -std=c11 -Wall -Wextra -Werror -Isrc tools/test_arc_v5_autotune.c src/arc_v5_autotune.c src/arc_v3_controller.c -o /tmp/test_arc_v5_autotune
           /tmp/test_arc_v5_autotune
-          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_video_levels.c -lm -o /tmp/test_video_levels
+          gcc -std=c11 -Wall -Wextra -Werror -Isrc tools/test_video_levels.c -lm -o /tmp/test_video_levels
           /tmp/test_video_levels
           python3 tools/gen_phase5_lut.py --check
           python3 tools/train_trajectory_v2.py --write --self-test
-          git diff --exit-code -- main/fm_traj.bsasm main/trajectory_v2_lut.h
+          git diff --exit-code -- src/fm_traj.bsasm src/trajectory_v2_lut.h
           python3 tools/range_demod_bench.py --self-test
 
   build:
-    name: Build Production Firmware (ESP32-C5)
+    name: Build firmware (${{ matrix.env }})
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     # A release or Pages deployment must never be produced from a commit that
     # failed the architectural/DSP contract checks.
     needs: [version, validate]
     runs-on: ubuntu-latest
-    container: espressif/idf:v6.0.2
+    strategy:
+      fail-fast: false
+      matrix:
+        # One PlatformIO environment per board/backend (platformio.ini, docs/BOARDS.md).
+        env: [xiao_c5_dac, waveshare_c5zero_fpga]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini', 'boards/**') }}
+
+      - name: Install PlatformIO Core
+        run: pip install "platformio==6.2.0"
 
       - name: Stamp release version into ESP-IDF firmware
         if: needs.version.outputs.version_number != ''
@@ -189,31 +207,72 @@ jobs:
           printf '%s\n' "${{ needs.version.outputs.version_number }}" > version.txt
           echo "Building firmware version ${{ needs.version.outputs.version }}"
 
-      - name: Build C5VRX-3 Firmware
+      - name: Build ${{ matrix.env }}
+        run: pio run -e ${{ matrix.env }}
+
+      - name: Collect ${{ matrix.env }} images
         shell: bash
         run: |
-          . /opt/esp/idf/export.sh
-          idf.py build
+          set -euo pipefail
+          out="out/${{ matrix.env }}"
+          mkdir -p "${out}"
+          cp .pio/build/${{ matrix.env }}/bootloader.bin "${out}/bootloader.bin"
+          cp .pio/build/${{ matrix.env }}/partitions.bin "${out}/partition-table.bin"
+          cp .pio/build/${{ matrix.env }}/firmware.bin   "${out}/c5vrx3.bin"
+          cp sdkconfig.${{ matrix.env }} "${out}/sdkconfig"
+
+      - name: Upload ${{ matrix.env }} images
+        uses: actions/upload-artifact@v4
+        with:
+          name: fw-${{ matrix.env }}
+          path: out/${{ matrix.env }}/
+          if-no-files-found: error
+
+  package:
+    name: Package Release Artifacts
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download board images
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fw-*
+          path: fw/
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Prepare Release Artifacts
         shell: bash
         run: |
-          . /opt/esp/idf/export.sh
+          set -euo pipefail
+          pip install "esptool>=5,<6"
           mkdir -p release
-          cp build/bootloader/bootloader.bin release/
-          cp build/partition_table/partition-table.bin release/
-          cp build/c5vrx3.bin release/
-          cp build/flasher_args.json release/
-          esptool.py --chip esp32c5 merge_bin -o release/c5vrx3_merged.bin \
-            --flash_mode dio --flash_size 8MB --flash_freq 80m \
-            0x2000 build/bootloader/bootloader.bin \
-            0x8000 build/partition_table/partition-table.bin \
-            0x10000 build/c5vrx3.bin
-
+          # env | release file prefix | flash mode | flash size
+          # The XIAO DAC build keeps the historical un-prefixed asset names so the
+          # existing web flasher and Pages mirror keep working unchanged.
+          while read -r env prefix mode size; do
+            [[ "${prefix}" == "-" ]] && prefix=""   # "-" = no prefix
+            src="fw/fw-${env}"
+            for f in bootloader.bin partition-table.bin c5vrx3.bin; do
+              cp "${src}/${f}" "release/${prefix}${f}"
+            done
+            python -m esptool --chip esp32c5 merge-bin -o "release/${prefix}c5vrx3_merged.bin" \
+              --flash-mode "${mode}" --flash-size "${size}" --flash-freq 80m \
+              0x2000 "${src}/bootloader.bin" \
+              0x8000 "${src}/partition-table.bin" \
+              0x10000 "${src}/c5vrx3.bin"
+            printf '{"flash_settings":{"flash_mode":"%s","flash_size":"%s","flash_freq":"80m"},"flash_files":{"0x2000":"%sbootloader.bin","0x8000":"%spartition-table.bin","0x10000":"%sc5vrx3.bin"},"extra_esptool_args":{"chip":"esp32c5"}}\n' \
+              "${mode}" "${size}" "${prefix}" "${prefix}" "${prefix}" > "release/${prefix}flasher_args.json"
+          done <<'BOARDS'
+          xiao_c5_dac - dio 8MB
+          waveshare_c5zero_fpga waveshare_c5zero_fpga- dio 4MB
+          BOARDS
           if [[ -n "${{ needs.version.outputs.version }}" ]]; then
             printf '%s\n' "${{ needs.version.outputs.version }}" > release/VERSION
           fi
-
           cd release
           sha256sum * > SHA256SUMS
 
@@ -226,7 +285,7 @@ jobs:
 
   publish-pr-build:
     name: Publish Experimental PR Build
-    needs: [build]
+    needs: [package]
     if: >-
       github.event_name == 'pull_request' &&
       github.event.action != 'closed' &&
@@ -288,7 +347,7 @@ jobs:
 
   release-main:
     name: Publish Versioned Main Release
-    needs: [version, build]
+    needs: [version, package]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

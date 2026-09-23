@@ -25,7 +25,7 @@ from typing import Iterable, List, Sequence, Tuple
 TAU = 2.0 * math.pi
 ROOT = Path(__file__).resolve().parents[1]
 
-# Exact Phase5 mapping mirrored from main/video.c / fm.bsasm.
+# Exact Phase5 mapping mirrored from src/video.c / fm.bsasm.
 PHASE5 = [
      4,  6,  7,  7,  7,  8,  8,  8, 24, 24, 24, 25, 25, 25, 26, 28,
      2,  4,  5,  6,  6,  7,  7,  7, 25, 25, 25, 26, 26, 27, 28, 30,
@@ -66,13 +66,13 @@ def _parse_header_array(path: Path, name: str) -> List[int]:
     return [int(v) for v in re.findall(r"\d+", text[begin + 1:end])]
 
 
-GOLDEN_LUT = _parse_asm_lut(ROOT / "main" / "fm.bsasm")
+GOLDEN_LUT = _parse_asm_lut(ROOT / "src" / "fm.bsasm")
 TRAJECTORY_V2_DAC = _parse_header_array(
-    ROOT / "main" / "trajectory_v2_lut.h", "c5vrx_trajectory_v2_dac")
+    ROOT / "src" / "trajectory_v2_lut.h", "c5vrx_trajectory_v2_dac")
 TRAJECTORY_V2_TOKEN = _parse_header_array(
-    ROOT / "main" / "trajectory_v2_lut.h", "c5vrx_trajectory_v2_token")
+    ROOT / "src" / "trajectory_v2_lut.h", "c5vrx_trajectory_v2_token")
 TRAJECTORY_V2_CONFIDENCE = _parse_header_array(
-    ROOT / "main" / "trajectory_v2_lut.h", "c5vrx_trajectory_v2_confidence")
+    ROOT / "src" / "trajectory_v2_lut.h", "c5vrx_trajectory_v2_confidence")
 
 
 def s4(v: int) -> int:

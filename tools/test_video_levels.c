@@ -1,4 +1,4 @@
-/* Host test for main/video_levels.h (THEORY §8, §9).
+/* Host test for src/video_levels.h (THEORY §8, §9).
  *
  * Synthesises NTSC composite video, frequency-modulates it (sync tip at
  * -2080 kHz, blanking at 0 kHz relative to the carrier, i.e. the GOLDEN LUT

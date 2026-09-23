@@ -32,6 +32,8 @@ Adopting code from an open PR happens only via `git cherry-pick -x`, after a Pha
 | 2026-09-23 | 1 | upstream `e7f38f2` (in #25 era) | Fold-back squelch LUT rejected; GOLDEN clamp restored via `tools/gen_phase5_lut.py` |
 | 2026-09-23 | 1 | #13 (AFC part) | AFC AUTO re-referenced to the post-demod blanking level |
 | 2026-09-23 | 1 | #44 | Verdict revised reject → adopt-modified (pioarduino allowed if it performs better) |
+| 2026-09-23 | 2 | #44 | Adopted-modified: pioarduino platform (61.04.00-RC1, IDF 6.1.0) with official PyPI PlatformIO Core 6.2.0. No custom toolchain installer, no Core fork, standard `sdkconfig.<env>` handling. Not cherry-picked: written fresh for the multi-board layout. |
+| 2026-09-23 | 2 | #29 | Rejection enacted: the Docker/idf.py build path was removed |
 
 ## Issues
 

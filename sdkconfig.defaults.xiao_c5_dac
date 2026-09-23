@@ -1,0 +1,6 @@
+# Seeed XIAO ESP32-C5 + 6-bit resistor DAC (src/boards/xiao_c5_dac.h).
+CONFIG_C5VRX_BOARD_XIAO_C5_DAC=y
+# 8 MB external flash, QIO 80 MHz (upstream-tested configuration).
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y

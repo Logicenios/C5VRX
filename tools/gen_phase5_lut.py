@@ -6,7 +6,7 @@ The 1024x16 LUT is dual-purpose (THEORY §5.5):
   LUT[(prev<<5)|cur][5:0]   = 6-bit DAC code for the 50 ns phase step (THEORY §5.5)
 
 Usage:
-  gen_phase5_lut.py --check          verify main/fm.bsasm and main/fm4.bsasm
+  gen_phase5_lut.py --check          verify src/fm.bsasm and src/fm4.bsasm
   gen_phase5_lut.py --write          rewrite the embedded LUT lines
   gen_phase5_lut.py --variant foldback --print   reproduce upstream e7f38f2 (rejected)
 """
@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = [ROOT / "main" / "fm.bsasm", ROOT / "main" / "fm4.bsasm"]
+TARGETS = [ROOT / "src" / "fm.bsasm", ROOT / "src" / "fm4.bsasm"]
 TAU = 2.0 * math.pi
 
 # THEORY §5.5 / MEASUREMENTS M29: pedestal and "gain 2" (= 3/4 of a phase8 step)

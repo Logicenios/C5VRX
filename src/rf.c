@@ -11,6 +11,7 @@
  */
 
 #include "rf.h"
+#include "boards/board.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -73,13 +74,10 @@ static bool s_analog_bw40 = true;
 #define SELECTOR_MASK   0x01fe0000u
 #define HP_SRAM_USAGE   0x60095004u
 
-/* MODEM_DIAG lane mapping: Q[9:6] on DIAG[6:9], I[9:6] on DIAG[16:19].
- * GPIO mapping correlated against physical ESP32-C5 hardware captures.
- * These GPIOs connect to the PARLIO RX data_gpio_nums[] array (same order). */
-static const gpio_num_t s_iq_pins[8] = {
-    GPIO_NUM_1, GPIO_NUM_0, GPIO_NUM_25, GPIO_NUM_7,   /* Q[9:6] */
-    GPIO_NUM_10, GPIO_NUM_5, GPIO_NUM_3, GPIO_NUM_4,   /* I[9:6] */
-};
+/* MODEM_DIAG lane mapping: Q[9:6] on DIAG[6:9], I[9:6] on DIAG[16:19]
+ * (MEASUREMENTS M12). The pads are board-specific (src/boards/<board>.h) and
+ * feed PARLIO RX data_gpio_nums[] in the same order (video.c). */
+static const int s_iq_pins[BOARD_IQ_LANES] = BOARD_IQ_PINS;
 static const uint8_t s_iq_diag[8] = {
     6u, 7u, 8u, 9u,     /* DIAG[6:9]  = Q[9:6] */
     16u, 17u, 18u, 19u, /* DIAG[16:19] = I[9:6] */
@@ -134,7 +132,7 @@ static esp_err_t route_modem_iq(void)
     esp_err_t err = gpio_config(&cfg);
     if (err != ESP_OK) return err;
     for (unsigned lane = 0u; lane < 8u; ++lane) {
-        esp_rom_gpio_connect_out_signal(s_iq_pins[lane],
+        esp_rom_gpio_connect_out_signal((uint32_t)s_iq_pins[lane],
                                         MODEM_DIAG0_IDX + s_iq_diag[lane],
                                         false, false);
     }

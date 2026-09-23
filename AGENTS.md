@@ -2,7 +2,7 @@
 
 `Twotoz/C5VRX` is the canonical project repository.
 
-- Current implementation: `/main`
+- Current implementation: `/src` (PlatformIO; board configs in `/src/boards`, see `docs/BOARDS.md`)
 - Current hardware-proven findings: `/docs`
 - Historical experiments: `/legacy/c5vrx1` and `/legacy/c5vrx2`
 - Preserved archive discussions: `/docs/legacy-issues`
