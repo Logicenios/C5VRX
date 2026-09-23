@@ -82,6 +82,7 @@ Rows whose numbers were only computed or simulated are listed at the end under
 | M53 | Waveshare C5-Zero on the new MODEM_DIAG pads {0,1,4,5,6,7,8,9} captures a coherent carrier. ARC V3 settles to LOCK (Q4=TARGET) at **G43**: P_median 25–29, Q_phase 99–100 %, clip 0 %, origin 0 %, endpoint winding 0 %. Zero transport faults. | Q | Rush Tank II Ultimate at **25 mW on A1**, bench distance, external IPEX antenna, IDF 6.1.0, rev v1.0 | console `d`/`p`, 2026-09-23 |
 | M54 | Post-demod levels (`video_levels.h`): **sync amplitude A = 809 / 972 kHz** (two windows), sync tip S ≈ −1.0 MHz, blanking B = −195 / −50 kHz. The AFC blanking estimate was −209 → −141 kHz. That is **≈ 0.4–0.47× the 2080 kHz the GOLDEN LUT assumes** (THEORY §2.2/§5.5). On the XIAO DAC this VTX would give a sync of only ~8–9 codes and low contrast, so level normalisation (THEORY §9) is needed. | Q | same; estimator host-verified only; 50 ns endpoint phase, 4-bit | console `d`, 2026-09-23 |
 | M55 | Upstream's semantic sync / standard detector reports `syncQ=0`, standard UNKNOWN on the same signal. Its thresholds are fixed in LUT-code units, so a VTX with smaller deviation fails them. | Q | same | console `d`, 2026-09-23 |
+| M56 | Phase 3 firmware (PARLIO RX clock output on GPIO10 as FPGA strobe) still locks: ARC V3 G45, P 25–32, Q 98–99 %, clip/origin 0. Levels valid: A = **1514 / 1531 kHz**, B = −340 / −42 kHz, AFC −171 / −217 kHz. A differs from M54 (809–972 kHz) in the same bench setup; the cause is unknown (see P1). | Q | Tank II 25 mW A1, bench, C5-Zero | console `d`, 2026-09-23 |
 
 ## Pending measurements (to do in the lab)
 
@@ -90,7 +91,7 @@ each result into a numbered row above.
 
 | ID | What | Why | From |
 |---|---|---|---|
-| P1 | Level estimator stability: record S/B/A over ~1 min on a static scene; then dark vs bright scene | A varied 809 vs 972 kHz between two windows (M54); B must not move with picture (THEORY §8) | Phase 1/2 |
+| P1 | Level estimator stability: record S/B/A over ~1 min on a static scene; then dark vs bright scene | A varied 809–972 kHz (M54) and later 1514–1531 kHz (M56) in the same setup; B must not move with picture (THEORY §8) | Phase 1/2 |
 | P2 | Levels and lock at range (walk test, several distances) | M53/M54 are bench-range only | Phase 2 |
 | P3 | AFC AUTO convergence with the blanking reference (detune ±500 kHz) | sign/loop gain untested on hardware | Phase 1 |
 | P4 | Spectrum/SDR check at boot, channel change and after fresh-PHY-cal (`K`) | receive-only audit T1–T3; calibration drives internal TX tones (recon §3) | Phase 0/2 |
