@@ -75,6 +75,14 @@ Rows whose numbers were only computed or simulated are listed at the end under
 | M45 | Gain changes "normally settle for 500 ms". **Design statement, no recorded measurement**; UNVERIFIED. | — | | arc-receive-chain.md:181-183 |
 | M52 | Turning off the PARLIO/DAC TX and holding the DAC pads low ("self-noise" A/B) gives **no repeatable raw-Q4 improvement** | Q | weak/medium runs; strong runs clipped and excluded | pre-q4-lab.md §1; PR #56 |
 
+## This fork's measurements
+
+| # | Fact | Q | Conditions | Source |
+|---|---|---|---|---|
+| M53 | Waveshare C5-Zero on the new MODEM_DIAG pads {0,1,4,5,6,7,8,9} captures a coherent carrier. ARC V3 settles to LOCK (Q4=TARGET) at **G43**: P_median 25–29, Q_phase 99–100 %, clip 0 %, origin 0 %, endpoint winding 0 %. Zero transport faults. | Q | Rush Tank II Ultimate at **25 mW on A1**, bench distance, external IPEX antenna, IDF 6.1.0, rev v1.0 | console `d`/`p`, 2026-09-23 |
+| M54 | Post-demod levels (`video_levels.h`): **sync amplitude A = 809 / 972 kHz** (two windows), sync tip S ≈ −1.0 MHz, blanking B = −195 / −50 kHz. The AFC blanking estimate was −209 → −141 kHz. That is **≈ 0.4–0.47× the 2080 kHz the GOLDEN LUT assumes** (THEORY §2.2/§5.5). On the XIAO DAC this VTX would give a sync of only ~8–9 codes and low contrast, so level normalisation (THEORY §9) is needed. | Q | same; estimator host-verified only; 50 ns endpoint phase, 4-bit | console `d`, 2026-09-23 |
+| M55 | Upstream's semantic sync / standard detector reports `syncQ=0`, standard UNKNOWN on the same signal. Its thresholds are fixed in LUT-code units, so a VTX with smaller deviation fails them. | Q | same | console `d`, 2026-09-23 |
+
 ## Levels and hardware network (computed, not measured)
 
 The resistor network is DAC b0..b5 on XIAO D4..D9 = GPIO 23, 24, 11, 12, 8, 9 through

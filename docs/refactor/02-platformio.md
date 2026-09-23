@@ -124,6 +124,10 @@ Checks:
 - **Q4 stream:** noise only (P=0, origin 1000 ‰, DC I −0.14, winding 11 ‰). ARC V3 went
   ACQUIRE/STARVED and raised the gain G52 → G70. That is consistent with **no carrier on
   A1**. Whether the new pad set captures a real signal bit-exactly is still open.
+- **With the VTX on** (Rush Tank II Ultimate, 25 mW, A1): the new pads capture a coherent
+  carrier. ARC V3 locks at G43 (P 25–29, Q_phase ≈ 100 %, no clip/origin/winding), and the
+  level estimator finds sync with A ≈ 0.8–1.0 MHz and B ≈ −0.05…−0.2 MHz (MEASUREMENTS
+  M53–M55). That closes the "new pad set" question at bench range.
 - The board runs warm. That is expected for 240 MHz with continuous Wi-Fi RX and eight pads
   toggling at the ≈80 MS/s diagnostic-bus rate. No current measurement yet.
 - "No serial" was the monitor attaching after boot. The firmware is silent after boot by
