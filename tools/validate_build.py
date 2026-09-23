@@ -52,7 +52,7 @@ c_names = [f.name for f in c_files]
 video_c = read(MAIN / "video.c")
 menu_lifecycle = video_c.split("static void video_set_menu_mode", 1)[1].split("static void menu_cycle_standard_mode", 1)[0]
 
-check("production receiver and dedicated menu/auto-lab modules", set(c_names) == {"main.c", "board.c", "arc_phy.c", "arc_v3_controller.c", "arc_v5_autotune.c", "rx_auto_lab.c", "rf.c", "video.c", "menu_raster.c"},
+check("production receiver and dedicated menu/auto-lab modules", set(c_names) == {"main.c", "board.c", "link.c", "arc_phy.c", "arc_v3_controller.c", "arc_v5_autotune.c", "rx_auto_lab.c", "rf.c", "video.c", "menu_raster.c"},
       f"found: {c_names}")
 check("main.c present", "main.c" in c_names)
 check("rf.c present", "rf.c" in c_names)
@@ -570,6 +570,20 @@ check("CI builds every board with PlatformIO, not idf.py",
       "env: [xiao_c5_dac, waveshare_c5zero_fpga]" in workflow_text_for_pio and
       "idf.py build" not in workflow_text_for_pio and
       "espressif/idf:" not in workflow_text_for_pio)
+
+# ---- FPGA link (refactor Phase 3, docs/FPGA_LINK.md) ----
+link_c = read(MAIN / "link.c")
+check("FPGA link strobe is the PARLIO RX sample clock on the board's link pin",
+      ".clk_out_gpio_num  = BOARD_LINK_CLK_GPIO," in video_c)
+check("control link is framed, versioned and CRC-protected",
+      "LINK_PROTO_VERSION" in read(MAIN / "link_proto.h") and
+      "link_crc16" in read(MAIN / "link_proto.h") and
+      "link_parser_push" in link_c)
+check("RF commands from the link run in the control task (single PHY writer)",
+      "video_post_link_command" in link_c and "rf_set_channel" not in link_c and
+      "run_link_command(link_item)" in video_c)
+check("FPGA board forwards BOOT presses instead of acting locally",
+      "link_post(LINK_MSG_BUTTON" in video_c)
 
 # ---- Web flasher / release safety ----
 web_app = read(ROOT / "web" / "app.js")

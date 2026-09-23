@@ -25,3 +25,12 @@
  * reset default. */
 #define BOARD_ANT_SWITCH_GPIO 26
 #define BOARD_ANT_SWITCH_EXTERNAL_LEVEL 1
+
+/* FPGA link (docs/FPGA_LINK.md). The FPGA reads the eight MODEM_DIAG pads
+ * above directly; the strobe is PARLIO RX's own 40 MHz sample clock, output on
+ * BOARD_LINK_CLK_GPIO (the edge the C5 itself samples on, POS). Control link
+ * is a UART on the header pins labelled UART0 (UART1 peripheral routed there). */
+#define BOARD_LINK_CLK_GPIO       10
+#define BOARD_CTRL_UART_TX_GPIO   11   /* C5 -> FPGA */
+#define BOARD_CTRL_UART_RX_GPIO   12   /* FPGA -> C5 */
+#define BOARD_ID                  1

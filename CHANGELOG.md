@@ -7,6 +7,17 @@ Upstream history before the refactor is in `git log` (baseline `upstream/main` =
 ## [Unreleased]
 
 ### Added
+- Phase 3: C5 → FPGA link. `docs/FPGA_LINK.md` explains the decision. The FPGA reads the
+  8 MODEM_DIAG pads directly; PARLIO RX's 40 MHz sample clock is output on GPIO10 as the
+  strobe. A 1 Mbaud UART control link on GPIO11/12 uses a versioned, CRC-16-framed
+  protocol (`src/link_proto.h`, `src/link.c`).
+- The FPGA can set channel, scan all 48 channels with per-channel results, set a
+  video-standard hint, store an opaque FPGA settings blob in NVS, and receive 10 Hz STATUS
+  (gain, Q4 quality, lock, carrier offset, sync tip / blanking / sync amplitude). The C5 BOOT
+  button is forwarded.
+- `tools/test_link_proto.c` and `tools/link_cli.py`, a host client that stands in for the
+  FPGA via a USB-UART adapter.
+- `docs/MEASUREMENTS.md`: a pending lab-measurements list.
 - Phase 2: PlatformIO project (`platformio.ini`, pioarduino 61.04.00-RC1, ESP-IDF 6.1.0) with
   `waveshare_c5zero_fpga` and `xiao_c5_dac` environments, per-env sdkconfig defaults, and a
   custom `boards/waveshare_esp32c5_zero.json`.

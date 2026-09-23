@@ -20,3 +20,9 @@
 /* No RF switch is driven on this board (UNVERIFIED whether the XIAO has one). */
 #define BOARD_ANT_SWITCH_GPIO (-1)
 #define BOARD_ANT_SWITCH_EXTERNAL_LEVEL 1
+
+/* No FPGA link on this board. */
+#define BOARD_LINK_CLK_GPIO       (-1)
+#define BOARD_CTRL_UART_TX_GPIO   (-1)
+#define BOARD_CTRL_UART_RX_GPIO   (-1)
+#define BOARD_ID                  2

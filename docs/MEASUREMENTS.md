@@ -83,6 +83,24 @@ Rows whose numbers were only computed or simulated are listed at the end under
 | M54 | Post-demod levels (`video_levels.h`): **sync amplitude A = 809 / 972 kHz** (two windows), sync tip S ≈ −1.0 MHz, blanking B = −195 / −50 kHz. The AFC blanking estimate was −209 → −141 kHz. That is **≈ 0.4–0.47× the 2080 kHz the GOLDEN LUT assumes** (THEORY §2.2/§5.5). On the XIAO DAC this VTX would give a sync of only ~8–9 codes and low contrast, so level normalisation (THEORY §9) is needed. | Q | same; estimator host-verified only; 50 ns endpoint phase, 4-bit | console `d`, 2026-09-23 |
 | M55 | Upstream's semantic sync / standard detector reports `syncQ=0`, standard UNKNOWN on the same signal. Its thresholds are fixed in LUT-code units, so a VTX with smaller deviation fails them. | Q | same | console `d`, 2026-09-23 |
 
+## Pending measurements (to do in the lab)
+
+Open items collected across phases. Run them when the hardware is available, then move
+each result into a numbered row above.
+
+| ID | What | Why | From |
+|---|---|---|---|
+| P1 | Level estimator stability: record S/B/A over ~1 min on a static scene; then dark vs bright scene | A varied 809 vs 972 kHz between two windows (M54); B must not move with picture (THEORY §8) | Phase 1/2 |
+| P2 | Levels and lock at range (walk test, several distances) | M53/M54 are bench-range only | Phase 2 |
+| P3 | AFC AUTO convergence with the blanking reference (detune ±500 kHz) | sign/loop gain untested on hardware | Phase 1 |
+| P4 | Spectrum/SDR check at boot, channel change and after fresh-PHY-cal (`K`) | receive-only audit T1–T3; calibration drives internal TX tones (recon §3) | Phase 0/2 |
+| P5 | Antenna polarity cross-check: IPEX removed, onboard vs external | confirms Waveshare's GPIO26 statement independently | Phase 2 |
+| P6 | Tank II pre-emphasis fit (luma step / multiburst capture) | THEORY §6.4; de-emphasis constants | Phase 1 |
+| P7 | Channels > 5885 MHz (E6–E8, R8) and L band tuning | THEORY §3 reachability | Phase 1 |
+| P8 | Board current/temperature of the C5-Zero | "gets warm"; expected, not measured | Phase 2 |
+| P9 | FPGA-link electrical items L3.1–L3.6 (strobe, skew, termination, UART, scan) | docs/FPGA_LINK.md §5 | Phase 3 |
+| P10 | GOLDEN clamped vs fold-back LUT A/B, and XIAO boot on IDF 6.1 | needs the DAC board | Phase 1/2 |
+
 ## Levels and hardware network (computed, not measured)
 
 The resistor network is DAC b0..b5 on XIAO D4..D9 = GPIO 23, 24, 11, 12, 8, 9 through

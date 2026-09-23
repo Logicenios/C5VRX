@@ -29,6 +29,7 @@
 
 #include "video.h"
 #include "boards/board.h"
+#include "link.h"
 #include "rf.h"
 #include "menu_font.h"
 #include "menu_raster.h"
@@ -187,6 +188,7 @@ static volatile uint16_t s_last_line_period_20m;
 static volatile uint16_t s_last_sync_width_20m;
 static volatile int s_last_sync_quality;
 static QueueHandle_t s_menu_commands;
+static QueueHandle_t s_link_commands;  /* FPGA link -> control task (link.c) */
 static bitscrambler_handle_t s_flight_bs;
 
 /* Cache synchronization helpers for DMA buffers and descriptors on ESP32-C5.
@@ -334,7 +336,8 @@ static esp_err_t prepare_rx(void)
         .ext_clk_freq_hz   = 0u,
         .exp_clk_freq_hz   = IQ_RATE_HZ,
         .clk_in_gpio_num   = -1,
-        .clk_out_gpio_num  = -1,
+        /* FPGA board: output the RX sample clock as the link strobe (docs/FPGA_LINK.md). */
+        .clk_out_gpio_num  = BOARD_LINK_CLK_GPIO,
         .valid_gpio_num    = -1,
         /* Q[9:6] then I[9:6]; same board pads that rf.c routes MODEM_DIAG to. */
         .data_gpio_nums    = BOARD_IQ_PINS,
@@ -3558,7 +3561,17 @@ static void channel_auto_search(void)
             best_quality = quality;
         }
         s_channel_scan_progress = (unsigned)((channel + 1u) * 100u / channel_count);
-        menu_render_menu();
+        if (BOARD_HAS_FPGA_LINK) {
+            link_scan_result_t r = {
+                .channel_index = (uint8_t)channel,
+                .quality = (uint8_t)(quality < 0 ? 0 : quality > 100 ? 100 : quality),
+                .p_median = (uint8_t)(metrics.p_median > 255 ? 255 : metrics.p_median),
+                .q_phase = (uint8_t)(metrics.q_phase > 100 ? 100 : metrics.q_phase),
+            };
+            link_post(LINK_MSG_SCAN_RESULT, &r, sizeof r);
+        } else {
+            menu_render_menu();
+        }
     }
 
     if (best_rank < 0) best_channel = original_channel;
@@ -3573,10 +3586,89 @@ static void channel_auto_search(void)
     video_standard_detector_reset();
     settings_save();
     menu_render_menu();
+    if (BOARD_HAS_FPGA_LINK) {
+        link_scan_done_t d = { .best_index = (uint8_t)rf_get_channel_index(),
+                               .found = best_rank >= 0 };
+        link_post(LINK_MSG_SCAN_DONE, &d, sizeof d);
+    }
     printf("[AUTO SEARCH] %s -> %s (%u MHz), signal=%d\n",
            best_rank < 0 ? "No carrier; restored" : "Selected",
            rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz,
            s_signal_strength);
+}
+
+/* ---- FPGA link hooks (video.h, src/link.c) ---- */
+
+bool video_post_link_command(video_link_cmd_t cmd, uint8_t arg)
+{
+    if (!s_link_commands) return false;
+    uint16_t item = (uint16_t)(((unsigned)cmd << 8) | arg);
+    return xQueueSend(s_link_commands, &item, 0) == pdTRUE;
+}
+
+void video_get_link_settings(uint8_t *channel_index, uint8_t *std_mode)
+{
+    *channel_index = (uint8_t)rf_get_channel_index();
+    *std_mode = s_video_std_mode == VIDEO_STD_MODE_PAL ? LINK_STD_PAL :
+                s_video_std_mode == VIDEO_STD_MODE_NTSC ? LINK_STD_NTSC : LINK_STD_AUTO;
+}
+
+void video_get_link_status(link_status_t *st)
+{
+    /* Written by the control task, read here without a lock: every field is a
+     * naturally aligned word read, and STATUS is 10 Hz telemetry. */
+    const video_levels_t lv = s_last_levels;
+    memset(st, 0, sizeof *st);
+    st->channel_index = (uint8_t)rf_get_channel_index();
+    st->freq_mhz = rf_get_frequency_mhz();
+    st->gain_index = s_current_gain;
+    st->signal_strength = (uint8_t)(s_signal_strength < 0 ? 0 : s_signal_strength > 100 ? 100 : s_signal_strength);
+    st->p_median = (uint8_t)(s_last_p_median < 0 ? 0 : s_last_p_median > 255 ? 255 : s_last_p_median);
+    st->q_phase = (uint8_t)(s_last_q_phase < 0 ? 0 : s_last_q_phase > 100 ? 100 : s_last_q_phase);
+    if (s_channel_scan_active) st->flags |= LINK_STATUS_SCANNING;
+    if (lv.valid) st->flags |= LINK_STATUS_LEVELS_VALID;
+    if (s_rx_profile == RX_PROFILE_ARC_V3_EXP ? s_last_arc_v3_state == ARC_V3_LOCK
+                                              : s_agc_state == AGC_STATE_TRACK)
+        st->flags |= LINK_STATUS_LOCKED;
+    if (s_last_fusion_context != FUSION_CONTEXT_NO_CARRIER) st->flags |= LINK_STATUS_CARRIER;
+    st->carrier_offset_khz = (int16_t)s_cfo_khz;
+    st->sync_tip_khz = (int16_t)lv.sync_tip_khz;
+    st->blanking_khz = (int16_t)lv.blanking_khz;
+    st->sync_amplitude_khz = (uint16_t)(lv.sync_amplitude_khz < 0 ? 0 : lv.sync_amplitude_khz);
+    st->std_detected = !s_detected_video_std_valid ? LINK_STD_AUTO :
+                       s_detected_video_std == VIDEO_STD_PAL ? LINK_STD_PAL : LINK_STD_NTSC;
+}
+
+/* Executed in the control task only (single PHY-write owner). */
+static void run_link_command(uint16_t item)
+{
+    const video_link_cmd_t cmd = (video_link_cmd_t)(item >> 8);
+    const uint8_t arg = (uint8_t)(item & 0xFFu);
+    switch (cmd) {
+    case VIDEO_LINK_CMD_SET_CHANNEL:
+        if (rf_set_channel(arg) != ESP_OK) {
+            uint8_t e = LINK_ERR_UNSUPPORTED;   /* e.g. > 5885 MHz (THEORY §3) */
+            link_post(LINK_MSG_ERROR, &e, 1);
+            break;
+        }
+        s_cfo_khz = 0;
+        s_last_levels.valid = false;
+        s_agc_state = AGC_STATE_SEARCH;
+        ++s_profile_generation;
+        video_standard_detector_reset();
+        break;
+    case VIDEO_LINK_CMD_SCAN:
+        s_last_levels.valid = false;
+        channel_auto_search();
+        break;
+    case VIDEO_LINK_CMD_STD_HINT:
+        s_video_std_mode = arg == LINK_STD_PAL ? VIDEO_STD_MODE_PAL :
+                           arg == LINK_STD_NTSC ? VIDEO_STD_MODE_NTSC : VIDEO_STD_MODE_AUTO;
+        break;
+    case VIDEO_LINK_CMD_SAVE:
+        settings_save();
+        break;
+    }
 }
 
 static void handle_button_short_click(void)
@@ -3773,6 +3865,10 @@ static void analog_agc_task(void *arg)
             else if (s_menu_active) handle_button_long_click();
         }
 
+        uint16_t link_item;
+        while (s_link_commands && xQueueReceive(s_link_commands, &link_item, 0) == pdTRUE)
+            run_link_command(link_item);
+
         if (boot_grace_ticks > 0) {
             boot_grace_ticks--;
             btn_ticks = 0;
@@ -3783,7 +3879,20 @@ static void analog_agc_task(void *arg)
             btn_recovery_fired = false;
         } else {
             int btn_level = gpio_get_level(BOOT_BTN_GPIO);
-            if (btn_level == 0) {
+            if (BOARD_HAS_FPGA_LINK) {
+                /* The FPGA owns the menu/OSD: forward BOOT presses instead of
+                 * acting locally (50 ms ticks; >= 0.6 s = long). */
+                if (btn_level == 0) {
+                    btn_ticks++;
+                } else if (btn_ticks > 0) {
+                    if (btn_ticks >= 2) {
+                        link_button_t b = { .kind = btn_ticks >= 12 ? LINK_BUTTON_LONG : LINK_BUTTON_SHORT,
+                                            .held_ms = (uint16_t)(btn_ticks * 50) };
+                        link_post(LINK_MSG_BUTTON, &b, sizeof b);
+                    }
+                    btn_ticks = 0;
+                }
+            } else if (btn_level == 0) {
                 btn_ticks++;
 
                 /* This path deliberately ignores the persisted BOOT-menu bit.
@@ -4823,6 +4932,8 @@ esp_err_t video_start(void)
     /* Menu control is serialized with BOOT handling in the AGC task. */
     s_menu_commands = xQueueCreate(16, sizeof(int));
     if (!s_menu_commands) return ESP_ERR_NO_MEM;
+    s_link_commands = xQueueCreate(8, sizeof(uint16_t));
+    if (!s_link_commands) return ESP_ERR_NO_MEM;
 
     settings_load();
 

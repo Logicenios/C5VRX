@@ -166,6 +166,9 @@ jobs:
           gcc -std=c11 -Wall -Wextra -Werror -Isrc tools/test_video_levels.c -lm -o /tmp/test_video_levels
           /tmp/test_video_levels
           python3 tools/gen_phase5_lut.py --check
+          gcc -std=c11 -Wall -Wextra -Werror -Isrc tools/test_link_proto.c -o /tmp/test_link_proto
+          /tmp/test_link_proto
+          python3 tools/link_cli.py --self-test
           python3 tools/train_trajectory_v2.py --write --self-test
           git diff --exit-code -- src/fm_traj.bsasm src/trajectory_v2_lut.h
           python3 tools/range_demod_bench.py --self-test

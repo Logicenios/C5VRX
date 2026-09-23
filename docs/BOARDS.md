@@ -78,8 +78,8 @@ Sources:
 | 7 | header | I8 | free |
 | 8 | header | I7 | free |
 | 9 | header | I6 | free |
-| 10 | header | spare (Phase 3 link) | free |
-| 11 / 12 | header, UART0 TX / RX | spare (candidate FPGA control UART, Phase 3) | the ROM prints its boot log on UART0 TX |
+| 10 | header | **FPGA link STROBE** (PARLIO RX 40 MHz clock out) | free; docs/FPGA_LINK.md |
+| 11 / 12 | header, UART0 TX / RX | **FPGA control UART** (UART1 routed here): 11 = C5→FPGA, 12 = FPGA→C5 | the ROM prints its boot log on GPIO11 at reset; the link parser skips it |
 | 13 / 14 | USB D− / D+ | USB-Serial-JTAG console | fixed function |
 | 23 / 24 | bottom pads | spare | free |
 | 25 | bottom pad | — | **strapping** (SDIO in) |
@@ -88,7 +88,7 @@ Sources:
 | 28 | bottom pad + BOOT button | BOOT button (menu/scan input) | **strapping**; the BOOT button pulls it low |
 | SPI* | internal | in-package flash | not exposed |
 
-- **MODEM_DIAG pads.** `{0, 1, 4, 5, 6, 7, 8, 9}` = Q[9:6], I[9:6]. This differs from the
+- **MODEM_DIAG pads.** These are also the **FPGA link data lines**: the FPGA reads them directly. `{0, 1, 4, 5, 6, 7, 8, 9}` = Q[9:6], I[9:6]. This differs from the
   XIAO set, because GPIO25 and GPIO3 are strapping pins. Once the FPGA is wired to these
   pads, a strapping pin could change the boot mode. The eight chosen pads are
   non-strapping, and neither USB, UART0 nor antenna.

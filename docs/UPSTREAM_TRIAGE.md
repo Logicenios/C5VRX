@@ -34,6 +34,9 @@ Adopting code from an open PR happens only via `git cherry-pick -x`, after a Pha
 | 2026-09-23 | 1 | #44 | Verdict revised reject → adopt-modified (pioarduino allowed if it performs better) |
 | 2026-09-23 | 2 | #44 | Adopted-modified: pioarduino platform (61.04.00-RC1, IDF 6.1.0) with official PyPI PlatformIO Core 6.2.0. No custom toolchain installer, no Core fork, standard `sdkconfig.<env>` handling. Not cherry-picked: written fresh for the multi-board layout. |
 | 2026-09-23 | 2 | #29 | Rejection enacted: the Docker/idf.py build path was removed |
+| 2026-09-23 | 3 | #12 | Adopted into the link design: the FPGA samples the same 40 MHz edge as the C5; stationarity test L3.3 would close it |
+| 2026-09-23 | 3 | #15, #50 | Adopted-modified as the upgrade path for a modem-synchronous strobe (`FPGA_DEBUG_CLK*`), lab item L3.2; the current link uses the PARLIO RX clock out instead |
+| 2026-09-23 | 3 | #42 | Adopted-modified: framed CRC-16 UART idea reused for the control link (`src/link_proto.h`), written fresh (not cherry-picked); no video over UART |
 
 ## Issues
 

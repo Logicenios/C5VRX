@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "board.c"
+        "link.c"
         "arc_phy.c"
         "arc_v3_controller.c"
         "arc_v5_autotune.c"
@@ -20,6 +21,8 @@ idf_component_register(
         esp_driver_gpio
         esp_driver_bitscrambler
         esp_driver_usb_serial_jtag
+        esp_driver_uart
+        esp_app_format
         vfs
         esp_rom
         esp_mm
