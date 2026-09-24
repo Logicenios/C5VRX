@@ -67,7 +67,9 @@ None of these is a strapping pin (BOARDS.md). The FPGA must keep all C5-bound li
 
 ### §2.2 Wiring rules
 
-- **Series termination: 33 Ω at the C5 end** on the 9 fast lines (8 data + STROBE). This is
+- **Series termination: 33 Ω at the C5 end** on the 9 fast lines (8 data + STROBE). Colour bands
+  orange-orange-**black**; *not* 33 kΩ (orange-orange-orange). 33 kΩ passes the slow wiring test
+  (§2.5) but low-pass filters the 12.5 ns data into near-DC levels (first bring-up, M65). This is
   source termination for LVCMOS. The ESP32-C5 output impedance at the default drive
   (`GPIO_DRIVE_CAP_2`) is **not published** (UNVERIFIED). 33 Ω is the usual value to bring a
   ~20–30 Ω driver close to a ~50–70 Ω ribbon/jumper impedance. Tune it on the scope (L3.4):
