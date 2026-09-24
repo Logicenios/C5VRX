@@ -37,6 +37,7 @@ enum {
     LINK_MSG_SET_STD_HINT      = 0x06, /* u8 LINK_STD_* -> ACK */
     LINK_MSG_SET_FPGA_SETTINGS = 0x07, /* opaque FPGA blob (<= LINK_FPGA_BLOB_MAX) -> ACK */
     LINK_MSG_SAVE_SETTINGS     = 0x08, /* persist RF settings + FPGA blob in NVS -> ACK/NAK */
+    LINK_MSG_FPGA_DEBUG        = 0x09, /* FPGA diagnostics, 1 Hz; the C5 ignores it (no reply) */
 };
 
 /* C5 -> FPGA messages */

@@ -142,6 +142,8 @@ static void handle(const link_frame_t *f)
         if (blob_save() != ESP_OK) { reply_ack(f, LINK_ERR_STORAGE); break; }
         reply_ack(f, video_post_link_command(VIDEO_LINK_CMD_SAVE, 0) ? LINK_ERR_NONE : LINK_ERR_BUSY);
         break;
+    case LINK_MSG_FPGA_DEBUG:          /* diagnostics for a host sniffing the link; no reply */
+        break;
     default:
         reply_ack(f, LINK_ERR_UNSUPPORTED);
         break;

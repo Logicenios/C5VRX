@@ -3,7 +3,9 @@
 // check_soc.py decodes and checks both.
 `timescale 1ns/1ps
 module tb_soc;
-    parameter integer QUICK_MS = 0;      // > 0: stop after this many ms (boot check)
+    parameter integer QUICK_MS = 0;
+    parameter RXFILE = "data/soc_rx.hex";
+    parameter NOSIG = 0;                 // 1: board with no C5 attached (no strobe, no field, loss)      // > 0: stop after this many ms (boot check)
     parameter TXLOG = "data/soc_tx.txt";
     reg clk = 0;
     always #18.518 clk = ~clk;                 // 27 MHz
@@ -15,7 +17,8 @@ module tb_soc;
     soc #(.FW_HEX("../firmware/build/fw.hex")) dut (
         .clk(clk), .resetn(rc == 0), .uart_tx(tx), .uart_rx(rx),
         .osd_we(osd_we), .osd_waddr(osd_waddr), .osd_wdata(osd_wdata),
-        .status({20'd0, 1'b0, 1'b1, 2'd1, 1'b1, 1'b1, 1'b1, 1'b0, 1'b0, 1'b1, s2, s1}),
+        .status(NOSIG ? {20'd0, 1'b1, 1'b0, 2'd0, 1'b1, 1'b1, 1'b0, 1'b0, 1'b0, 1'b0, s2, s1}
+                       : {20'd0, 1'b0, 1'b1, 2'd1, 1'b1, 1'b1, 1'b1, 1'b0, 1'b0, 1'b1, s2, s1}),
         .meas_tip(32'd0), .meas_blank(32'd0), .counters(32'd0),
         .settings0(set0), .settings1(set1), .settings2(set2), .osd_ctrl(osd_ctrl));
 
@@ -31,7 +34,7 @@ module tb_soc;
     integer nev = 0, e;
     initial begin
         for (e = 0; e < 4096; e = e + 1) ev[e] = 40'hFFFF_FFFF_FF;     // end marker
-        $readmemh("data/soc_rx.hex", ev);
+        $readmemh(RXFILE, ev);
         nev = 0;
         for (e = 0; e < 4096; e = e + 1) if (ev[e] != 40'hFFFF_FFFF_FF && nev == e) nev = e + 1;
     end

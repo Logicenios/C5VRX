@@ -42,13 +42,13 @@ $(BUILD)/top-synth.json: $(TOP_SRC) $(TOP_HEX) | $(BUILD)
 
 # timing: tangnano20k.sdc states the pclk / sclk / lclk periods (nextpnr does not derive
 # them from the PLLs). fclk (371.25 MHz) only clocks the OSER10 serialisers.
-# ireg_in_iob puts the link capture registers in the pad (fixed, minimal input delay).
+# Do not use --vopt ireg_in_iob: pad input registers read a constant 0 (MEASUREMENTS M61).
 # --threads + router2: placer ~180 s (was ~306 s), router ~25 s (was 127 s). The Gowin global/
 # segment routing pass (~290 s) has no option to skip, so a full place-and-route is ~10 min:
 # run `make lint` and the simulations first.
 $(BUILD)/top-pnr.json: $(BUILD)/top-synth.json $(CST) $(SDC)
 	nextpnr-himbaechel --json $< --write $@ --device $(DEVICE) --vopt family=$(FAMILY) --vopt cst=$(CST) \
-		--vopt ireg_in_iob --sdc $(SDC) --threads $(NPROC) --router router2 --report $(BUILD)/top-report.json -l $(BUILD)/top-pnr.log
+		--sdc $(SDC) --threads $(NPROC) --router router2 --report $(BUILD)/top-report.json -l $(BUILD)/top-pnr.log
 
 $(BUILD)/top.fs: $(BUILD)/top-pnr.json
 	gowin_pack -d $(FAMILY) -o $@ $<

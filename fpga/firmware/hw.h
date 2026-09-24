@@ -15,6 +15,7 @@
 #define SET2        REG(0x30000018u)
 #define OSD_CTRL    REG(0x3000001Cu)
 #define MS_COUNTER  REG(0x30000020u)
+#define ST_DEBUG    REG(0x30000024u)   /* {mode changes, clk restarts, cause, mode_want, mode_req, 0} */
 
 /* ST_STATUS bits */
 #define S_BTN1      (1u << 0)

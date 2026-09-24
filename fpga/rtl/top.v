@@ -21,6 +21,7 @@ module top (
     input  wire [7:0] link_d,
     input  wire       link_rx,        // C5 UART1 TX (GPIO11)
     output wire       link_tx,        // C5 UART1 RX (GPIO12), idle high
+    output wire       dbg_tx,         // copy of link_tx on the BL616 USB-UART (host /dev/ttyUSB1, 1 Mbaud)
     // HDMI
     output wire       tmds_clk_p, tmds_clk_n,
     output wire [2:0] tmds_d_p, tmds_d_n,
@@ -38,14 +39,14 @@ module top (
 );
     // ================================================================== clk27: control
     wire [31:0] set0, set1, set2, osd_ctrl, status, counters;
-    wire [31:0] tip32, blank32;
+    wire [31:0] tip32, blank32, debug;
     wire        osd_we; wire [9:0] osd_waddr; wire [15:0] osd_wdata;
     reg  [3:0]  cpu_rst_cnt = 4'hF;
     always @(posedge clk27) if (cpu_rst_cnt != 0) cpu_rst_cnt <= cpu_rst_cnt - 4'd1;
     soc u_soc (
         .clk(clk27), .resetn(cpu_rst_cnt == 0), .uart_tx(link_tx), .uart_rx(link_rx),
         .osd_we(osd_we), .osd_waddr(osd_waddr), .osd_wdata(osd_wdata),
-        .status(status), .meas_tip(tip32), .meas_blank(blank32), .counters(counters),
+        .status(status), .meas_tip(tip32), .meas_blank(blank32), .counters(counters), .debug(debug),
         .settings0(set0), .settings1(set1), .settings2(set2), .osd_ctrl(osd_ctrl));
 
     // output-rate selection: Force 60, or follow the (effective) standard once it has been
@@ -68,7 +69,17 @@ module top (
     end
 
     wire fclk, pclk, plocked;
-    clk_gen u_clk (.clk27(clk27), .mode(mode_req), .fclk(fclk), .pclk(pclk), .locked(plocked), .mode_cur(mode_cur));
+    wire [7:0] clk_restarts; wire [1:0] clk_cause;
+    clk_gen u_clk (.clk27(clk27), .mode(mode_req), .fclk(fclk), .pclk(pclk), .locked(plocked), .mode_cur(mode_cur),
+                   .restarts(clk_restarts), .last_cause(clk_cause));
+    // debug word: {mode changes requested[7:0], restarts[7:0], cause, mode_want, mode_req, 8'd0, ...}
+    reg [7:0] mode_changes = 0;
+    reg [1:0] mode_req_d = 0;
+    always @(posedge clk27) begin
+        mode_req_d <= mode_req;
+        if (mode_req_d != mode_req && mode_changes != 8'hFF) mode_changes <= mode_changes + 8'd1;
+    end
+    assign debug = {mode_changes, clk_restarts, 2'd0, clk_cause, mode_want, mode_req, 8'd0};
 
     // ================================================================== lclk: receive chain
     wire lclk = link_strobe;
@@ -81,10 +92,17 @@ module top (
     cdc_bus #(.W(43)) u_set_l (.clk(lclk), .d({set0[1:0], set0[6], set1[23:0], set2[15:0]}),
                                .q({std_l, notch_l, sat_l, hue_l, con_l, bri_l}));
 
-    // capture register in the input pads (nextpnr --vopt ireg_in_iob); STROBE is the
-    // source-synchronous clock, so no synchroniser is needed
-    reg [7:0] iq;
-    always @(posedge lclk) iq <= link_d;
+    // capture in fabric flip-flops. The pad input register (nextpnr --vopt ireg_in_iob) reads a
+    // constant 0 with this toolchain (docs/MEASUREMENTS.md M61), so it is not used. STROBE is the
+    // source-synchronous clock, so no synchroniser is needed. A LUT1 buffer per bit adds delay
+    // before the phase-LUT BSRAM address pins, which otherwise miss hold by ~0.12 ns.
+    reg [7:0] iq_cap, iq_r;
+    always @(posedge lclk) begin iq_cap <= link_d; iq_r <= iq_cap; end
+    wire [7:0] iq;
+    genvar gi;
+    generate for (gi = 0; gi < 8; gi = gi + 1) begin : iq_dly
+        (* keep *) LUT1 #(.INIT(2'b10)) u_buf (.F(iq[gi]), .I0(iq_r[gi]));
+    end endgenerate
 
     wire signed [17:0] f20; wire f20_valid, click;
     fm_frontend #(.LUT_FILE("rtl/dsp/phase_lut.hex")) u_fm (
@@ -229,6 +247,8 @@ module top (
 
     // ================================================================== LEDs (active low)
     assign led = ~{strobe_ok, st_p[1], st_l[2], st_l[1], st_p[2], plocked};
+
+    assign dbg_tx = link_tx;
 
     wire _unused = &{1'b0, line_start, field_start, pal_sw_neg, ff_full, ff_wlevel, de, click_k[15:8]};
 endmodule

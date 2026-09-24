@@ -409,13 +409,18 @@ int main(void)
 {
     link_parser_reset(&parser);
     apply_settings();
-    uint32_t last_ms = now_ms(), last_req = now_ms() - 500u, last_draw = 0;   /* ask at once */
+    uint32_t last_ms = now_ms(), last_req = now_ms() - 500u, last_draw = 0, last_dbg = 0;   /* ask at once */
     for (;;) {
         link_poll();
         uint32_t t = now_ms();
         if (!have_settings && t - last_req >= 500u) {       /* the C5 may boot after us */
             send(LINK_MSG_GET_SETTINGS, NULL, 0);
             last_req = t;
+        }
+        if (t - last_dbg >= 1000u) {                         /* diagnostics (fpga/bringup/link_sniff.py) */
+            uint32_t d[4] = { ST_STATUS, ST_DEBUG, t, ST_COUNTERS };
+            send(LINK_MSG_FPGA_DEBUG, d, sizeof d);
+            last_dbg = t;
         }
         if (t != last_ms) {
             last_ms = t;

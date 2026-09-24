@@ -187,3 +187,7 @@ IO_LOC  "link_rx" 72;
 IO_PORT "link_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 IO_LOC  "link_tx" 71;
 IO_PORT "link_tx" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+
+// ---- debug: FPGA -> C5 link traffic mirrored to the BL616 USB-UART (Sipeed example: FPGA TX = pin 69) ----
+IO_LOC  "dbg_tx" 69;
+IO_PORT "dbg_tx" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;

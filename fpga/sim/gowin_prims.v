@@ -19,3 +19,6 @@ endmodule
 module ODDR (output Q0, output Q1, input D0, input D1, input TX, input CLK);
     assign Q0 = D0; assign Q1 = TX;
 endmodule
+module LUT1 #(parameter [1:0] INIT = 2'b10) (output F, input I0);
+    assign F = INIT[I0];
+endmodule

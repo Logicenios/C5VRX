@@ -39,7 +39,18 @@ Vendored third-party sources (`third_party/`, pinned commits):
 Bring-up probes (`bringup/`, each loads into SRAM and reports over the BL616 USB-UART at 115200 baud,
 `/dev/ttyUSB1` on the host): `pll_probe.v` measures the rPLL dynamic divider encoding,
 `pll_cascade_probe.v` measures the run-time retuning of the cascaded PLLs, and `sdram_probe.v`
-sweeps the SDRAM CAS latency, read latency and capture edge at 74.25 MHz.
+sweeps the SDRAM CAS latency, read latency and capture edge at 74.25 MHz. `iob_probe.v` tests the
+pad input registers (they read a constant 0: M61), and `lock_probe.v` counts PLL LOCK drops per
+second.
+
+**Debug tap.** Everything the FPGA sends to the C5 is mirrored on the BL616 USB-UART
+(`dbg_tx`, pin 69, 1 Mbaud). The firmware adds a `LINK_MSG_FPGA_DEBUG` frame once per second
+carrying the status word, the clock-generator restart counter and cause, and the output-rate
+state. The C5 ignores it. Watch it with:
+
+```sh
+python3 bringup/link_sniff.py /dev/ttyUSB1 60     # decoded frames with timestamps, for 60 s
+```
 
 To write the design to flash, use `openFPGALoader -b tangnano20k -f build/top.fs`. That is not needed
 for testing.
@@ -212,7 +223,7 @@ tables (8), the out_path line cache (4), the FIFO (1) and the phase LUT (1).
 | lclk (link STROBE) | 40 MHz | 97.9 MHz | ×2.4 |
 | fclk (TMDS) | 371.25 MHz | — | only drives the OSER10 FCLK pins (hard serialiser) |
 
-There are no hold violations. The link capture registers sit in the input pads (`--vopt ireg_in_iob`).
+There are no hold violations. (Gate build: the link capture registers sat in the input pads via `--vopt ireg_in_iob`; that feature was later found to read a constant 0 on this chip (M61). The final design captures in fabric flip-flops, with LUT delay buffers for hold.)
 An earlier build with the capture flop in the fabric had 0.12 ns hold violations at the phase-LUT
 BSRAM address pins.
 
@@ -250,7 +261,8 @@ IDSEL/FBDSEL ports and the relock behaviour on hardware are **UNVERIFIED**. Opti
    about every 16.7 s, which contradicts the plan's "no judder" for NTSC.
 3. Gowin EDA would not help: this is a silicon PLL limit, not a tool limit.
 
-**(b) Link sampling phase.** docs/FPGA_LINK.md §2.3 recommended locking a PLL to STROBE at ×4 and
+**(b) Link sampling phase.** *(Update: the pad-register capture described here does not work, M61;
+capture is in fabric flip-flops.)* docs/FPGA_LINK.md §2.3 recommended locking a PLL to STROBE at ×4 and
 scanning the eye. No PLL is left for that (see a). The gate build instead samples in the IOB on the
 rising STROBE edge, the same edge the C5 samples on, so the FPGA sees the C5's own byte stream
 apart from pad-to-pin skew. If the lab (L3.1/L3.3) shows a marginal eye, the fallback is an IODELAY

@@ -14,7 +14,9 @@ module clk_gen (
     output wire       fclk,        // 5 x pixel clock
     output wire       pclk,        // 74.25 / 74.176 MHz
     output reg        locked = 1'b0,
-    output reg  [1:0] mode_cur = 2'd0
+    output reg  [1:0] mode_cur = 2'd0,
+    output reg  [7:0] restarts = 8'd0,    // times the pixel domain was restarted after first lock
+    output reg  [1:0] last_cause = 2'd0   // 1 = PLL A lock lost, 2 = PLL B lock lost, 3 = mode change
 );
     reg  rst_a = 1'b1, rst_b = 1'b1;
     reg  sel5994 = 1'b0;
@@ -37,25 +39,36 @@ module clk_gen (
     reg [1:0] la_s = 0, lb_s = 0;
     always @(posedge clk27) begin la_s <= {la_s[0], a_lock}; lb_s <= {lb_s[0], b_lock}; end
 
+    // LOCK is debounced: PLL B's LOCK can chatter for a few hundred microseconds after a retune
+    // (MEASUREMENTS M63), and restarting on every glitch re-triggers the retune and blanks HDMI
+    // again. The output is released only after both LOCKs have been high for 2 ms, and a
+    // running output is restarted only after a LOCK has been low for 1 ms.
     localparam [1:0] S_RST = 0, S_LA = 1, S_LB = 2, S_RUN = 3;
     reg [1:0]  st = S_RST;
     reg [17:0] t = 0;                     // 27 MHz cycles; lock timeout 5 ms -> restart
+    reg [15:0] good = 0, bad = 0;         // debounce counters
     always @(posedge clk27) begin
         t <= t + 18'd1;
         case (st)
             S_RST: begin
-                rst_a <= 1'b1; rst_b <= 1'b1; locked <= 1'b0;
+                rst_a <= 1'b1; rst_b <= 1'b1; locked <= 1'b0; good <= 0; bad <= 0;
                 sel5994 <= (mode_cur == 2'd1);
                 if (t == 18'd270) begin rst_a <= 1'b0; t <= 0; st <= S_LA; end     // 10 us in reset
             end
             S_LA: if (la_s[1]) begin rst_b <= 1'b0; t <= 0; st <= S_LB; end
                   else if (t == 18'd135000) begin t <= 0; st <= S_RST; end
-            S_LB: if (lb_s[1]) begin t <= 0; st <= S_RUN; end
-                  else if (t == 18'd135000) begin t <= 0; st <= S_RST; end
+            S_LB: begin
+                good <= (la_s[1] && lb_s[1]) ? good + 16'd1 : 16'd0;
+                if (good == 16'd54000) begin t <= 0; bad <= 0; st <= S_RUN; end          // 2 ms stable
+                else if (t == 18'd216000) begin t <= 0; st <= S_RST; end                  // 8 ms: retry
+            end
             S_RUN: begin
                 locked <= 1'b1;
-                if (!la_s[1] || !lb_s[1] || mode_m != mode_cur) begin
+                bad <= (la_s[1] && lb_s[1]) ? 16'd0 : bad + 16'd1;
+                if (bad == 16'd27000 || mode_m != mode_cur) begin                       // 1 ms low
+                    last_cause <= (mode_m != mode_cur) ? 2'd3 : !la_s[1] ? 2'd1 : 2'd2;
                     mode_cur <= mode_m; locked <= 1'b0; t <= 0; st <= S_RST;
+                    if (restarts != 8'hFF) restarts <= restarts + 8'd1;
                 end
             end
         endcase

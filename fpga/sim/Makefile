@@ -22,9 +22,9 @@ define vl_run
 	./vobj/$(1)/V$(2) > $(D)/$(1).log 2>&1
 endef
 
-.PHONY: all quick fe chroma sdram uart fb fb-quick scaler scaler-quick soc full clean
-all: fe chroma sdram uart fb scaler soc full
-quick: fe chroma sdram uart fb-quick scaler-quick soc
+.PHONY: all quick fe chroma sdram uart clkgen fb fb-quick scaler scaler-quick soc full clean
+all: fe chroma sdram uart clkgen fb scaler soc full
+quick: fe chroma sdram uart clkgen fb-quick scaler-quick soc
 
 $(D):
 	mkdir -p $@ vobj
@@ -80,6 +80,12 @@ uart: | $(D)
 	$(IV) -o uart.vvp tb_uart.v ../rtl/soc/uart.v
 	vvp -n uart.vvp | tee $(D)/uart.log | grep tb_uart
 	grep -q PASS $(D)/uart.log
+
+# ---- clk_gen: PLL LOCK debouncing against a chattering-LOCK rPLL model ----
+clkgen: | $(D)
+	$(IV) -o clkgen.vvp tb_clkgen.v ../rtl/clocks/clk_gen.v
+	vvp -n clkgen.vvp | tee $(D)/clkgen.log | grep tb_clkgen
+	grep -q PASS $(D)/clkgen.log
 
 # ---- frame buffer: field buffering, no tearing, tap lines, rate mismatch both ways ----
 FB_CFG := n50b:-GWEAVE=0 n50w:-GWEAVE=1 p60b:-GIN_PAL=1+-GOUT50=0 p60w:-GIN_PAL=1+-GOUT50=0+-GWEAVE=1
