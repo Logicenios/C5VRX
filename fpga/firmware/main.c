@@ -218,6 +218,7 @@ static uint16_t wt_bad;                  /* bit j (0..8): line j faulty */
 static uint8_t wt_src[8];                /* which C5 lines (0..7) reached data bit j in "ones" */
 static int wt_strobe;                    /* 0 = ok, 1 = no edge, 2 = edges at wrong steps */
 static uint32_t wt_runs;                 /* completed tests since FPGA boot */
+static uint32_t wt_false;                /* sync-like states rejected at the zero step */
 static bool wt_requested;                /* a LINK_TEST was sent (auto, once) */
 static bool wt_show;                     /* a test just finished: open the link page */
 
@@ -252,8 +253,9 @@ static void wt_poll(uint32_t t)
         if (d == wt_prev) {
             wt_runlen += t - wt_prev_ms;
         } else {
-            /* end of a long, mostly-high vector: the sync; its end is the start of "zero" */
-            if (wt_runlen >= 20u && popcount8(wt_prev) >= 5) {
+            /* end of a mostly-high vector held for about the sync time (30 ms): the start
+             * of "zero". Longer steady states (e.g. while the C5 resets or boots) do not count. */
+            if (wt_runlen >= 25u && wt_runlen <= 45u && popcount8(wt_prev) >= 5) {
                 wt_state = WT_RUN; wt_t0 = t; wt_step = 0;
             }
             wt_runlen = 0;
@@ -267,7 +269,13 @@ static void wt_poll(uint32_t t)
                  : wt_step <= 9 ? WT_ONES_MID(wt_step - 1)
                  : wt_step <= 18 ? WT_ZEROS_MID(wt_step - 10) : WT_END_MID;
     if (dt < due) return;
-    if (wt_step == 0) wt_z = d;
+    if (wt_step == 0) {
+        wt_z = d;
+        if (popcount8(d) > 3) {                          /* "zero" must read low: a false start */
+            wt_state = WT_IDLE; wt_prev = d; wt_prev_ms = t; wt_runlen = 0; wt_false++;
+            return;
+        }
+    }
     else if (wt_step <= 9) wt_ones[wt_step - 1] = d;
     else if (wt_step <= 18) wt_zeros[wt_step - 10] = d;
     else wt_e = d;
@@ -282,6 +290,30 @@ static void wt_poll(uint32_t t)
 static void request_link_test(void)
 {
     send(LINK_MSG_LINK_TEST, NULL, 0);   /* the C5 ACKs, reboots and re-sends the pattern */
+}
+
+/* ---------------------------------------------------------------- raw link capture
+ * Every 20 s while the strobe runs: 2048 consecutive STROBE cycles, word = {falling-edge byte
+ * (earlier), rising-edge byte (later)}, sent as LINK_MSG_FPGA_CAPTURE frames of 28 words with
+ * a 16-bit word offset (fpga/bringup/link_sniff.py --capture saves them). */
+static uint32_t cap_last_ms;
+static void capture_and_send(void)
+{
+    uint32_t d0 = CAP_CTRL & 1u;
+    CAP_CTRL = 1u;
+    uint32_t t0 = now_ms();
+    while ((CAP_CTRL & 1u) == d0) if (now_ms() - t0 > 20u) return;   /* no strobe */
+    uint8_t buf[2 + 56];
+    for (unsigned off = 0; off < 2048u; off += 28u) {
+        buf[0] = (uint8_t)off; buf[1] = (uint8_t)(off >> 8);
+        unsigned n = 2048u - off < 28u ? 2048u - off : 28u;
+        for (unsigned i = 0; i < n; ++i) {
+            uint32_t w = CAP_WORD(off + i);
+            buf[2 + 2 * i] = (uint8_t)w; buf[3 + 2 * i] = (uint8_t)(w >> 8);
+        }
+        send(LINK_MSG_FPGA_CAPTURE, buf, 2 + 2 * n);
+        link_poll();
+    }
 }
 
 /* ---------------------------------------------------------------- menu model */
@@ -568,10 +600,20 @@ int main(void)
             send(LINK_MSG_GET_SETTINGS, NULL, 0);
             last_req = t;
         }
+        if ((ST_STATUS & S_STROBE) && wt_state != WT_RUN && t - cap_last_ms >= 20000u && t > 8000u) {
+            capture_and_send();
+            cap_last_ms = t;
+        }
         if (t - last_dbg >= 1000u) {                         /* diagnostics (fpga/bringup/link_sniff.py) */
-            uint32_t d[9] = { ST_STATUS, ST_DEBUG, t, ST_COUNTERS,
-                              ((uint32_t)wt_state << 28) | (wt_runs & 0xFFFu) << 16 | ((uint32_t)wt_strobe << 12) | wt_bad,
-                              LINK_FREQ, LINK_ERRP, LINK_ERRN, LINK_BITS };
+            uint32_t d[15] = { ST_STATUS, ST_DEBUG, t, ST_COUNTERS,
+                               ((uint32_t)wt_state << 28) | (wt_runs & 0xFFFu) << 16 | ((uint32_t)wt_strobe << 12) | wt_bad,
+                               LINK_FREQ, LINK_ERRP, LINK_ERRN, LINK_BITS, 0, 0, 0, 0, 0, 0 };
+            /* raw wiring-test samples: zero, ones[0..8], zeros[0..8], end, then a false-start count */
+            uint8_t *raw = (uint8_t *)&d[9];
+            raw[0] = wt_z;
+            for (int k = 0; k < 9; ++k) { raw[1 + k] = wt_ones[k]; raw[10 + k] = wt_zeros[k]; }
+            raw[19] = wt_e;
+            raw[20] = (uint8_t)wt_false;
             send(LINK_MSG_FPGA_DEBUG, d, sizeof d);
             last_dbg = t;
         }

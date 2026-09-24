@@ -39,6 +39,7 @@ enum {
     LINK_MSG_SAVE_SETTINGS     = 0x08, /* persist RF settings + FPGA blob in NVS -> ACK/NAK */
     LINK_MSG_FPGA_DEBUG        = 0x09, /* FPGA diagnostics, 1 Hz; the C5 ignores it (no reply) */
     LINK_MSG_LINK_TEST         = 0x0A, /* -> ACK, then the C5 reboots and re-sends the wiring test (link_test.h) */
+    LINK_MSG_FPGA_CAPTURE      = 0x0B, /* raw link samples for a host sniffer; the C5 ignores it (no reply) */
 };
 
 /* C5 -> FPGA messages */

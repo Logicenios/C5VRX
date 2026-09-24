@@ -41,6 +41,10 @@ module top (
     wire [31:0] set0, set1, set2, osd_ctrl, status, counters;
     wire [31:0] tip32, blank32, debug;
     wire [31:0] link_raw, link_freq, link_errp, link_errn, link_bits;
+    wire        cap_req, cap_done_l; wire [10:0] cap_addr; wire [15:0] cap_data;
+    reg  [1:0]  cap_done_s = 0;
+    always @(posedge clk27) cap_done_s <= {cap_done_s[0], cap_done_l};
+    wire        cap_done_k = cap_done_s[1];
     wire        osd_we; wire [9:0] osd_waddr; wire [15:0] osd_wdata;
     reg  [3:0]  cpu_rst_cnt = 4'hF;
     always @(posedge clk27) if (cpu_rst_cnt != 0) cpu_rst_cnt <= cpu_rst_cnt - 4'd1;
@@ -49,6 +53,7 @@ module top (
         .osd_we(osd_we), .osd_waddr(osd_waddr), .osd_wdata(osd_wdata),
         .status(status), .meas_tip(tip32), .meas_blank(blank32), .counters(counters), .debug(debug),
         .link_raw(link_raw), .link_freq(link_freq), .link_errp(link_errp), .link_errn(link_errn), .link_bits(link_bits),
+        .cap_req(cap_req), .cap_done(cap_done_k), .cap_addr(cap_addr), .cap_data(cap_data),
         .settings0(set0), .settings1(set1), .settings2(set2), .osd_ctrl(osd_ctrl));
 
     // output-rate selection: Force 60, or follow the (effective) standard once it has been
@@ -144,7 +149,11 @@ module top (
     wire [25:0] lm_samples, lm_errp, lm_errn; wire [7:0] lm_seen0, lm_seen1, lm_edges;
     link_mon u_lmon (.lclk(lclk), .link_d(link_d), .dp_in(iq_cap), .win_tog(win_tog),
                      .samples(lm_samples), .err_p(lm_errp), .err_n(lm_errn),
-                     .seen0(lm_seen0), .seen1(lm_seen1), .edges(lm_edges));
+                     .seen0(lm_seen0), .seen1(lm_seen1), .edges(lm_edges), .dn_out(lm_dn));
+    wire [7:0] lm_dn;
+    // raw capture for bring-up: {falling, rising} bytes of 2048 consecutive STROBE cycles
+    link_cap u_lcap (.lclk(lclk), .dp(iq_cap), .dn(lm_dn), .req_tog(cap_req), .done_tog(cap_done_l),
+                     .rclk(clk27), .raddr(cap_addr), .rdata(cap_data));
 
     reg [15:0] click_cnt = 0;
     always @(posedge lclk) if (click) click_cnt <= click_cnt + 16'd1;

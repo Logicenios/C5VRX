@@ -21,6 +21,8 @@
 #define LINK_ERRP   REG(0x30000030u)   /* rising-edge placement errors in the window */
 #define LINK_ERRN   REG(0x30000034u)   /* falling-edge placement errors in the window */
 #define LINK_BITS   REG(0x30000038u)   /* {seen0[15:8], seen1[7:0]} in the window */
+#define CAP_CTRL    REG(0x3000003Cu)   /* W: start raw capture; R bit 0: done toggle */
+#define CAP_WORD(i) REG(0x40000000u + 4u * (i))   /* {falling byte, rising byte}, 2048 words */
 
 /* ST_STATUS bits */
 #define S_BTN1      (1u << 0)

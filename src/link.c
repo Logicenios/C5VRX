@@ -144,6 +144,7 @@ static void handle(const link_frame_t *f)
         reply_ack(f, video_post_link_command(VIDEO_LINK_CMD_SAVE, 0) ? LINK_ERR_NONE : LINK_ERR_BUSY);
         break;
     case LINK_MSG_FPGA_DEBUG:          /* diagnostics for a host sniffing the link; no reply */
+    case LINK_MSG_FPGA_CAPTURE:
         break;
     case LINK_MSG_LINK_TEST:           /* the wiring test runs at boot, before RF owns the pads */
         reply_ack(f, LINK_ERR_NONE);
@@ -170,6 +171,22 @@ static void link_task(void *arg)
         link_frame_t f;
         for (int i = 0; i < n; ++i)
             if (link_parser_push(&parser, rx[i], &f)) handle(&f);
+        /* receive diagnostics (FPGA -> C5 direction), every 2 s while anything changes */
+        static uint32_t rx_bytes, logged_bytes;
+        static TickType_t last_log;
+        if (n > 0) rx_bytes += (uint32_t)n;
+        if (xTaskGetTickCount() - last_log >= pdMS_TO_TICKS(2000)) {
+            last_log = xTaskGetTickCount();
+            if (rx_bytes != logged_bytes) {
+                ESP_LOGI(TAG, "link rx: %lu bytes, %lu frames, %lu CRC errors, %lu version errors",
+                         (unsigned long)rx_bytes, (unsigned long)parser.frames,
+                         (unsigned long)parser.crc_errors, (unsigned long)parser.version_errors);
+                logged_bytes = rx_bytes;
+            } else if (rx_bytes == 0) {
+                ESP_LOGW(TAG, "link rx: nothing received from the FPGA yet (GPIO%d)", BOARD_CTRL_UART_RX_GPIO);
+                logged_bytes = 0;
+            }
+        }
 
         link_event_t ev;
         while (xQueueReceive(s_events, &ev, 0) == pdTRUE)

@@ -11,6 +11,7 @@
 //   0x3000_0010  settings0 (RW)  0x3000_0014 settings1 (RW)  0x3000_0018 settings2 (RW)
 //   0x3000_001C  osd       (RW)  0x3000_0020 millisecond counter (R)  0x3000_0024 debug (R)
 //   0x3000_0028..38  link monitor: raw pins, strobe freq, edge errors p/n, bit activity (R)
+//   0x3000_003C  capture: W any = start, R bit 0 = done toggle   0x4000_0000 capture buffer (R)
 `default_nettype none
 module soc #(
     parameter integer MEM_WORDS = 4096,
@@ -33,6 +34,10 @@ module soc #(
     input  wire [31:0] link_errp,      // rising-edge placement errors in the window
     input  wire [31:0] link_errn,      // falling-edge placement errors in the window
     input  wire [31:0] link_bits,      // {seen0[7:0], seen1[7:0]} in the window
+    output reg         cap_req = 1'b0, // toggle: start a raw link capture (link_cap.v)
+    input  wire        cap_done,       // toggles when the capture buffer is full (synchronised)
+    output wire [10:0] cap_addr,
+    input  wire [15:0] cap_data,
     output reg  [31:0] settings0,
     output reg  [31:0] settings1,
     output reg  [31:0] settings2,
@@ -79,6 +84,11 @@ module soc #(
     uart #(.DIV(27)) u_uart (.clk(clk), .rx(uart_rx), .tx(uart_tx), .tx_we(tx_we), .tx_data(mem_wdata[7:0]),
         .tx_busy(tx_busy), .rx_pop(rx_pop), .rx_data(rx_data), .rx_avail(rx_avail), .rx_overflow(rx_ovf));
 
+    // ---- raw link capture read-back: 0x4000_0000 + 4 * index (registered read, 1 wait) ----
+    assign cap_addr = mem_addr[12:2];
+    wire [15:0] cap_q = cap_data;
+    wire        cap_sel = mem_addr[31:28] == 4'h4;
+
     // ---- millisecond counter ----
     reg [14:0] pre = 0; reg [31:0] ms = 0;
     always @(posedge clk) if (pre == 15'd26999) begin pre <= 0; ms <= ms + 1; end else pre <= pre + 15'd1;
@@ -92,8 +102,8 @@ module soc #(
             settings0 <= 32'd0; settings1 <= {8'd0, 8'd146, 16'd0}; settings2 <= {16'd0, 8'd128, 8'd0};
             osd_ctrl <= {1'b0, 5'd0, 10'd104, 5'd0, 11'd320};
         end else if (mem_valid && !mem_ready) begin
-            if (ram_sel) begin
-                if (ram_wait) begin mem_ready <= 1'b1; mem_rdata <= ram_q; ram_wait <= 1'b0; end
+            if (ram_sel || cap_sel) begin                 // registered-read memories: one wait cycle
+                if (ram_wait) begin mem_ready <= 1'b1; mem_rdata <= ram_sel ? ram_q : {16'd0, cap_q}; ram_wait <= 1'b0; end
                 else ram_wait <= 1'b1;
             end else begin
                 mem_ready <= 1'b1;
@@ -125,6 +135,7 @@ module soc #(
                               4'd12: mem_rdata <= link_errp;
                               4'd13: mem_rdata <= link_errn;
                               4'd14: mem_rdata <= link_bits;
+                              4'd15: begin mem_rdata <= {31'd0, cap_done}; if (mem_wstrb != 0) cap_req <= ~cap_req; end
                               default: ;
                           endcase
                     default: ;

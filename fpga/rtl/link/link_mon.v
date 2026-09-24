@@ -32,13 +32,15 @@ module link_mon #(
     output reg  [25:0] err_n = 0,
     output reg  [7:0]  seen0 = 0,
     output reg  [7:0]  seen1 = 0,
-    output reg  [7:0]  edges = 0
+    output reg  [7:0]  edges = 0,
+    output wire [7:0]  dn_out                // falling-edge capture, retimed to the rising edge (m1)
 );
     reg [7:0] dn_raw = 0;
     always @(negedge lclk) dn_raw <= link_d;
 
     // after rising edge k: p1 = dp[k-1], m1 = dn[k-1], p2 = dp[k-2], m2 = dn[k-2]
     reg [7:0] p1 = 0, p2 = 0, m1 = 0, m2 = 0;
+    assign dn_out = m1;
     function signed [6:0] dev(input [3:0] x, input [3:0] a, input [3:0] b);   // |2x - a - b|
         reg signed [6:0] d;
         begin
