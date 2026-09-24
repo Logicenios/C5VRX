@@ -37,7 +37,7 @@ all: top
 
 top: $(BUILD)/top.fs
 
-$(BUILD)/top-synth.json: $(TOP_SRC) $(TOP_HEX) Makefile | $(BUILD)
+$(BUILD)/top-synth.json: $(TOP_SRC) $(TOP_HEX) | $(BUILD)
 	yosys -q -l $(BUILD)/top-yosys.log -p "read_verilog -sv -I rtl/out $(TOP_SRC); synth_gowin -top top -family gw2a; $(POST_SYNTH); write_json $@; tee -o $(BUILD)/top-stat.txt stat"
 
 # timing: tangnano20k.sdc states the pclk / sclk / lclk periods (nextpnr does not derive
@@ -53,8 +53,10 @@ $(BUILD)/top-pnr.json: $(BUILD)/top-synth.json $(CST) $(SDC)
 $(BUILD)/top.fs: $(BUILD)/top-pnr.json
 	gowin_pack -d $(FAMILY) -o $@ $<
 
-prog-top: $(BUILD)/top.fs
-	openFPGALoader -b tangnano20k $<
+# prog-* only load an existing bitstream (seconds); they never start a rebuild
+prog-top:
+	@test -f $(BUILD)/top.fs || { echo "no $(BUILD)/top.fs: run 'make top' first"; exit 1; }
+	openFPGALoader -b tangnano20k $(BUILD)/top.fs
 
 pattern: $(BUILD)/pattern.fs
 
@@ -68,8 +70,9 @@ $(BUILD)/pattern-pnr.json: $(BUILD)/pattern-synth.json $(CST)
 $(BUILD)/pattern.fs: $(BUILD)/pattern-pnr.json
 	gowin_pack -d $(FAMILY) -o $@ $<
 
-prog-pattern: $(BUILD)/pattern.fs
-	openFPGALoader -b tangnano20k $<
+prog-pattern:
+	@test -f $(BUILD)/pattern.fs || { echo "no $(BUILD)/pattern.fs: run 'make pattern' first"; exit 1; }
+	openFPGALoader -b tangnano20k $(BUILD)/pattern.fs
 
 firmware/build/fw.hex: firmware/*.c firmware/*.h firmware/*.S firmware/link.ld ../src/link_proto.h
 	$(MAKE) -C firmware
