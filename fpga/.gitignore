@@ -2,3 +2,5 @@ build/
 sim/data/
 sim/*.vvp
 model/__pycache__/
+sim/vobj/
+firmware/build/

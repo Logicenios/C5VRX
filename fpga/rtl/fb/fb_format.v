@@ -18,7 +18,12 @@ module fb_format (
     input  wire signed [15:0] v_in,
     input  wire [10:0]        x_in,
     input  wire               in_valid,
-    // line tags from video_timing (latched at x_in == 0)
+    // line tags from video_timing, recorded with its x = 0 sample (tag_strobe = cv_valid at
+    // cv_x == 0). video_timing's line_no register advances before the resampler emits the
+    // next line's x = 0, so sampling line_no directly at chroma_dec's x = 0 (latency < 1 line)
+    // would take the NEXT line's tags; the recorded tags belong to the line chroma_dec is
+    // emitting (verified bit-exact against the host model, sim/tb_full.v).
+    input  wire               tag_strobe,
     input  wire [9:0]         line_no,
     input  wire               field_odd,
     input  wire               is_pal,
@@ -36,6 +41,9 @@ module fb_format (
     wire [9:0]  first_line = is_pal ? 10'd22 : 10'd17;          // field line of the first active line
     wire [9:0]  n_lines    = is_pal ? 10'd288 : 10'd240;
 
+    reg [9:0]  ln_cur = 0;
+    reg        od_cur = 0;
+    always @(posedge clk) if (tag_strobe) begin ln_cur <= line_no; od_cur <= field_odd; end
     reg [9:0]  line_tag;
     reg        odd_tag, pal_tag, sof;
     reg [9:0]  last_line_no;
@@ -74,12 +82,12 @@ module fb_format (
             y_p <= y_in; u_p <= u_in; v_p <= v_in;
             if (x_in == 0) begin
                 // new line: decide whether it is an active line, emit the descriptor
-                sof <= (line_no < last_line_no);
-                last_line_no <= line_no;
-                if (locked && line_no >= first_line && line_no < first_line + n_lines) begin
+                sof <= (ln_cur < last_line_no);
+                last_line_no <= ln_cur;
+                if (locked && ln_cur >= first_line && ln_cur < first_line + n_lines) begin
                     line_active <= 1'b1;
-                    line_tag <= line_no - first_line;
-                    fifo_data <= {1'b1, (line_no == first_line), field_odd, is_pal, 23'd0, line_no - first_line};
+                    line_tag <= ln_cur - first_line;
+                    fifo_data <= {1'b1, (ln_cur == first_line), od_cur, is_pal, 22'd0, ln_cur - first_line};   // 36 bits
                     fifo_wr <= 1'b1;
                 end else line_active <= 1'b0;
                 spos <= {5'd0, x0, 16'd0};

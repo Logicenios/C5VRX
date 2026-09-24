@@ -5,8 +5,10 @@ C5-Zero's 4-bit I/Q, decodes NTSC/PAL colour, stores fields in the embedded SDRA
 free-running 720p HDMI. The C5 side is described in [docs/FPGA_LINK.md](../docs/FPGA_LINK.md). The
 signal theory is in [docs/THEORY.md](../docs/THEORY.md).
 
-Status: **Phase 4 gate.** The decode chain, frame buffer and 720p output are complete and simulated.
-The polyphase scaler, OSD/menu and UART control link come after the gate (see §5).
+Status: **Phase 4 feature-complete, awaiting lab tests.** Complete and simulated: decode chain,
+5-buffer field store, bob/weave deinterlacing, 4-tap polyphase scaler, OSD menu, control CPU and
+C5 UART link. The clocking and SDRAM timing are measured on the board (§5.5). The C5 link has not
+been wired yet.
 
 ## 1. Toolchain and build
 
@@ -20,7 +22,24 @@ make prog-top      # load into SRAM (volatile; power-cycle returns to the flashe
 make pattern       # 720p colour-bar bring-up bitstream (S1: 50/60 Hz, S2: HDMI/DVI)
 make prog-pattern
 make sim           # regressions (sim/Makefile): generates vectors, runs RTL, compares with the models
+make -C firmware   # control CPU firmware -> firmware/build/fw.hex (make top does this too)
 ```
+
+The firmware is built with the RISC-V GCC that PlatformIO installs for the ESP32-C5
+(`~/.platformio/packages/toolchain-riscv32-esp`, rv32i/ilp32 multilib; override with
+`make -C firmware CROSS=...`).
+
+Vendored third-party sources (`third_party/`, pinned commits):
+
+| component | licence | source |
+|---|---|---|
+| PicoRV32 RV32I core | ISC | github.com/YosysHQ/picorv32 @ ef203c2 |
+| Spleen 8×16 font (OSD) | BSD-2-Clause | github.com/fcambus/spleen @ 57f9219 |
+
+Bring-up probes (`bringup/`, each loads into SRAM and reports over the BL616 USB-UART at 115200 baud,
+`/dev/ttyUSB1` on the host): `pll_probe.v` measures the rPLL dynamic divider encoding,
+`pll_cascade_probe.v` measures the run-time retuning of the cascaded PLLs, and `sdram_probe.v`
+sweeps the SDRAM CAS latency, read latency and capture edge at 74.25 MHz.
 
 To write the design to flash, use `openFPGALoader -b tangnano20k -f build/top.fs`. That is not needed
 for testing.
@@ -32,6 +51,10 @@ Python host models (`model/`, numpy):
 | `iqsynth.py` | synthetic composite (bars) → pre-emphasis → FM → 4-bit I/Q bytes, with noise and carrier offset |
 | `ref.py` | FM front end reference (bit-exact); writes `rtl/dsp/phase_lut.hex` |
 | `chroma_ref.py` | streaming chroma decoder reference (bit-exact); writes `sin_lut.hex` / `cos_lut.hex` |
+| `scaler_coef.py` | 4-tap Catmull-Rom polyphase table (32 phases, Q7); writes `rtl/out/cr_coef.vh` |
+| `scaler_ref.py` | deinterlace + scaler + RGB reference of `out_path.v` (bit-exact), test fields |
+| `chain_ref.py` | full-chain reference after video_timing: chroma → `fb_format` (bit-exact model inside) → scaler |
+| `font_rom.py` | OSD font ROM from the Spleen BDF, plus bar-graph and cursor glyphs |
 
 ## 2. Wiring (C5-Zero → Tang Nano 20K)
 
@@ -61,47 +84,103 @@ FPC as LCD_CLK, so leave the LCD connector empty. The data pins avoid the LEDs (
 HDMI (33–40), EDID (52/53) and the SD-card pins. Power the C5-Zero from the Tang Nano's 5 V pin so
 both boards share one ground.
 
-On-board: S1 = pin 88 and S2 = pin 87 (menu, post-gate). LEDs 0–5 (active low) show:
-LED0 = both PLLs locked, LED1 = SDRAM ready, LED2 = video_timing locked, LED3 = PAL detected,
-LED4 = a complete field is in the frame buffer, LED5 = STROBE heartbeat (~2.4 Hz).
+On-board: S1 = pin 88 and S2 = pin 87 (menu, §3.1). LEDs 0–5 (active low) show:
+LED0 = HDMI PLLs locked, LED1 = SDRAM ready, LED2 = video_timing locked, LED3 = PAL detected,
+LED4 = a complete field is in the frame buffer, LED5 = the C5 STROBE is running.
 
 ## 3. Architecture
 
 ```
-             lclk = STROBE 40 MHz (from the C5)                    sclk 54 MHz          pclk 74.25 MHz (fclk/5)
- link_d ─► IOB reg ─► fm_frontend ─► video_timing ─► chroma_dec ─► fb_format ─► async_fifo ─► fb_ctrl ◄─► sdram_ctrl ◄─► SDRAM 32-bit
-          (40 MS/s)   k=1 disc.      sync/levels     burst NCO,    720 px       36 bit x 512    triple        8-word bursts
-                      click repair   H-PLL, 1280-pt  comb/notch,   4:2:2 8 bit                  buffer        auto-precharge
-                      halfband→20    line-locked     PAL-D, killer              line cache (4 slots, dual clock) ─► out_path ─► hdmi_tx ─► OSER10 x4
-                      de-emphasis    resampler                                                              bob, 4:3/16:9, YCbCr→RGB   (fclk 371.25)
+ clk27 (crystal) ─ PicoRV32 + firmware: menu, buttons, OSD text, C5 UART link (1 Mbaud) ─┐ settings / status (cdc_bus)
+                 ─ output-rate choice ─► clk_gen: 2 cascaded rPLLs, retuned at run time ─► fclk 371.25 / 370.879 MHz, pclk = fclk/5
+ lclk = STROBE 40 MHz (from the C5)                                      pclk 74.25 / 74.176 MHz
+ link_d ─► IOB ─► fm_frontend ─► video_timing ─► chroma_dec ─► fb_format ─► async ─► fb_ctrl ◄─► sdram_ctrl ◄─► SDRAM (32-bit)
+                  k=1 disc.      sync/levels     burst NCO,     720 px 4:2:2 FIFO     5 field      CL 2, 8-word bursts
+                  click repair   H-PLL, 1280-pt  comb/notch,                          buffers
+                  halfband→20    line-locked     PAL-D, killer                           │ line fetches (5-slot cache)
+                  de-emphasis    resampler                                               ▼
+                                                  out_path: bob/weave → 4-tap vertical → 4-tap horizontal → RGB ─► osd ─► hdmi_tx ─► OSER10 x4
 ```
 
 - **Sample rate (plan requirement "≥ 4× fsc").** The discriminator runs at 40 MS/s, and composite is
   resampled to a line-locked 1280 samples per line (20.1 / 20.0 MS/s = 5.6× NTSC fsc and 4.5× PAL fsc).
   The derivation is in THEORY §5–§7.
-- **Frame buffer.** Three field buffers of 288 lines × 512-word pitch hold 720 px of 4:2:2 each
-  (360 words per line, `{Cr, Y1, Cb, Y0}`). A field is published when the next field starts. The output
-  side latches the newest complete field at output line 740 (vertical blanking), so a field is never
-  read while being written.
-- **Output.** 720p60 (VIC 4) or 720p50 (VIC 19). The rate follows the stored standard after 16
-  agreeing frames. 4:3 content goes in a 960×720 window with 160 px black bars. Bob deinterlacing uses
-  the half-line offset per field: source line k = ⌊((2y+1)L + 360 − 720p) / 1440⌋, with p = 0 for the
-  odd/top field. The AVI InfoFrame is sent. Signal loss (no new field for 8 frames) dims the last
-  frame, and the output never stops.
+- **Frame buffer.** Five field buffers of 288 lines × 512-word pitch hold 720 px of 4:2:2 each
+  (360 words per line, `{Cr, Y1, Cb, Y0}`). A field is published when the next field starts. At output
+  line 740 (vertical blanking) the reader latches the newest complete field and the one before it,
+  and the writer never uses either. Five buffers are the minimum: weave holds two fields, and at
+  59.94 → 50 Hz the writer can publish twice between output frames.
+- **Deinterlace.** Bob is the default and uses the per-field half-line offset. Source position:
+  v = ((2y+1)L − 360 − 720p)/1440 field lines, with p = 0 for the odd/top field. Weave interleaves
+  the newest two fields (v = ((2y+1)L − 360)/720 frame lines). It is used only when both fields are
+  complete and of the same standard; otherwise the output falls back to bob.
+- **Scaler.** 4-tap Catmull-Rom polyphase with 32 phases, vertically and horizontally, with Y and
+  Cb/Cr filtered separately (chroma co-sited, 360 samples per line). Vertical: a 5-slot line cache
+  always holds the 5 consecutive source lines around the next output line. Each output line is
+  filtered one pixel per clock into 4-way interleaved line banks, one line ahead. Horizontal: one
+  output pixel per clock reads 4 adjacent samples from the 4 banks. 4:3 content goes in a 960×720
+  window with 160 px black bars, or is stretched to 1280×720 for 16:9.
+- **Output rate.** 720p50 (VIC 19) for PAL, 720p59.94 (VIC 4, pixel clock 74.25×1000/1001) for NTSC,
+  or Force 60. The rate follows the effective standard once it has held for 0.5 s with video
+  locked, or immediately when the standard is forced in the menu. A switch retunes the PLL cascade
+  (~0.3 ms) and restarts the pixel domain, SDRAM included. The monitor re-syncs once. The CPU runs
+  on the crystal and keeps its state.
+- **Signal loss.** When no new field arrives for 8 output frames, the output shows either the last
+  frame dimmed or a dark-blue "no signal" screen (menu choice), plus an OSD banner. HDMI timing
+  never stops.
+- **OSD.** 40×16 character cells (Spleen 8×16 font, scaled ×2), overlaid after scaling. The cells
+  are drawn by the CPU through a back buffer, so updates are flicker-free.
+
+### 3.1 Buttons and menu
+
+S1 and S2 on the Tang Nano 20K. The C5-Zero BOOT button arrives over the link and acts as S1.
+A long press is ≥ 0.7 s and fires while the button is still held.
+
+| state | S1 short | S1 long | S2 short | S2 long |
+|---|---|---|---|---|
+| menu hidden | open menu | open menu | next channel (banner) | previous channel |
+| menu | next item | select / edit | previous item | close menu |
+| editing a value | next value | done | previous value | done |
+| scan results | tune the best channel | back | — | back |
+
+Menu items: Channel (band/channel and MHz), Scan (the C5 sweeps all 48 channels; per-channel
+quality bars), Standard (Auto/NTSC/PAL, also sent to the C5 as a hint), Output rate (Auto 50/59.94,
+Force 60), Aspect (4:3, 16:9 stretch), Deinterlace (Bob/Weave), Brightness, Contrast, Saturation,
+Hue (NTSC), Y/C filter (Comb/Notch), Signal loss (Last frame/No signal), Save (the settings go to
+the C5 as an opaque blob, `LINK_MSG_SET_FPGA_SETTINGS`, and are saved to NVS with
+`LINK_MSG_SAVE_SETTINGS`), Exit. The menu hides after 15 s without input. The title row shows the
+channel, frequency and an RSSI bar. The bar is the C5's 0..100 Q4 quality score, not calibrated dBm.
+After boot the firmware asks the C5 for its settings (`GET_SETTINGS`, retried every 0.5 s) and
+applies the saved blob.
 
 ## 4. Verification (`make sim`)
+
+`make -C sim -j4 quick` runs every block once in about 3 minutes; `make -C sim -j4` runs all
+configurations in about 1.5 minutes once the vectors exist. The long testbenches run under
+Verilator (`--binary --timing`), 30–70× faster than Icarus: the control-CPU test takes 60 s
+instead of about 90 min. `make lint` (Verilator, seconds) catches wiring errors before a
+place-and-route.
 
 | test | what | result |
 |---|---|---|
 | `fe` | fm_frontend vs `ref.py`: strong NTSC bars, and weak PAL (radius 110, noise 45: 9,571 clicks) | 41,997/41,997 bit-exact (both) |
-| `chroma` | sync/levels/resampler on one field, then chroma_dec vs `chroma_ref.py`: NTSC comb, NTSC notch, PAL (PAL-D) | 255,998/255,998 bit-exact (each); hue within 0.3–1° on bars |
-| `sdram` | sdram_ctrl vs a behavioural SDRAM with protocol checks (tRCD/tRP/tRC/CL, tAC 5.4 ns, tOH 2.5 ns) | 512 words, 0 mismatches, 0 protocol errors |
-| `fb` | FIFO → fb_ctrl → SDRAM model → line cache → out_path at real rates: NTSC 59.94 in / 720p50 out, and PAL 50 in / 720p60 out. Checks word/line/slot tags, no tearing, never the field being written, fields never go backwards, bob mapping on all 720 lines | both PASS: 1 drop / 1 repeat in 7 frames, as expected; 0 errors |
+| `chroma` | sync/levels/resampler on one field, then chroma_dec vs `chroma_ref.py`: NTSC comb, NTSC notch, PAL (PAL-D) | 255,998/255,998 bit-exact (each) |
+| `sdram` | sdram_ctrl vs a protocol-checking SDRAM model at 74.25 MHz, CL 2 | 0 mismatches, 0 protocol errors |
+| `uart` | UART loopback, 300 back-to-back bytes at 1 Mbaud | 300/300 |
+| `fb` | FIFO → fb_ctrl → SDRAM → line cache at real rates: NTSC 59.94 → 720p50 and PAL 50 → 720p60, bob and weave. Checks word/line tags, no tearing, never the field being written, fields never go backwards, weave pairs consecutive fields, the 4 vertical tap lines of every output line, no late fetch | 4/4 PASS (1 drop / 1 repeat in 7 frames, as expected) |
+| `scaler` | fields → fb_ctrl → SDRAM → out_path, whole 1280×720 frame vs `scaler_ref.py`: PAL/NTSC, bob/weave, 4:3/16:9, odd and even fields | 5/5 bit-exact (921,600/921,600 pixels each) |
+| `soc` | PicoRV32 + firmware vs a scripted C5 (SETTINGS, 10 Hz STATUS, scan results) and scripted S1 presses: GET_SETTINGS at boot, menu, long-press scan, tune best channel, OSD text, frame CRCs | 7/7 checks |
+| `full` | **RF → pixels:** 75 % bars → pre-emphasis → FM → 4-bit I/Q (`iqsynth.py`) → whole receive chain → 720p frame, vs the host models chained after video_timing (`chain_ref.py`), NTSC and PAL | bit-exact (921,600/921,600 each); bars within 1–15 codes of nominal RGB (saturated colours a few % high) |
 
-Still to come (post-gate): the full-chain PNG frame dumps with SMPTE/EBU bars, compared against the
-Python reference.
+PNGs of the scaler and full-chain frames (`*_rtl.png` / `*_ref.png`) land in `sim/data/`.
 
-## 5. Phase 4 gate report
+Bugs found by these tests and fixed: the `fb_format` descriptor was 37 bits wide, which dropped the
+descriptor flag and discarded almost every line. The `fb_format` line tags were one line off.
+`fb_ctrl` published the partial field seen right after an SDRAM (re)start. The UART
+transmitter's stop bit was one clock long for back-to-back bytes. The firmware waited 0.5 s
+before its first GET_SETTINGS. Before the gate: a one-line bob offset.
+
+## 5. Phase 4 gate report (history)
 
 The build is `make top` at the gate commit, with the pre-scaler design and nearest-neighbour vertical
 and horizontal scaling. Figures are from nextpnr-himbaechel's post-route report.
@@ -187,3 +266,37 @@ UART and menu: ~50 % LUT and ~20 of 46 BSRAM.
 
 Lab items still open for this phase (MEASUREMENTS.md P-list): monitor lock on 720p50/60 from
 `make prog-pattern`, SDRAM on real silicon, link eye (L3.x), and latency RF → TMDS.
+
+### 5.5 Decisions and results after the gate
+
+Decisions (user, 2026-09-24): (a) option 1, cascaded PLLs for exact 59.94 Hz, with the SDRAM on
+the pixel clock; (b) IOB capture on the rising STROBE edge; (c) 4-tap filtering in both
+directions.
+
+Hardware measurements on this board (docs/MEASUREMENTS.md):
+
+- M57: the bring-up pattern is displayed at 720p60, 720p50 and in DVI mode.
+- M58: rPLL dynamic dividers: IDIV = 64 − IDSEL, FBDIV = 64 − FBDSEL (full sweep, 1,557 locked points).
+- M59: cascade retuning 371.2499 ↔ 370.8790 MHz, within 0.3 ppm of target; relock about 0.3 ms.
+- M60: SDRAM at 74.25 MHz: CL 2, first word 4 clocks after READ (the model predicts 3); a 60 s
+  soak of 400.8 M words had 0 errors.
+
+Final build (`make top`: the same flow, plus `--threads --router router2`):
+
+| resource | used | available | % |
+|---|---:|---:|---:|
+| LUT4 | 12,522 | 20,736 | 60 % |
+| ALU | 5,422 | 15,552 | 34 % |
+| DFF | 5,845 | 15,552 | 37 % |
+| BSRAM | 34 | 46 | 73 % |
+| MULT18X18 | 30 | 48 | 62 % |
+| MULT9X9 | 23 | 96 | 23 % |
+| rPLL | 2 | 2 | 100 % |
+
+| clock | target | post-route Fmax |
+|---|---:|---:|
+| pclk | 74.25 MHz | 88.1 MHz (other runs 87–90) |
+| lclk | 40 MHz | 91.4 MHz (other runs 91–101) |
+| clk27 (CPU) | 27 MHz | 130.8 MHz (other runs 119–134) |
+
+(Fmax varies by a few MHz between place-and-route runs; every run so far has closed.)

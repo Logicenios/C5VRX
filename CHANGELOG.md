@@ -15,6 +15,17 @@ Upstream history before the refactor is in `git log` (baseline `upstream/main` =
   scaling for now. `.cst` for HDMI, SDRAM, buttons, LEDs and the C5 link.
 - `fpga/sim`: regenerating regressions (`make sim`), including the frame buffer under 59.94→50
   and 50→60 rate mismatch.
+- Phase 4 after the gate:
+  - exact 720p59.94/50/60 from run-time retuned cascaded PLLs (measured on the board);
+  - SDRAM on the pixel clock;
+  - 5-buffer field store with bob/weave;
+  - 4-tap polyphase scaler, 4:3 pillarbox / 16:9;
+  - OSD menu on S1/S2;
+  - PicoRV32 control CPU running the C5 UART link (channel, scan, standard, picture settings, save to NVS).
+- `fpga/bringup/` hardware probes (PLL encoding, cascade retuning, SDRAM timing) that report over the
+  BL616 USB-UART.
+- Verilator-based `make -C fpga/sim quick` / `all` regressions: bit-exact RF → pixel tests for NTSC and
+  PAL, the scaler, the frame buffer and the control CPU.
 - Phase 3: C5 → FPGA link. `docs/FPGA_LINK.md` explains the decision. The FPGA reads the
   8 MODEM_DIAG pads directly; PARLIO RX's 40 MHz sample clock is output on GPIO10 as the
   strobe. A 1 Mbaud UART control link on GPIO11/12 uses a versioned, CRC-16-framed

@@ -1,13 +1,14 @@
 // Behavioural SDR SDRAM model for the GW2AR-18 in-package part (64 Mbit, x32,
-// 4 banks x 2048 rows x 256 columns). Supports MRS (checks BL 8 / CL 2), ACT,
+// 4 banks x 2048 rows x 256 columns). Supports MRS (checks BL 8 / CL), ACT,
 // READ/WRITE with auto-precharge (burst 8, sequential), PRE (all), AUTO REFRESH.
-// Output timing: data for CL = 2 appears tAC after the (k+1)-th clock edge and is
+// Output timing: data for CAS latency CL appears tAC after the (k+CL-1)-th clock edge and is
 // held tOH after the next edge (typical -6/-7 speed grade: tAC 5.4 ns, tOH 2.5 ns).
 // Protocol violations are counted and reported.
 `timescale 1ns/1ps
 module sdram_model #(
     parameter real T_AC = 5.4,
-    parameter real T_OH = 2.5
+    parameter real T_OH = 2.5,
+    parameter integer CL = 2
 ) (
     input  wire        clk,
     input  wire        cke,
@@ -63,7 +64,7 @@ module sdram_model #(
     always @(posedge clk) if (cke) begin
         case (cmd)
             4'b0000: begin                                   // MRS
-                mode_ok = (addr[2:0] == 3'b011) && (addr[3] == 0) && (addr[6:4] == 3'b010);
+                mode_ok = (addr[2:0] == 3'b011) && (addr[3] == 0) && (addr[6:4] == CL);
                 if (!mode_ok) begin errors = errors + 1; $display("SDRAM: bad mode %h", addr); end
             end
             4'b0011: begin                                   // ACT
@@ -79,7 +80,7 @@ module sdram_model #(
             4'b0101: begin                                   // READ
                 if (!row_open[ba] || !mode_ok) begin errors = errors + 1; $display("SDRAM: READ bank %0d not open", ba); end
                 rd_base = {ba, open_row[ba], addr[7:0]};
-                rd_delay = 1;                                // data after the next edge (CL 2)
+                rd_delay = CL - 1;                           // data CL edges after READ
                 row_open[ba] = 0;                            // auto-precharge (after the burst)
                 reads = reads + 1;
             end

@@ -1,9 +1,13 @@
 # FPGA regression: RTL against the Python host models (bit-exact) and self-checking
 # testbenches. Test vectors are generated into data/ (not committed).
 #
-#   make            all regressions
-#   make fe chroma sdram fb
+#   make quick      every block once, ~3 min on 8 cores (use this while iterating)
+#   make            all configurations incl. the RF -> pixel full chain, ~6 min
+#   make fe chroma sdram uart fb scaler soc full
 #
+# Long testbenches run under Verilator (--binary --timing): 30-70x faster than Icarus
+# (e.g. the control-CPU test: 60 s instead of ~90 min). Icarus stays for the short
+# bit-exact DSP tests.
 OSS ?= $(HOME)/.local/opt/oss-cad-suite
 export PATH := $(OSS)/bin:$(PATH)
 IV  := iverilog -g2012 -DSIM
@@ -11,12 +15,19 @@ PY  := python3
 M   := ../model
 D   := data
 FB_SRC := sdram_model.v ../rtl/fb/fb_ctrl.v ../rtl/mem/async_fifo.v ../rtl/mem/sdram_ctrl.v ../rtl/out/out_path.v
+VL     := verilator --binary --timing -j $(shell nproc) -O3 -Wno-fatal -Wno-lint -Wno-style -DSIM -I../rtl/out
+# vl_run <name> <top> <verilator args> <sources>: build into vobj/<name> and run, log to data/<name>.log
+define vl_run
+	$(VL) --top-module $(2) $(3) --Mdir vobj/$(1) $(4) > vobj/$(1).build.log 2>&1 || (tail -20 vobj/$(1).build.log; false)
+	./vobj/$(1)/V$(2) > $(D)/$(1).log 2>&1
+endef
 
-.PHONY: all fe chroma sdram fb clean
-all: fe chroma sdram fb
+.PHONY: all quick fe chroma sdram uart fb fb-quick scaler scaler-quick soc full clean
+all: fe chroma sdram uart fb scaler soc full
+quick: fe chroma sdram uart fb-quick scaler-quick soc
 
 $(D):
-	mkdir -p $@
+	mkdir -p $@ vobj
 
 # ---- synthetic FM I/Q (model/iqsynth.py) ----
 $(D)/ntsc_bars.hex: | $(D)
@@ -64,13 +75,60 @@ sdram:
 	vvp -n sdram.vvp | tee $(D)/sdram.log | tail -n 1
 	grep -q ' 0 mismatches, model errors 0' $(D)/sdram.log
 
-# ---- frame buffer: triple buffering, bob mapping, rate mismatch in both directions ----
+# ---- UART loopback (1 Mbaud from 27 MHz, back-to-back bytes) ----
+uart: | $(D)
+	$(IV) -o uart.vvp tb_uart.v ../rtl/soc/uart.v
+	vvp -n uart.vvp | tee $(D)/uart.log | grep tb_uart
+	grep -q PASS $(D)/uart.log
+
+# ---- frame buffer: field buffering, no tearing, tap lines, rate mismatch both ways ----
+FB_CFG := n50b:-GWEAVE=0 n50w:-GWEAVE=1 p60b:-GIN_PAL=1+-GOUT50=0 p60w:-GIN_PAL=1+-GOUT50=0+-GWEAVE=1
 fb: | $(D)
-	$(IV) -o fb_ntsc50.vvp tb_fb.v $(FB_SRC)
-	$(IV) -Ptb_fb.IN_PAL=1 -Ptb_fb.OUT50=0 -o fb_pal60.vvp tb_fb.v $(FB_SRC)
-	vvp -n fb_ntsc50.vvp > $(D)/fb_ntsc50.log & vvp -n fb_pal60.vvp > $(D)/fb_pal60.log & wait
-	grep -h '^IN ' $(D)/fb_ntsc50.log $(D)/fb_pal60.log
-	grep -qx PASS $(D)/fb_ntsc50.log && grep -qx PASS $(D)/fb_pal60.log
+	for c in $(FB_CFG); do n=$${c%%:*}; a=$$(echo $${c#*:} | tr + ' '); \
+	  ( $(VL) --top-module tb_fb $$a --Mdir vobj/fb_$$n tb_fb.v $(FB_SRC) > vobj/fb_$$n.build.log 2>&1 && \
+	    ./vobj/fb_$$n/Vtb_fb > $(D)/fb_$$n.log 2>&1 ) & done; wait
+	grep -h '^IN ' $(D)/fb_*.log
+	for c in $(FB_CFG); do grep -qx PASS $(D)/fb_$${c%%:*}.log || exit 1; done
+fb-quick: | $(D)
+	$(call vl_run,fb_p60w,tb_fb,-GIN_PAL=1 -GOUT50=0 -GWEAVE=1,tb_fb.v $(FB_SRC))
+	grep '^IN ' $(D)/fb_p60w.log && grep -qx PASS $(D)/fb_p60w.log
+
+# ---- output path: deinterlace + 4-tap scaler + RGB vs model/scaler_ref.py, bit-exact ----
+# config PAL_WEAVE_ASPECT_CAPTURE; c5 captures an even newest field (PAL)
+SC_CFG := 1_0_0_4 1_1_1_4 0_0_1_4 0_1_0_4 1_0_0_5
+define sc_one
+	set -- $$(echo $(1) | tr _ ' '); n=sc_p$$1w$$2a$$3c$$4; \
+	$(VL) --top-module tb_scaler -GPAL=$$1 -GWEAVE=$$2 -GASPECT=$$3 -GCAPTURE=$$4 -GOUT='"$(D)/'$$n'.txt"' \
+	  --Mdir vobj/$$n tb_scaler.v $(FB_SRC) > vobj/$$n.build.log 2>&1 && ./vobj/$$n/Vtb_scaler > $(D)/$$n.log 2>&1 && \
+	(cd ../model && $(PY) scaler_ref.py compare x ../sim/$(D)/$$n.txt ../sim/$(D)/$$n $$(grep META ../sim/$(D)/$$n.log | cut -d' ' -f2-))
+endef
+scaler: | $(D)
+	$(PY) ../model/scaler_ref.py pattern $(D)/scaler_fields.hex
+	for c in $(SC_CFG); do ( $(call sc_one,$$c) ) > $(D)/sc_$$c.result 2>&1 & done; wait
+	cat $(D)/sc_*.result | grep -E 'PASS|FAIL'
+	! grep -q FAIL $(D)/sc_*.result && [ $$(cat $(D)/sc_*.result | grep -c PASS) -eq $(words $(SC_CFG)) ]
+scaler-quick: | $(D)
+	$(PY) ../model/scaler_ref.py pattern $(D)/scaler_fields.hex
+	$(call sc_one,1_1_1_4)
+
+# ---- control CPU + firmware against a scripted C5 and button presses ----
+soc: | $(D)
+	$(MAKE) -C ../firmware
+	$(PY) soc_stimulus.py $(D)/soc_rx.hex
+	$(call vl_run,soc,tb_soc,,tb_soc.v ../rtl/soc/soc.v ../rtl/soc/uart.v ../third_party/picorv32/picorv32.v)
+	$(PY) check_soc.py
+
+# ---- full chain RF -> pixels (75 % bars through FM), vs model/chain_ref.py ----
+FULL_SRC := sdram_model.v ../rtl/dsp/fm_frontend.v ../rtl/dsp/video_timing.v ../rtl/dsp/chroma_dec.v \
+            ../rtl/fb/fb_format.v ../rtl/fb/fb_ctrl.v ../rtl/mem/async_fifo.v ../rtl/mem/sdram_ctrl.v ../rtl/out/out_path.v
+full: | $(D)
+	for s in ntsc pal; do P=0; [ $$s = pal ] && P=1; ( \
+	  $(PY) ../model/iqsynth.py --std $$s --seconds 0.12 --out $(D)/full_$$s > /dev/null && \
+	  $(VL) --top-module tb_full -GN=4800000 -GPAL=$$P -GHEX='"$(D)/full_'$$s'.hex"' \
+	    -GCV_OUT='"$(D)/full_'$$s'_cv.txt"' -GOUT='"$(D)/full_'$$s'_rgb.txt"' --Mdir vobj/full_$$s tb_full.v $(FULL_SRC) \
+	    > vobj/full_$$s.build.log 2>&1 && ./vobj/full_$$s/Vtb_full > $(D)/full_$$s.log 2>&1 ) & done; wait
+	for s in ntsc pal; do (cd ../model && $(PY) chain_ref.py ../sim/$(D)/full_$${s}_cv.txt ../sim/$(D)/full_$${s}_rgb.txt \
+	  ../sim/$(D)/full_$$s.log ../sim/$(D)/full_$$s) || exit 1; done
 
 clean:
-	rm -rf $(D) *.vvp
+	rm -rf $(D) *.vvp vobj

@@ -1,18 +1,22 @@
 // sdram_ctrl against sdram_model: write 64 bursts of a pattern, read back, compare.
 `timescale 1ns/1ps
 module tb_sdram;
+    parameter real HALF = 6.734;       // 74.25 MHz (pixel clock); 9.259 = 54 MHz
+    parameter integer CL = 3;
+    parameter integer RD_LAT = 4;
+    parameter RD_NEG = 0;
     reg clk = 0, rst = 1;
-    always #9.259 clk = ~clk;          // 54 MHz
+    always #(HALF) clk = ~clk;
     reg req = 0, req_we = 0; reg [20:0] req_addr = 0;
     wire req_ack, wd_pop, rd_valid, ready;
     wire [31:0] rdata;
     reg [31:0] wdata;
     wire sclk, cke, cs_n, ras_n, cas_n, we_n; wire [10:0] a; wire [1:0] ba; wire [3:0] dqm; wire [31:0] dq;
-    sdram_ctrl #(.INIT_CYCLES(100)) dut (.clk(clk), .rst(rst), .req(req), .req_we(req_we), .req_addr(req_addr),
+    sdram_ctrl #(.INIT_CYCLES(100), .CL(CL)) dut (.clk(clk), .rst(rst), .rd_lat(RD_LAT[2:0]), .rd_neg(RD_NEG[0]), .req(req), .req_we(req_we), .req_addr(req_addr),
         .req_ack(req_ack), .wdata(wdata), .wd_pop(wd_pop), .rdata(rdata), .rd_valid(rd_valid), .ready(ready),
         .sdram_clk(sclk), .sdram_cke(cke), .sdram_cs_n(cs_n), .sdram_ras_n(ras_n), .sdram_cas_n(cas_n),
         .sdram_we_n(we_n), .sdram_addr(a), .sdram_ba(ba), .sdram_dqm(dqm), .sdram_dq(dq));
-    sdram_model mdl (.clk(sclk), .cke(cke), .cs_n(cs_n), .ras_n(ras_n), .cas_n(cas_n), .we_n(we_n),
+    sdram_model #(.CL(CL)) mdl (.clk(sclk), .cke(cke), .cs_n(cs_n), .ras_n(ras_n), .cas_n(cas_n), .we_n(we_n),
         .addr(a), .ba(ba), .dqm(dqm), .dq(dq));
     function [31:0] pat(input [20:0] ad); pat = {ad[20:0], 11'h5A5} ^ (ad * 32'h9E3779B1); endfunction
     integer b, k, errs = 0, got = 0;
