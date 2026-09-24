@@ -198,18 +198,104 @@ static int put_channel(int r, int c, uint8_t idx, uint8_t attr)
     return c;
 }
 
+/* ---------------------------------------------------------------- wiring self-test
+ * The C5 drives the 9 link lines as GPIOs at boot (src/link_test.h): sync (all high) 30 ms,
+ * zero 20 ms (t0 = its start), line k high 10 ms each (k = 0..8), line k low 10 ms each, end.
+ * Data lines are read directly; line 8 (STROBE) only through its rising-edge counter. The sync
+ * is recognised as a vector held >= 20 ms with >= 5 of 8 data lines high, which random DIAG
+ * data never produce. Each step is sampled at its middle (+-5 ms margin). */
+#define WT_ZERO_MID   10u
+#define WT_ONES_MID(k)  (20u + 10u * (k) + 5u)
+#define WT_ZEROS_MID(k) (110u + 10u * (k) + 5u)
+#define WT_END_MID    210u
+enum { WT_IDLE, WT_RUN, WT_DONE };
+static int wt_state = WT_IDLE, wt_step;
+static uint32_t wt_t0, wt_runlen, wt_prev_ms;
+static uint8_t wt_prev = 0xA5;
+static uint8_t wt_ones[9], wt_zeros[9], wt_z, wt_e;
+static uint8_t wt_edges[20];             /* strobe edge counter at each sample point */
+static uint16_t wt_bad;                  /* bit j (0..8): line j faulty */
+static uint8_t wt_src[8];                /* which C5 lines (0..7) reached data bit j in "ones" */
+static int wt_strobe;                    /* 0 = ok, 1 = no edge, 2 = edges at wrong steps */
+static uint32_t wt_runs;                 /* completed tests since FPGA boot */
+static bool wt_requested;                /* a LINK_TEST was sent (auto, once) */
+static bool wt_show;                     /* a test just finished: open the link page */
+
+static int popcount8(uint8_t v) { int n = 0; while (v) { n += v & 1u; v >>= 1; } return n; }
+
+static void wt_evaluate(void)
+{
+    wt_bad = 0;
+    for (int j = 0; j < 8; ++j) {
+        uint8_t src = 0;
+        for (int k = 0; k < 8; ++k) if (wt_ones[k] >> j & 1u) src |= (uint8_t)(1u << k);
+        wt_src[j] = src;
+        bool ok = src == (1u << j) && !(wt_ones[8] >> j & 1u) &&            /* line j alone, not strobe */
+                  !(wt_zeros[j] >> j & 1u) && (wt_zeros[8] >> j & 1u) &&
+                  !(wt_z >> j & 1u) && !(wt_e >> j & 1u);
+        if (!ok) wt_bad |= (uint16_t)(1u << j);
+    }
+    /* strobe: exactly one rising edge, between the "ones" samples of lines 7 and 8 */
+    int total = 0, at8 = (uint8_t)(wt_edges[9] - wt_edges[8]);
+    for (int i = 1; i < 20; ++i) total += (uint8_t)(wt_edges[i] - wt_edges[i - 1]);
+    wt_strobe = (total == 1 && at8 == 1) ? 0 : (total == 0 ? 1 : 2);
+    if (wt_strobe) wt_bad |= 1u << 8;
+    wt_runs++;
+}
+
+/* called every millisecond (and faster while a test runs) */
+static void wt_poll(uint32_t t)
+{
+    uint32_t raw = LINK_RAW;
+    uint8_t d = (uint8_t)raw, e = (uint8_t)(raw >> 8);
+    if (wt_state != WT_RUN) {
+        if (d == wt_prev) {
+            wt_runlen += t - wt_prev_ms;
+        } else {
+            /* end of a long, mostly-high vector: the sync; its end is the start of "zero" */
+            if (wt_runlen >= 20u && popcount8(wt_prev) >= 5) {
+                wt_state = WT_RUN; wt_t0 = t; wt_step = 0;
+            }
+            wt_runlen = 0;
+        }
+        wt_prev = d; wt_prev_ms = t;
+        return;
+    }
+    /* WT_RUN: take the sample points in order */
+    uint32_t dt = t - wt_t0;
+    uint32_t due = wt_step == 0 ? WT_ZERO_MID
+                 : wt_step <= 9 ? WT_ONES_MID(wt_step - 1)
+                 : wt_step <= 18 ? WT_ZEROS_MID(wt_step - 10) : WT_END_MID;
+    if (dt < due) return;
+    if (wt_step == 0) wt_z = d;
+    else if (wt_step <= 9) wt_ones[wt_step - 1] = d;
+    else if (wt_step <= 18) wt_zeros[wt_step - 10] = d;
+    else wt_e = d;
+    wt_edges[wt_step] = e;
+    if (++wt_step == 20) {
+        wt_evaluate();
+        wt_state = WT_DONE; wt_prev = d; wt_prev_ms = t; wt_runlen = 0;
+        if (wt_bad) wt_show = true;       /* a fault opens the link page; OK is silent */
+    }
+}
+
+static void request_link_test(void)
+{
+    send(LINK_MSG_LINK_TEST, NULL, 0);   /* the C5 ACKs, reboots and re-sends the pattern */
+}
+
 /* ---------------------------------------------------------------- menu model */
 enum {
     M_CHANNEL, M_SCAN, M_STD, M_RATE, M_ASPECT, M_DEINT, M_BRIGHT, M_CONTRAST, M_SAT, M_HUE,
-    M_YC, M_LOSS, M_SAVE, M_EXIT, M_COUNT
+    M_YC, M_LOSS, M_LINK, M_SAVE, M_EXIT, M_COUNT
 };
 static const char *const ITEM[M_COUNT] = {
     "Channel", "Scan", "Standard", "Output rate", "Aspect", "Deinterlace", "Brightness",
-    "Contrast", "Saturation", "Hue (NTSC)", "Y/C filter", "Signal loss", "Save", "Exit",
+    "Contrast", "Saturation", "Hue (NTSC)", "Y/C filter", "Signal loss", "Link status", "Save", "Exit",
 };
 static const char *const STD_NAME[3] = { "Auto", "NTSC", "PAL" };
 
-enum { V_HIDDEN, V_MENU, V_EDIT, V_SCAN };
+enum { V_HIDDEN, V_MENU, V_EDIT, V_SCAN, V_LINK };
 static int view = V_HIDDEN, item;
 static uint32_t last_input_ms, banner_until_ms, saved_msg_until_ms;
 static bool dirty = true;
@@ -261,6 +347,9 @@ static void select_item(void)
     case M_EXIT:
         view = V_HIDDEN;
         break;
+    case M_LINK:
+        view = V_LINK;
+        break;
     default:
         view = V_EDIT;
         break;
@@ -286,6 +375,7 @@ static void value_text(int r, int c, int it, uint8_t attr)
     case M_YC:       put(r, c, cfg.notch ? "Notch" : "Comb", attr); break;
     case M_LOSS:     put(r, c, cfg.loss_nosig ? "No signal" : "Last frame", attr); break;
     case M_SAVE:     if ((int32_t)(saved_msg_until_ms - now_ms()) > 0) put(r, c, "sent to C5", attr); break;
+    case M_LINK:     put(r, c, wt_state == WT_DONE ? (wt_bad ? "WIRING FAULT" : "wiring OK") : "not tested", attr); break;
     default: break;
     }
 }
@@ -342,6 +432,63 @@ static void draw(void)
         }
         fill_row(14, A_BOX);
         put(14, 1, "S1: tune best   hold: back", A_BOX | A_GREY);
+    } else if (view == V_LINK) {
+        osd = (1u << 31) | (104u << 16) | 320u;
+        draw_title(0);
+        for (int r = 1; r < 15; ++r) fill_row(r, A_BOX);
+        int c;
+        /* wiring */
+        c = put(1, 1, "Wiring: ", A_BOX | A_WHITE);
+        if (wt_state == WT_RUN) put(1, c, "test running...", A_BOX | A_YEL);
+        else if (wt_state != WT_DONE) put(1, c, "not tested (S1: run)", A_BOX | A_YEL);
+        else if (!wt_bad) { c = put(1, c, "OK, 9 lines", A_BOX | A_GRN); }
+        else put(1, c, "FAULT", A_BOX | A_RED);
+        if (wt_state == WT_DONE && wt_bad) {
+            int r = 2;
+            for (int j = 0; j < 8 && r < 6; ++j) {
+                if (!(wt_bad >> j & 1u)) continue;
+                c = put(r, 2, "D", A_BOX | A_RED); c = put_num(r, c, j, A_BOX | A_RED);
+                uint8_t src = wt_src[j];
+                if (!src && !(wt_z >> j & 1u)) put(r, c, ": no signal (open/low)", A_BOX | A_RED);
+                else if (wt_z >> j & 1u) put(r, c, ": stuck high", A_BOX | A_RED);
+                else if (popcount8(src) == 1) {
+                    int k = 0; while (!(src >> k & 1u)) ++k;
+                    c = put(r, c, ": gets C5 line D", A_BOX | A_RED); put_num(r, c, k, A_BOX | A_RED);
+                } else put(r, c, ": shorted to another", A_BOX | A_RED);
+                ++r;
+            }
+            if (wt_strobe && r < 7) put(r, 2, wt_strobe == 1 ? "STROBE: no edge (open/stuck)" : "STROBE: edges at wrong steps", A_BOX | A_RED);
+        }
+        /* UART both ways */
+        c = put(7, 1, "UART C5>FPGA: ", A_BOX | A_WHITE);
+        c = put(7, c, st_ms ? "OK" : "no frames", A_BOX | (st_ms ? A_GRN : A_RED));
+        c = put(7, c + 1, " FPGA>C5: ", A_BOX | A_WHITE);
+        put(7, c, have_settings ? "OK" : "no reply", A_BOX | (have_settings ? A_GRN : A_RED));
+        /* strobe frequency and bit activity (last 1 s window) */
+        uint32_t f = LINK_FREQ, bits = LINK_BITS;
+        c = put(8, 1, "Strobe: ", A_BOX | A_WHITE);
+        if (!(ST_STATUS & S_STROBE)) put(8, c, "none", A_BOX | A_RED);
+        else {
+            c = put_num(8, c, (int)(f / 1000000u), A_BOX | A_WHITE); c = put(8, c, ".", A_BOX | A_WHITE);
+            uint32_t frac = (f % 1000000u) / 1000u;
+            if (frac < 100) c = put(8, c, "0", A_BOX | A_WHITE);
+            if (frac < 10) c = put(8, c, "0", A_BOX | A_WHITE);
+            c = put_num(8, c, (int)frac, A_BOX | A_WHITE); put(8, c, " MHz", A_BOX | A_WHITE);
+        }
+        c = put(9, 1, "Bits D0..D7: ", A_BOX | A_WHITE);
+        for (int j = 0; j < 8; ++j) {
+            bool act = (bits >> j & 1u) && (bits >> (8 + j) & 1u);
+            cell(9, c++, act ? '+' : '-', A_BOX | (act ? A_GRN : A_RED));
+        }
+        /* edge placement (L3.3); meaningful with the VTX on */
+        /* ppm = errors per 1e6 samples = errors / (samples in millions); 32-bit only */
+        uint32_t ep = LINK_ERRP, en = LINK_ERRN, fm = f / 1000000u ? f / 1000000u : 1u;
+        c = put(10, 1, "Edge err ppm  rise ", A_BOX | A_WHITE);
+        c = put_num(10, c, (int)(ep / fm), A_BOX | A_WHITE);
+        c = put(10, c, "  fall ", A_BOX | A_WHITE);
+        put_num(10, c, (int)(en / fm), A_BOX | A_WHITE);
+        put(11, 1, "(edge errors need the VTX on)", A_BOX | A_GREY);
+        put(14, 1, "S1: re-run wiring test  hold: back", A_BOX | A_GREY);
     } else if ((int32_t)(banner_until_ms - t) > 0 || nosig) {
         osd = (1u << 31) | (40u << 16) | 320u;             /* banner near the top */
         draw_title(0);
@@ -401,6 +548,10 @@ static void on_event(int ev)
         if (ev == EV_S1 && scan_done && scan_found) { set_channel(scan_best); view = V_MENU; }
         else if (ev == EV_S1_LONG || ev == EV_S2_LONG) view = V_MENU;
         break;
+    case V_LINK:
+        if (ev == EV_S1) { request_link_test(); wt_state = WT_IDLE; }
+        else if (ev == EV_S1_LONG || ev == EV_S2_LONG) view = V_MENU;
+        break;
     }
 }
 
@@ -418,23 +569,32 @@ int main(void)
             last_req = t;
         }
         if (t - last_dbg >= 1000u) {                         /* diagnostics (fpga/bringup/link_sniff.py) */
-            uint32_t d[4] = { ST_STATUS, ST_DEBUG, t, ST_COUNTERS };
+            uint32_t d[9] = { ST_STATUS, ST_DEBUG, t, ST_COUNTERS,
+                              ((uint32_t)wt_state << 28) | (wt_runs & 0xFFFu) << 16 | ((uint32_t)wt_strobe << 12) | wt_bad,
+                              LINK_FREQ, LINK_ERRP, LINK_ERRN, LINK_BITS };
             send(LINK_MSG_FPGA_DEBUG, d, sizeof d);
             last_dbg = t;
         }
         if (t != last_ms) {
             last_ms = t;
+            wt_poll(t);
+            /* the FPGA may have been (re)loaded after the C5 booted: ask for one test run */
+            if (wt_state == WT_IDLE && !wt_requested && st_ms && t > 3000u) {
+                request_link_test();
+                wt_requested = true;
+            }
             uint32_t s = ST_STATUS;
             int ev;
             if ((ev = btn_poll(&b1, s & S_BTN1, EV_S1, EV_S1_LONG))) on_event(ev);
             if ((ev = btn_poll(&b2, s & S_BTN2, EV_S2, EV_S2_LONG))) on_event(ev);
+            if (wt_show) { wt_show = false; view = V_LINK; last_input_ms = t; dirty = true; }
             if (pending_boot_button) {
                 on_event(pending_boot_button == LINK_BUTTON_LONG ? EV_S1_LONG : EV_S1);
                 pending_boot_button = 0;
             }
             if (view != V_HIDDEN && view != V_SCAN && t - last_input_ms > 15000u) { view = V_HIDDEN; dirty = true; }
         }
-        if (dirty || t - last_draw >= 200u) {                /* live values refresh at 5 Hz */
+        if (wt_state != WT_RUN && (dirty || t - last_draw >= 200u)) {   /* 5 Hz; not during a wiring test */
             draw();
             dirty = false;
             last_draw = t;

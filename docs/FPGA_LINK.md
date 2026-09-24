@@ -108,6 +108,43 @@ None of these is a strapping pin (BOARDS.md). The FPGA must keep all C5-bound li
   channel change in STATUS and can blank/freeze.
 - **Gain changes (ARC):** the amplitude steps. For FM this doesn't matter (THEORY §4).
 
+### §2.5 Wiring self-test and link monitor
+
+**Wiring self-test.** At boot, before `rf.c` routes MODEM_DIAG to the pads and before PARLIO
+drives the strobe, the C5 drives the 9 fast lines as plain GPIOs (`src/link_test.c`):
+
+| step | lines | duration |
+|---|---|---|
+| sync | all 9 high | 30 ms |
+| zero | all low | 20 ms |
+| ones | line k high, others low, k = 0..8 (8 = STROBE) | 10 ms each |
+| zeros | line k low, others high | 10 ms each |
+| end | all low | 20 ms |
+
+The FPGA firmware recognises the sync as a vector held for ≥ 20 ms with ≥ 5 of 8 data lines
+high, which random DIAG data never produce. It samples every step in its middle. Data lines are
+read directly; STROBE only through its rising-edge counter (it is a clock pin). Each line gets
+a verdict: OK, no signal (open / stuck low), stuck high, receives another C5 line (swapped), or
+shorted. A fault opens the OSD **Link status** page; a pass is silent. `LINK_MSG_LINK_TEST`
+(0x0A) makes the C5 reboot and send the pattern again. The FPGA sends it once on its own if it
+hears the C5 but never saw a pattern (the FPGA was loaded after the C5 booted), and on S1 in the
+Link status page. Simulated with correct wiring and three injected faults (`make -C fpga/sim soc-faults`).
+
+**Link monitor** (`fpga/rtl/link/link_mon.v`), per 1 s window: strobe frequency against the
+27 MHz crystal, whether each data bit toggled, and the **edge-placement statistic** for L3.3.
+Data are captured on both STROBE edges; the edges are 12.5 ns apart, i.e. two consecutive native
+~80 MS/s samples. A capture that lands on a data transition mixes old and new bits and stands
+out against the midpoint of its neighbours. 0 flagged samples mid-eye, ~16 % within ±0.5 ns of
+a transition (`sim/tb_link_mon.v`). Both edges sit at the same point of the eye, so the two
+counts rise together. Readings need a real signal (VTX on).
+
+- Low and steady: both edges are clean, and full 80 MS/s capture is safe (improvement 3).
+- Cycling over minutes: STROBE drifts against the modem bus (closes issue #12 the other way).
+- Rise and fall differ persistently: the STROBE duty cycle is not 50 %.
+
+Results appear on the Link status page and in the 1 Hz `LINK_MSG_FPGA_DEBUG` frame
+(`fpga/bringup/link_sniff.py`).
+
 ## §3 Control link
 
 ### §3.1 Framing (`src/link_proto.h`)

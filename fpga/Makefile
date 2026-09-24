@@ -23,7 +23,7 @@ PATTERN_SRC := rtl/top_pattern.v rtl/clocks/pll_tmds_60.v $(HDMI_SRC)
 TOP_SRC  := rtl/top.v rtl/clocks/clk_gen.v $(HDMI_SRC) \
             rtl/dsp/fm_frontend.v rtl/dsp/video_timing.v rtl/dsp/chroma_dec.v \
             rtl/fb/fb_format.v rtl/fb/fb_ctrl.v rtl/mem/async_fifo.v rtl/mem/sdram_ctrl.v \
-            rtl/out/out_path.v rtl/osd/osd.v rtl/soc/soc.v rtl/soc/uart.v rtl/soc/cdc_bus.v \
+            rtl/out/out_path.v rtl/osd/osd.v rtl/soc/soc.v rtl/soc/uart.v rtl/soc/cdc_bus.v rtl/link/link_mon.v \
             third_party/picorv32/picorv32.v
 # Yosys 0.69 leaves $$buf cells for register bits whose low bits were trimmed (their
 # input is undriven); nextpnr has no BEL for them. Tie undriven bits to 0 and map the

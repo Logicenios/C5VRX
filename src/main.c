@@ -8,6 +8,7 @@
 
 #include "boards/board.h"
 #include "link.h"
+#include "link_test.h"
 #include "rf.h"
 #include "video.h"
 #include "esp_log.h"
@@ -16,6 +17,9 @@ void app_main(void)
 {
     /* Antenna switch must be set before any PHY init (docs/BOARDS.md). */
     board_init_early();
+    /* FPGA link wiring self-test: the 9 link pads as plain GPIOs, before rf.c routes
+     * MODEM_DIAG to them (no-op on boards without the link). */
+    link_wiring_test();
     ESP_ERROR_CHECK(rf_start());
     ESP_ERROR_CHECK(video_start());
     /* FPGA control link (no-op on boards without one). */

@@ -22,6 +22,12 @@ Upstream history before the refactor is in `git log` (baseline `upstream/main` =
   - 4-tap polyphase scaler, 4:3 pillarbox / 16:9;
   - OSD menu on S1/S2;
   - PicoRV32 control CPU running the C5 UART link (channel, scan, standard, picture settings, save to NVS).
+- C5 → FPGA wiring self-test (`src/link_test.c`, FPGA firmware): at boot the C5 drives the
+  9 link lines with a walking pattern, and the FPGA reports each line as OK, open, stuck,
+  swapped or shorted on the OSD. `LINK_MSG_LINK_TEST` re-runs it (the C5 reboots).
+- FPGA link monitor (`fpga/rtl/link/link_mon.v`): strobe frequency, per-bit activity and an
+  edge-placement statistic from dual-edge capture (lab item L3.3, issue #12). OSD Link status
+  page and 1 Hz `LINK_MSG_FPGA_DEBUG` diagnostics.
 - `fpga/bringup/` hardware probes (PLL encoding, cascade retuning, SDRAM timing) that report over the
   BL616 USB-UART.
 - Verilator-based `make -C fpga/sim quick` / `all` regressions: bit-exact RF → pixel tests for NTSC and

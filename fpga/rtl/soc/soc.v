@@ -10,6 +10,7 @@
 //   0x3000_0004  meas_tip (R)  0x3000_0008 meas_blank (R)  0x3000_000C counters (R)
 //   0x3000_0010  settings0 (RW)  0x3000_0014 settings1 (RW)  0x3000_0018 settings2 (RW)
 //   0x3000_001C  osd       (RW)  0x3000_0020 millisecond counter (R)  0x3000_0024 debug (R)
+//   0x3000_0028..38  link monitor: raw pins, strobe freq, edge errors p/n, bit activity (R)
 `default_nettype none
 module soc #(
     parameter integer MEM_WORDS = 4096,
@@ -27,6 +28,11 @@ module soc #(
     input  wire [31:0] meas_blank,
     input  wire [31:0] counters,
     input  wire [31:0] debug,
+    input  wire [31:0] link_raw,       // {16'd0, strobe edges[7:0], data pins[7:0]} (live)
+    input  wire [31:0] link_freq,      // strobe edges in the last 1 s window
+    input  wire [31:0] link_errp,      // rising-edge placement errors in the window
+    input  wire [31:0] link_errn,      // falling-edge placement errors in the window
+    input  wire [31:0] link_bits,      // {seen0[7:0], seen1[7:0]} in the window
     output reg  [31:0] settings0,
     output reg  [31:0] settings1,
     output reg  [31:0] settings2,
@@ -114,6 +120,11 @@ module soc #(
                               4'd7: begin mem_rdata <= osd_ctrl;  if (mem_wstrb != 0) osd_ctrl  <= mem_wdata; end
                               4'd8: mem_rdata <= ms;
                               4'd9: mem_rdata <= debug;
+                              4'd10: mem_rdata <= link_raw;
+                              4'd11: mem_rdata <= link_freq;
+                              4'd12: mem_rdata <= link_errp;
+                              4'd13: mem_rdata <= link_errn;
+                              4'd14: mem_rdata <= link_bits;
                               default: ;
                           endcase
                     default: ;

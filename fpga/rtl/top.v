@@ -40,6 +40,7 @@ module top (
     // ================================================================== clk27: control
     wire [31:0] set0, set1, set2, osd_ctrl, status, counters;
     wire [31:0] tip32, blank32, debug;
+    wire [31:0] link_raw, link_freq, link_errp, link_errn, link_bits;
     wire        osd_we; wire [9:0] osd_waddr; wire [15:0] osd_wdata;
     reg  [3:0]  cpu_rst_cnt = 4'hF;
     always @(posedge clk27) if (cpu_rst_cnt != 0) cpu_rst_cnt <= cpu_rst_cnt - 4'd1;
@@ -47,6 +48,7 @@ module top (
         .clk(clk27), .resetn(cpu_rst_cnt == 0), .uart_tx(link_tx), .uart_rx(link_rx),
         .osd_we(osd_we), .osd_waddr(osd_waddr), .osd_wdata(osd_wdata),
         .status(status), .meas_tip(tip32), .meas_blank(blank32), .counters(counters), .debug(debug),
+        .link_raw(link_raw), .link_freq(link_freq), .link_errp(link_errp), .link_errn(link_errn), .link_bits(link_bits),
         .settings0(set0), .settings1(set1), .settings2(set2), .osd_ctrl(osd_ctrl));
 
     // output-rate selection: Force 60, or follow the (effective) standard once it has been
@@ -134,6 +136,15 @@ module top (
         .tag_strobe(cv_valid && cv_x == 11'd0), .line_no(line_no), .field_odd(field_odd), .is_pal(is_pal), .locked(vlocked),
         .brightness(bri_l), .contrast(con_l),
         .fifo_data(ff_wdata), .fifo_wr(ff_wr));
+
+    // link monitor (docs/FPGA_LINK.md §2.3, §2.5): strobe frequency, bit activity, edge placement
+    reg [24:0] win_cnt = 0; reg win_tog = 0;           // 1 s windows from the crystal
+    always @(posedge clk27) if (win_cnt == 25'd26_999_999) begin win_cnt <= 0; win_tog <= ~win_tog; end
+                            else win_cnt <= win_cnt + 25'd1;
+    wire [25:0] lm_samples, lm_errp, lm_errn; wire [7:0] lm_seen0, lm_seen1, lm_edges;
+    link_mon u_lmon (.lclk(lclk), .link_d(link_d), .dp_in(iq_cap), .win_tog(win_tog),
+                     .samples(lm_samples), .err_p(lm_errp), .err_n(lm_errn),
+                     .seen0(lm_seen0), .seen1(lm_seen1), .edges(lm_edges));
 
     reg [15:0] click_cnt = 0;
     always @(posedge lclk) if (click) click_cnt <= click_cnt + 16'd1;
@@ -231,6 +242,21 @@ module top (
     cdc_bus #(.W(24)) u_cnt_p (.clk(clk27), .d({late_count, field_count}), .q({late_k, fc_k}));
     cdc_bus #(.W(16)) u_cnt_l (.clk(clk27), .d(click_cnt), .q(click_k));
     assign counters = {click_k[7:0], late_k, fc_k};
+
+    // link monitor into the CPU domain. Window results are held for 1 s; the raw pins are
+    // sampled directly (the wiring test holds each pattern for >= 10 ms); the edge counter
+    // changes once per slow test edge.
+    reg [7:0] raw_s1 = 0, raw_s2 = 0;
+    always @(posedge clk27) begin raw_s1 <= link_d; raw_s2 <= raw_s1; end
+    wire [7:0] edges_k; wire [25:0] freq_k, errp_k, errn_k; wire [15:0] bits_k;
+    cdc_bus #(.W(8))  u_lm_e (.clk(clk27), .d(lm_edges), .q(edges_k));
+    cdc_bus #(.W(94)) u_lm_w (.clk(clk27), .d({lm_samples, lm_errp, lm_errn, lm_seen0, lm_seen1}),
+                              .q({freq_k, errp_k, errn_k, bits_k}));
+    assign link_raw  = {16'd0, edges_k, raw_s2};
+    assign link_freq = {6'd0, freq_k};
+    assign link_errp = {6'd0, errp_k};
+    assign link_errn = {6'd0, errn_k};
+    assign link_bits = {16'd0, bits_k};
 
     // strobe presence: the lclk heartbeat bit toggles every 1.6 ms at 40 MHz
     reg st_hb_d = 0; reg [17:0] hb_age = 0; reg strobe_ok = 0;

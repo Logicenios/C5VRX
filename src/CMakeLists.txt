@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "board.c"
         "link.c"
+        "link_test.c"
         "arc_phy.c"
         "arc_v3_controller.c"
         "arc_v5_autotune.c"

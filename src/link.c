@@ -13,6 +13,7 @@
 #include "driver/uart.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -143,6 +144,12 @@ static void handle(const link_frame_t *f)
         reply_ack(f, video_post_link_command(VIDEO_LINK_CMD_SAVE, 0) ? LINK_ERR_NONE : LINK_ERR_BUSY);
         break;
     case LINK_MSG_FPGA_DEBUG:          /* diagnostics for a host sniffing the link; no reply */
+        break;
+    case LINK_MSG_LINK_TEST:           /* the wiring test runs at boot, before RF owns the pads */
+        reply_ack(f, LINK_ERR_NONE);
+        uart_wait_tx_done(LINK_UART, pdMS_TO_TICKS(50));
+        ESP_LOGW(TAG, "wiring test requested by the FPGA: rebooting");
+        esp_restart();
         break;
     default:
         reply_ack(f, LINK_ERR_UNSUPPORTED);

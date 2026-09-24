@@ -142,6 +142,18 @@ LED4 = a complete field is in the frame buffer, LED5 = the C5 STROBE is running.
 - **OSD.** 40×16 character cells (Spleen 8×16 font, scaled ×2), overlaid after scaling. The cells
   are drawn by the CPU through a back buffer, so updates are flicker-free.
 
+### 3.0 First power-up with the C5 wired
+
+1. Flash the C5-Zero: `pio run -e waveshare_c5zero_fpga -t upload`.
+2. Load the FPGA: `make -C fpga prog-top` (or `openFPGALoader -b tangnano20k -f fpga/build/top.fs`
+   to write it to flash).
+3. The C5 sends the wiring pattern at every boot. If the FPGA was loaded later, it asks the C5
+   to reboot once and resend it. A wiring fault opens **Link status** on the OSD with the faulty
+   line(s); a pass is silent. Menu → Link status shows the result, both UART directions, the
+   strobe frequency (expect 40.000 MHz) and per-bit activity.
+4. `python3 fpga/bringup/link_sniff.py /dev/ttyUSB1 60` shows the same data from the host once
+   per second.
+
 ### 3.1 Buttons and menu
 
 S1 and S2 on the Tang Nano 20K. The C5-Zero BOOT button arrives over the link and acts as S1.
@@ -157,7 +169,9 @@ A long press is ≥ 0.7 s and fires while the button is still held.
 Menu items: Channel (band/channel and MHz), Scan (the C5 sweeps all 48 channels; per-channel
 quality bars), Standard (Auto/NTSC/PAL, also sent to the C5 as a hint), Output rate (Auto 50/59.94,
 Force 60), Aspect (4:3, 16:9 stretch), Deinterlace (Bob/Weave), Brightness, Contrast, Saturation,
-Hue (NTSC), Y/C filter (Comb/Notch), Signal loss (Last frame/No signal), Save (the settings go to
+Hue (NTSC), Y/C filter (Comb/Notch), Signal loss (Last frame/No signal), Link status (wiring
+test result, UART both ways, strobe frequency, bit activity, edge-placement errors; S1 re-runs
+the wiring test), Save (the settings go to
 the C5 as an opaque blob, `LINK_MSG_SET_FPGA_SETTINGS`, and are saved to NVS with
 `LINK_MSG_SAVE_SETTINGS`), Exit. The menu hides after 15 s without input. The title row shows the
 channel, frequency and an RSSI bar. The bar is the C5's 0..100 Q4 quality score, not calibrated dBm.
@@ -180,7 +194,9 @@ place-and-route.
 | `uart` | UART loopback, 300 back-to-back bytes at 1 Mbaud | 300/300 |
 | `fb` | FIFO → fb_ctrl → SDRAM → line cache at real rates: NTSC 59.94 → 720p50 and PAL 50 → 720p60, bob and weave. Checks word/line tags, no tearing, never the field being written, fields never go backwards, weave pairs consecutive fields, the 4 vertical tap lines of every output line, no late fetch | 4/4 PASS (1 drop / 1 repeat in 7 frames, as expected) |
 | `scaler` | fields → fb_ctrl → SDRAM → out_path, whole 1280×720 frame vs `scaler_ref.py`: PAL/NTSC, bob/weave, 4:3/16:9, odd and even fields | 5/5 bit-exact (921,600/921,600 pixels each) |
-| `soc` | PicoRV32 + firmware vs a scripted C5 (SETTINGS, 10 Hz STATUS, scan results) and scripted S1 presses: GET_SETTINGS at boot, menu, long-press scan, tune best channel, OSD text, frame CRCs | 7/7 checks |
+| `soc`, `soc-faults` | PicoRV32 + firmware vs a scripted C5 (SETTINGS, 10 Hz STATUS, scan results), scripted S1 presses and the C5 wiring pattern embedded in random DIAG data: GET_SETTINGS at boot, menu, long-press scan, tune best channel, frame CRCs, wiring verdict with correct wiring and with D2↔D5 swapped, D3 open and STROBE open | 8/8 checks in each of the 4 runs |
+| `clkgen` | clk_gen against a chattering-LOCK PLL model: one start, one restart per rate change, none from chatter | PASS |
+| `linkmon` | link monitor: 4,000 samples per window, bit activity, 0 edge errors mid-eye vs ~16 % on the transitions | PASS |
 | `full` | **RF → pixels:** 75 % bars → pre-emphasis → FM → 4-bit I/Q (`iqsynth.py`) → whole receive chain → 720p frame, vs the host models chained after video_timing (`chain_ref.py`), NTSC and PAL | bit-exact (921,600/921,600 each); bars within 1–15 codes of nominal RGB (saturated colours a few % high) |
 
 PNGs of the scaler and full-chain frames (`*_rtl.png` / `*_ref.png`) land in `sim/data/`.

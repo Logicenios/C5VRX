@@ -22,9 +22,9 @@ define vl_run
 	./vobj/$(1)/V$(2) > $(D)/$(1).log 2>&1
 endef
 
-.PHONY: all quick fe chroma sdram uart clkgen fb fb-quick scaler scaler-quick soc full clean
-all: fe chroma sdram uart clkgen fb scaler soc full
-quick: fe chroma sdram uart clkgen fb-quick scaler-quick soc
+.PHONY: all quick soc-faults fe chroma sdram uart clkgen linkmon fb fb-quick scaler scaler-quick soc full clean
+all: fe chroma sdram uart clkgen linkmon fb scaler soc soc-faults full
+quick: fe chroma sdram uart clkgen linkmon fb-quick scaler-quick soc
 
 $(D):
 	mkdir -p $@ vobj
@@ -87,6 +87,14 @@ clkgen: | $(D)
 	vvp -n clkgen.vvp | tee $(D)/clkgen.log | grep tb_clkgen
 	grep -q PASS $(D)/clkgen.log
 
+# ---- link monitor: edge-placement statistic mid-eye vs on the data transitions ----
+linkmon: | $(D)
+	$(IV) -Ptb_link_mon.PHASE_PS=6250 -o lm_eye.vvp tb_link_mon.v ../rtl/link/link_mon.v
+	$(IV) -Ptb_link_mon.PHASE_PS=12200 -Ptb_link_mon.EXPECT_BAD=1 -o lm_edge.vvp tb_link_mon.v ../rtl/link/link_mon.v
+	vvp -n lm_eye.vvp | tee $(D)/linkmon.log | grep tb_link_mon
+	vvp -n lm_edge.vvp | tee -a $(D)/linkmon.log | grep tb_link_mon
+	[ $$(grep -c PASS $(D)/linkmon.log) -eq 2 ]
+
 # ---- frame buffer: field buffering, no tearing, tap lines, rate mismatch both ways ----
 FB_CFG := n50b:-GWEAVE=0 n50w:-GWEAVE=1 p60b:-GIN_PAL=1+-GOUT50=0 p60w:-GIN_PAL=1+-GOUT50=0+-GWEAVE=1
 fb: | $(D)
@@ -117,12 +125,23 @@ scaler-quick: | $(D)
 	$(PY) ../model/scaler_ref.py pattern $(D)/scaler_fields.hex
 	$(call sc_one,1_1_1_4)
 
-# ---- control CPU + firmware against a scripted C5 and button presses ----
+# ---- control CPU + firmware against a scripted C5, button presses and the wiring test ----
+# soc: correct wiring. soc-faults: D2<->D5 swapped, D3 open, STROBE open (expected fault masks).
+SOC_SRC := tb_soc.v ../rtl/soc/soc.v ../rtl/soc/uart.v ../third_party/picorv32/picorv32.v
+define soc_one
+	$(VL) --top-module tb_soc -GWFAULT=$(1) -GTXLOG='"$(D)/soc_w$(1).txt"' --Mdir vobj/soc_w$(1) $(SOC_SRC) \
+	  > vobj/soc_w$(1).build.log 2>&1 || (tail -20 vobj/soc_w$(1).build.log; false)
+	./vobj/soc_w$(1)/Vtb_soc > $(D)/soc_w$(1).log 2>&1
+	cp $(D)/soc_w$(1).txt $(D)/soc_tx.txt && $(PY) check_soc.py $(2)
+endef
 soc: | $(D)
 	$(MAKE) -C ../firmware
 	$(PY) soc_stimulus.py $(D)/soc_rx.hex
-	$(call vl_run,soc,tb_soc,,tb_soc.v ../rtl/soc/soc.v ../rtl/soc/uart.v ../third_party/picorv32/picorv32.v)
-	$(PY) check_soc.py
+	$(call soc_one,0,0x000)
+soc-faults: soc
+	$(call soc_one,1,0x024)
+	$(call soc_one,2,0x008)
+	$(call soc_one,3,0x100)
 
 # ---- full chain RF -> pixels (75 % bars through FM), vs model/chain_ref.py ----
 FULL_SRC := sdram_model.v ../rtl/dsp/fm_frontend.v ../rtl/dsp/video_timing.v ../rtl/dsp/chroma_dec.v \

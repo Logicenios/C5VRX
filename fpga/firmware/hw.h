@@ -16,6 +16,11 @@
 #define OSD_CTRL    REG(0x3000001Cu)
 #define MS_COUNTER  REG(0x30000020u)
 #define ST_DEBUG    REG(0x30000024u)   /* {mode changes, clk restarts, cause, mode_want, mode_req, 0} */
+#define LINK_RAW    REG(0x30000028u)   /* {strobe edges[15:8], data pins[7:0]} (live) */
+#define LINK_FREQ   REG(0x3000002Cu)   /* strobe edges in the last 1 s window */
+#define LINK_ERRP   REG(0x30000030u)   /* rising-edge placement errors in the window */
+#define LINK_ERRN   REG(0x30000034u)   /* falling-edge placement errors in the window */
+#define LINK_BITS   REG(0x30000038u)   /* {seen0[15:8], seen1[7:0]} in the window */
 
 /* ST_STATUS bits */
 #define S_BTN1      (1u << 0)

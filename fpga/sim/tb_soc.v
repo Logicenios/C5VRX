@@ -5,6 +5,7 @@
 module tb_soc;
     parameter integer QUICK_MS = 0;
     parameter RXFILE = "data/soc_rx.hex";
+    parameter integer WFAULT = 0;         // wiring fault: 0 none, 1 D2<->D5 swapped, 2 D3 open, 3 STROBE open
     parameter NOSIG = 0;                 // 1: board with no C5 attached (no strobe, no field, loss)      // > 0: stop after this many ms (boot check)
     parameter TXLOG = "data/soc_tx.txt";
     reg clk = 0;
@@ -19,8 +20,34 @@ module tb_soc;
         .osd_we(osd_we), .osd_waddr(osd_waddr), .osd_wdata(osd_wdata),
         .status(NOSIG ? {20'd0, 1'b1, 1'b0, 2'd0, 1'b1, 1'b1, 1'b0, 1'b0, 1'b0, 1'b0, s2, s1}
                        : {20'd0, 1'b0, 1'b1, 2'd1, 1'b1, 1'b1, 1'b1, 1'b0, 1'b0, 1'b1, s2, s1}),
-        .meas_tip(32'd0), .meas_blank(32'd0), .counters(32'd0),
+        .meas_tip(32'd0), .meas_blank(32'd0), .counters(32'd0), .debug(32'd0),
+        .link_raw({16'd0, wedges, wdata}), .link_freq(32'd0), .link_errp(32'd0), .link_errn(32'd0), .link_bits(32'd0),
         .settings0(set0), .settings1(set1), .settings2(set2), .osd_ctrl(osd_ctrl));
+
+    // C5 wiring test pattern (src/link_test.h) at 2000 ms (after the scripted menu presses),
+    // random DIAG-like data before and after
+    reg [8:0] pat = 0; reg [7:0] wdata = 0, wedges = 0; reg pst = 0; integer wseed = 3;
+    initial begin : wiring
+        integer k;
+        #2_000_000_000;
+        pat = 9'h1FF; #30_000_000;
+        pat = 9'h000; #20_000_000;
+        for (k = 0; k < 9; k = k + 1) begin pat = 9'h1 << k; #10_000_000; end
+        for (k = 0; k < 9; k = k + 1) begin pat = 9'h1FF ^ (9'h1 << k); #10_000_000; end
+        pat = 9'h000; #20_000_000;
+        pat = 9'h100;                                   // PARLIO strobe starts (level irrelevant)
+    end
+    reg in_test = 0;
+    initial begin #1_999_000_000; in_test = 1; #252_000_000; in_test = 0; end
+    wire [8:0] seen = (WFAULT == 1) ? {pat[8], pat[7:6], pat[2], pat[4:3], pat[5], pat[1:0]}
+                    : (WFAULT == 2) ? {pat[8:4], 1'b0, pat[2:0]}
+                    : (WFAULT == 3) ? {1'b0, pat[7:0]} : pat;
+    always @(posedge clk) begin
+        wdata <= in_test ? seen[7:0] : $random(wseed);  // DIAG data are random outside the test
+        pst <= seen[8];
+        if (in_test && seen[8] && !pst) wedges <= wedges + 8'd1;
+        else if (!in_test) wedges <= wedges + 8'd37;    // a running 40 MHz strobe
+    end
 
     // OSD text mirror
     reg [15:0] text [0:1023];
@@ -79,7 +106,7 @@ module tb_soc;
         #90_000_000  s1 = 1; #60_000_000 s1 = 0;
         #90_000_000  s1 = 1; #900_000_000 s1 = 0;
         #350_000_000 s1 = 1; #60_000_000 s1 = 0;
-        #440_000_000;                            // > one 5 Hz redraw after the last STATUS
+        #1_440_000_000;                          // > one 5 Hz redraw and one 1 Hz debug frame after the test
         dump;
         $display("tb_soc: set0=%h set1=%h set2=%h osd=%h", set0, set1, set2, osd_ctrl);
         $fclose(fo_tx);

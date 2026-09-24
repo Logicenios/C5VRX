@@ -14,18 +14,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from link_cli import crc16  # noqa: E402
 
 NAMES = {1: "PING", 2: "GET_INFO", 3: "GET_SETTINGS", 4: "SET_CHANNEL", 5: "SCAN_START",
-         6: "SET_STD_HINT", 7: "SET_FPGA_SETTINGS", 8: "SAVE_SETTINGS", 9: "FPGA_DEBUG"}
+         6: "SET_STD_HINT", 7: "SET_FPGA_SETTINGS", 8: "SAVE_SETTINGS", 9: "FPGA_DEBUG", 10: "LINK_TEST"}
 MODES = ["60", "59.94", "50", "?"]
 CAUSE = ["-", "PLL A lock", "PLL B lock", "mode change"]
+
+
+WT = ["not seen", "running", "done"]
 
 
 def debug_text(p: bytes) -> str:
     import struct
     st, dbg, ms, cnt = struct.unpack("<IIII", p[:16])
-    return (f"ms={ms} status={st:08x} [pll={st >> 6 & 1} sdram={st >> 7 & 1} vlock={st >> 2 & 1} "
+    text = (f"ms={ms} status={st:08x} [pll={st >> 6 & 1} sdram={st >> 7 & 1} vlock={st >> 2 & 1} "
             f"strobe={st >> 10 & 1} nosig={st >> 11 & 1} mode={MODES[st >> 8 & 3]}] "
             f"mode_req={MODES[dbg >> 8 & 3]} want={MODES[dbg >> 10 & 3]} restarts={dbg >> 16 & 255} "
             f"cause={CAUSE[dbg >> 12 & 3]} rate_changes={dbg >> 24}")
+    if len(p) >= 36:
+        wt, freq, ep, en, bits = struct.unpack("<5I", p[16:36])
+        state, bad = wt >> 28, wt & 0x1FF
+        wiring = WT[state] if state < 3 else "?"
+        if state == 2:
+            wiring = "OK" if not bad else "FAULT on " + ",".join(
+                ("STROBE" if j == 8 else f"D{j}") for j in range(9) if bad >> j & 1)
+        mhz = freq / 1e6
+        act = "".join("+" if (bits >> j & 1) and (bits >> (8 + j) & 1) else "-" for j in range(8))
+        ppm = lambda e: f"{e / max(freq, 1) * 1e6:.0f}"
+        text += (f"\n            link: wiring {wiring} (runs {wt >> 16 & 0xFFF}), strobe {mhz:.6f} MHz, "
+                 f"bits D0..D7 {act}, edge errors rise {ppm(ep)} ppm fall {ppm(en)} ppm")
+    return text
 dev = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyUSB1"
 secs = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
 fd = os.open(dev, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
