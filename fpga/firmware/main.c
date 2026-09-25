@@ -34,7 +34,7 @@ static uint32_t now_ms(void) { return MS_COUNTER; }
 
 /* ---------------------------------------------------------------- settings */
 #define BLOB_MAGIC 0xC5u
-#define BLOB_VERSION 1u
+#define BLOB_VERSION 2u   /* 2: + deemph (a v1 blob is ignored: defaults) */
 typedef struct __attribute__((packed)) {
     uint8_t magic, version;
     uint8_t std_mode;      /* LINK_STD_* */
@@ -47,21 +47,24 @@ typedef struct __attribute__((packed)) {
     uint8_t contrast;      /* 128 = 1.0 */
     uint8_t saturation;    /* 146 = nominal */
     int8_t  hue_deg;       /* NTSC hue offset, degrees */
+    uint8_t deemph;        /* SET0_DEEMPH_SH values; 2 = 4 dB (Tank II A/B, MEASUREMENTS M76) */
 } fpga_settings_t;
 _Static_assert(sizeof(fpga_settings_t) <= LINK_FPGA_BLOB_MAX, "blob size");
 
 static fpga_settings_t cfg = {
-    BLOB_MAGIC, BLOB_VERSION, LINK_STD_AUTO, 0, 0, 0, 0, 0, 0, 128, 146, 0,
+    BLOB_MAGIC, BLOB_VERSION, LINK_STD_AUTO, 0, 0, 0, 0, 0, 0, 128, 146, 0, 2,
 };
 static bool test_pat;      /* menu "Test pattern": runtime only, not part of the saved blob */
 static uint8_t dec_mode;   /* menu "Decoder": 0 Run, 1 FM only, 2 Idle (diagnostics, runtime only) */
+static const char *const DEEMPH_NAME[4] = { "NTSC 13 dB", "8 dB", "4 dB", "Off" };
 
 static void apply_settings(void)
 {
     SET0 = ((uint32_t)cfg.std_mode << SET0_STD_SH) | (cfg.force60 ? SET0_FORCE60 : 0) |
            (cfg.aspect169 ? SET0_ASPECT169 : 0) | (cfg.weave ? SET0_WEAVE : 0) |
            (cfg.loss_nosig ? SET0_NOSIGSCR : 0) | (cfg.notch ? SET0_NOTCH : 0) |
-           (test_pat ? SET0_TESTPAT : 0) | (dec_mode == 2 ? SET0_DECIDLE : 0) | (dec_mode == 1 ? SET0_FMONLY : 0);
+           (test_pat ? SET0_TESTPAT : 0) | (dec_mode == 2 ? SET0_DECIDLE : 0) | (dec_mode == 1 ? SET0_FMONLY : 0) |
+           ((uint32_t)(cfg.deemph & 3u) << SET0_DEEMPH_SH);
     /* hue: degrees -> 1/65536 turn (65536 / 360 = 182.04) */
     uint32_t hue = (uint32_t)((int32_t)cfg.hue_deg * 182) & 0xFFFFu;
     SET1 = hue | ((uint32_t)cfg.saturation << 16);
@@ -322,11 +325,11 @@ static void capture_and_send(void)
 /* ---------------------------------------------------------------- menu model */
 enum {
     M_CHANNEL, M_SCAN, M_STD, M_RATE, M_ASPECT, M_DEINT, M_BRIGHT, M_CONTRAST, M_SAT, M_HUE,
-    M_YC, M_LOSS, M_TEST, M_DEC, M_LINK, M_SAVE, M_EXIT, M_COUNT
+    M_YC, M_DEEMPH, M_LOSS, M_TEST, M_DEC, M_LINK, M_SAVE, M_EXIT, M_COUNT
 };
 static const char *const ITEM[M_COUNT] = {
     "Channel", "Scan", "Standard", "Output rate", "Aspect", "Deinterlace", "Brightness",
-    "Contrast", "Saturation", "Hue (NTSC)", "Y/C filter", "Signal loss", "Test pattern", "Decoder", "Link status",
+    "Contrast", "Saturation", "Hue (NTSC)", "Y/C filter", "De-emphasis", "Signal loss", "Test pattern", "Decoder", "Link status",
     "Save", "Exit",
 };
 static const char *const STD_NAME[3] = { "Auto", "NTSC", "PAL" };
@@ -360,6 +363,7 @@ static void edit_step(int d)
     case M_SAT:      cfg.saturation = (uint8_t)clampi(cfg.saturation + 8 * d, 0, 250); break;
     case M_HUE:      cfg.hue_deg = (int8_t)clampi(cfg.hue_deg + 3 * d, -45, 45); break;
     case M_YC:       cfg.notch ^= 1u; break;
+    case M_DEEMPH:   cfg.deemph = (uint8_t)((cfg.deemph + 4 + d) % 4); break;
     case M_LOSS:     cfg.loss_nosig ^= 1u; break;
     case M_TEST:     test_pat = !test_pat; break;
     case M_DEC:      dec_mode = (uint8_t)((dec_mode + 3 + d) % 3); break;
@@ -411,6 +415,7 @@ static void value_text(int r, int c, int it, uint8_t attr)
     case M_SAT:      c = put_num(r, c, (cfg.saturation * 100 + 73) / 146, attr); put(r, c, " %", attr); break;
     case M_HUE:      c = put_num(r, c, cfg.hue_deg, attr); put(r, c, " deg", attr); break;
     case M_YC:       put(r, c, cfg.notch ? "Notch" : "Comb", attr); break;
+    case M_DEEMPH:   put(r, c, DEEMPH_NAME[cfg.deemph & 3], attr); break;
     case M_LOSS:     put(r, c, cfg.loss_nosig ? "No signal" : "Last frame", attr); break;
     case M_TEST:     put(r, c, test_pat ? "Colour bars" : "Off", attr); break;
     case M_DEC:      put(r, c, dec_mode == 2 ? "Idle" : dec_mode == 1 ? "FM only" : "Run", attr); break;

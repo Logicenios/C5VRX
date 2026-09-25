@@ -7,13 +7,11 @@ module fm_frontend #(
     parameter LUT_FILE = "phase_lut.hex",
     parameter signed [16:0] CLICK_ABS  = 17'sd22937,  // 14 MHz
     parameter        [8:0]  CLICK_R2_LOW = 9'd10,
-    parameter signed [17:0] CLICK_JUMP = 18'sd8192,   // 5 MHz
-    parameter signed [15:0] B0  = 16'sd3886,          // de-emphasis Q14 (ref.deemph_coeffs)
-    parameter signed [15:0] B1  = -16'sd2912,
-    parameter signed [15:0] A1N = 16'sd15410
+    parameter signed [17:0] CLICK_JUMP = 18'sd8192    // 5 MHz
 ) (
     input  wire               clk,
     input  wire               rst,
+    input  wire [1:0]         deemph,      // de-emphasis roof: 0 13.4 dB (NTSC), 1 8 dB, 2 4 dB, 3 off
     input  wire [7:0]         iq,          // {I[3:0], Q[3:0]}
     input  wire               iq_valid,
     output reg signed [17:0]  f20,         // de-emphasised frequency, 20 MS/s
@@ -100,20 +98,40 @@ module fm_frontend #(
     end
 
     // ---- stage 3: de-emphasis, y = (B0 x + B1 x1) * 16 + A1N y1 >> 14 (y with 4 frac bits) ----
+    // Q14 coefficients per mode (ref.DEEMPH_ROOF / ref.deemph_coeffs; same pole, tau_p = 0.8162 us).
+    // The Tank II has little or no pre-emphasis (MEASUREMENTS M76), so the NTSC roof over-filters.
+    // Runtime coefficients need real multipliers: products on the z_valid clock, the sum and the
+    // state update on the next (z_valid is >= 2 clocks apart), so the output stream is unchanged.
+    reg signed [15:0] c_b0, c_b1, c_a1;
+    always @(posedge clk)
+        case (deemph)
+            2'd0: begin c_b0 <= 16'sd3886;  c_b1 <= -16'sd2912; c_a1 <= 16'sd15410; end
+            2'd1: begin c_b0 <= 16'sd6816;  c_b1 <= -16'sd5842; c_a1 <= 16'sd15410; end
+            2'd2: begin c_b0 <= 16'sd10517; c_b1 <= -16'sd9543; c_a1 <= 16'sd15410; end
+            default: begin c_b0 <= 16'sd16384; c_b1 <= 16'sd0; c_a1 <= 16'sd0; end
+        endcase
     reg signed [16:0] x1;
     reg signed [23:0] yf1;
-    wire signed [39:0] acc = ($signed(B0) * $signed(z) + $signed(B1) * $signed(x1)) * 16
-                             + $signed(A1N) * $signed(yf1);
-    wire signed [39:0] yf_w = acc >>> 14;
+    reg signed [33:0] pa;                  // B0 x + B1 x1   (|.| < 2^31)
+    reg signed [39:0] pb;                  // A1N y1         (|.| < 2^38)
+    reg               d_v;
+    wire signed [39:0] yf_w = ($signed(pa) * 40'sd16 + pb) >>> 14;
     always @(posedge clk) begin
-        f20_valid <= 1'b0;
+        f20_valid <= 1'b0; d_v <= 1'b0;
         if (rst) begin
             x1 <= 0; yf1 <= 0;
-        end else if (z_valid) begin
-            x1 <= z;
-            yf1 <= yf_w[23:0];
-            f20 <= yf_w[21:4];
-            f20_valid <= 1'b1;
+        end else begin
+            if (z_valid) begin
+                pa <= c_b0 * z + c_b1 * x1;
+                pb <= c_a1 * yf1;
+                x1 <= z;
+                d_v <= 1'b1;
+            end
+            if (d_v) begin
+                yf1 <= yf_w[23:0];
+                f20 <= yf_w[21:4];
+                f20_valid <= 1'b1;
+            end
         end
     end
 endmodule

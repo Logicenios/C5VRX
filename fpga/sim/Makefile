@@ -39,7 +39,7 @@ $(D)/ntsc_field.hex: | $(D)
 $(D)/pal_field.hex: | $(D)
 	cd .. && $(PY) model/iqsynth.py --std pal --seconds 0.035 --out sim/$(D)/pal_field
 
-# ---- FM front end: bit-exact vs model/ref.py (strong NTSC and weak, clicky PAL) ----
+# ---- FM front end: bit-exact vs model/ref.py (strong NTSC and weak, clicky PAL; every de-emphasis mode) ----
 fe: $(D)/ntsc_bars.hex $(D)/weak.hex
 	$(IV) -o fe.vvp tb_fm_frontend.v ../rtl/dsp/fm_frontend.v
 	vvp -n fe.vvp > /dev/null
@@ -49,6 +49,12 @@ fe: $(D)/ntsc_bars.hex $(D)/weak.hex
 	cd .. && $(PY) model/ref.py frontend sim/$(D)/weak.hex sim/$(D)/weak_fe_ref.txt
 	$(PY) cmp_prefix.py $(D)/ntsc_bars_fe_rtl.txt $(D)/ntsc_bars_fe_ref.txt
 	$(PY) cmp_prefix.py $(D)/weak_fe_rtl.txt $(D)/weak_fe_ref.txt
+	@for m in 1 2 3; do \
+	  $(IV) -Ptb_fm_frontend.HEX='"$(D)/weak.hex"' -Ptb_fm_frontend.DEEMPH=$$m -Ptb_fm_frontend.OUT='"$(D)/weak_fe_rtl'$$m'.txt"' -o fe_weak$$m.vvp tb_fm_frontend.v ../rtl/dsp/fm_frontend.v && \
+	  vvp -n fe_weak$$m.vvp > /dev/null && \
+	  (cd .. && $(PY) model/ref.py frontend sim/$(D)/weak.hex sim/$(D)/weak_fe_ref$$m.txt $$m > /dev/null) && \
+	  echo "de-emphasis mode $$m:" && $(PY) cmp_prefix.py $(D)/weak_fe_rtl$$m.txt $(D)/weak_fe_ref$$m.txt || exit 1; \
+	done
 
 # ---- sync/levels/resampler on one field, then chroma: bit-exact vs model/chroma_ref.py ----
 $(D)/%_field_cv.txt: $(D)/%_field.hex

@@ -30,13 +30,22 @@ TAU_P = 0.8162e-6
 TAU_Z = TAU_P / 10 ** (13.4 / 20)
 
 
-def deemph_coeffs(q: int = 14):
+# Runtime de-emphasis modes (menu "De-emphasis", fm_frontend deemph input): roof in dB, same
+# tau_p. The Tank II transmits with little or no pre-emphasis (MEASUREMENTS M76): the 13.4 dB
+# NTSC roof then cuts chroma by ~13 dB and smears edges; None = off (exact pass-through).
+DEEMPH_ROOF = {0: 13.4, 1: 8.0, 2: 4.0, 3: None}
+
+
+def deemph_coeffs(q: int = 14, roof_db: float | None = 13.4):
+    s = 1 << q
+    if roof_db is None:
+        return s, 0, 0
+    tau_z = TAU_P / 10 ** (roof_db / 20)
     k = 2 * FS2
     a0 = 1 + k * TAU_P
-    b0 = (1 + k * TAU_Z) / a0
-    b1 = (1 - k * TAU_Z) / a0
+    b0 = (1 + k * tau_z) / a0
+    b1 = (1 - k * tau_z) / a0
     a1 = (1 - k * TAU_P) / a0          # y = b0 x + b1 x1 - a1 y1
-    s = 1 << q
     B0, B1, A1N = round(b0 * s), round(b1 * s), round(-a1 * s)
     # force exact unity DC gain: B0 + B1 == s - A1N
     B1 = (s - A1N) - B0
@@ -60,7 +69,7 @@ def s16(x: int) -> int:
     return x - 0x10000 if x & 0x8000 else x
 
 
-def fm_frontend(raw: np.ndarray):
+def fm_frontend(raw: np.ndarray, deemph: int = 0):
     """Returns (d40, y40, e20): discriminator, click-repaired, de-emphasised 20 MS/s."""
     ph, r2 = phase_lut()
     n = len(raw)
@@ -80,7 +89,7 @@ def fm_frontend(raw: np.ndarray):
         acc = sum(HB[t] * int(y[k - t]) for t in range(7))
         z.append(acc >> 5)
     z = np.array(z, dtype=np.int64)
-    B0, B1, A1N = deemph_coeffs()
+    B0, B1, A1N = deemph_coeffs(roof_db=DEEMPH_ROOF[deemph])
     e = np.zeros(len(z), dtype=np.int64)
     x1 = 0
     yf1 = 0                                  # output with 4 fractional bits
@@ -97,8 +106,9 @@ def write_luts(outdir: Path) -> None:
     with open(outdir / "phase_lut.hex", "w") as f:
         for b in range(256):
             f.write(f"{(int(r2[b]) << 16) | int(ph[b]):07x}\n")    # {r2[8:0], phase[15:0]}
-    B0, B1, A1N = deemph_coeffs()
-    print(f"de-emphasis Q14: B0={B0} B1={B1} A1N={A1N}")
+    for m, roof in DEEMPH_ROOF.items():
+        B0, B1, A1N = deemph_coeffs(roof_db=roof)
+        print(f"de-emphasis mode {m} (roof {roof} dB) Q14: B0={B0} B1={B1} A1N={A1N}")
 
 
 if __name__ == "__main__":
@@ -106,7 +116,7 @@ if __name__ == "__main__":
         write_luts(Path(sys.argv[2]))
     elif len(sys.argv) >= 3 and sys.argv[1] == "frontend":
         raw = np.array([int(l, 16) for l in open(sys.argv[2]) if l.strip()], dtype=np.int64)
-        d, y, e, click = fm_frontend(raw)
+        d, y, e, click = fm_frontend(raw, deemph=int(sys.argv[4]) if len(sys.argv) >= 5 else 0)
         with open(sys.argv[3], "w") as f:
             f.write("\n".join(str(int(v)) for v in e) + "\n")
         print(f"frontend: {len(raw)} in, {len(e)} out, clicks={int(click.sum())}, "

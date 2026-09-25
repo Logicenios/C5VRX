@@ -4,6 +4,7 @@ module tb_fm_frontend;
     parameter N = 84000;
     parameter HEX = "data/ntsc_bars.hex";
     parameter OUT = "data/ntsc_bars_fe_rtl.txt";
+    parameter DEEMPH = 0;               // de-emphasis mode (ref.DEEMPH_ROOF)
     reg clk = 0, rst = 1;
     reg [7:0] mem [0:N-1];
     reg [7:0] iq = 0;
@@ -13,7 +14,7 @@ module tb_fm_frontend;
     integer i, fo, nout;
     always #12.5 clk = ~clk;
     fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) dut (
-        .clk(clk), .rst(rst), .iq(iq), .iq_valid(iq_valid), .f20(f20), .f20_valid(f20_valid), .click(click));
+        .clk(clk), .rst(rst), .deemph(DEEMPH[1:0]), .iq(iq), .iq_valid(iq_valid), .f20(f20), .f20_valid(f20_valid), .click(click));
     initial begin
         $readmemh(HEX, mem);
         fo = $fopen(OUT, "w");

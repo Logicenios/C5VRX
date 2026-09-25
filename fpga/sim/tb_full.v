@@ -30,7 +30,7 @@ module tb_full;
         end else iq_valid <= 1'b0;
     end
     wire signed [17:0] f20; wire f20_valid, click;
-    fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) u_fm (.clk(lclk), .rst(lrst), .iq(iq), .iq_valid(iq_valid),
+    fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) u_fm (.clk(lclk), .rst(lrst), .deemph(2'd0), .iq(iq), .iq_valid(iq_valid),
         .f20(f20), .f20_valid(f20_valid), .click(click));
     wire signed [11:0] cv; wire cv_valid, line_start, field_odd, field_start, is_pal, vlocked;
     wire [10:0] cv_x; wire [9:0] line_no; wire signed [17:0] tip, blank;

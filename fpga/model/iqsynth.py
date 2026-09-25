@@ -32,10 +32,13 @@ BARS = [(0.75, 0.75, 0.75), (0.75, 0.75, 0), (0, 0.75, 0.75), (0, 0.75, 0),
         (0.75, 0, 0.75), (0.75, 0, 0), (0, 0, 0.75), (0, 0, 0)]
 
 
-def composite(std: str, seconds: float, fs: float = FS) -> np.ndarray:
+def composite(std: str, seconds: float, fs: float = FS, ppm: float = 0.0, chroma_gain: float = 1.0) -> np.ndarray:
+    """ppm: VTX clock error (line and subcarrier both scale; a real VTX crystal is never exactly
+    on our 40 MHz, so its sync edges drift across the sample grid). chroma_gain scales the
+    chroma and the burst (the Tank II burst arrives at ~0.38 of nominal, MEASUREMENTS M76)."""
     p = STD[std]
     n = int(seconds * fs)
-    t = np.arange(n) / fs
+    t = np.arange(n) / fs * (1.0 + ppm * 1e-6)
     line = p["line"]
     lines = p["lines"]
     frame = line * lines / 2.0          # field period (interlace ignored for bars: every line active)
@@ -57,15 +60,15 @@ def composite(std: str, seconds: float, fs: float = FS) -> np.ndarray:
     u = 0.492 * (rgb[:, 2] - y)
     vv = 0.877 * (rgb[:, 0] - y)
     pal_sw = np.where((ln % 2) == 1, -1.0, 1.0) if std == "pal" else 1.0
-    chroma = u * np.sin(wsc * t) + vv * pal_sw * np.cos(wsc * t)
+    chroma = chroma_gain * (u * np.sin(wsc * t) + vv * pal_sw * np.cos(wsc * t))
     video = p["setup"] + y * (p["white"] - p["setup"]) + chroma * p["white"]
     v = np.where(act & ~vblank, video, 0.0)
 
     burst = (tl >= p["burst_t"]) & (tl < p["burst_t"] + p["burst_cyc"] / p["fsc"]) & ~vblank
     if std == "ntsc":
-        bsig = -p["burst_amp"] * np.sin(wsc * t)                          # 180 deg on -U
+        bsig = -chroma_gain * p["burst_amp"] * np.sin(wsc * t)                          # 180 deg on -U
     else:
-        bsig = p["burst_amp"] * (-np.sin(wsc * t) + pal_sw * np.cos(wsc * t)) / math.sqrt(2)
+        bsig = chroma_gain * p["burst_amp"] * (-np.sin(wsc * t) + pal_sw * np.cos(wsc * t)) / math.sqrt(2)
     v = np.where(burst, bsig, v)
     v = np.where(hsync & ~vsync, p["sync"], v)
     v = np.where(vsync & (tl < line - 4.7e-6), p["sync"], v)  # broad pulses
@@ -114,10 +117,12 @@ def main() -> None:
     ap.add_argument("--radius", type=float, default=320.0, help="ADC radius in 10-bit LSB (~5 nibble LSB)")
     ap.add_argument("--noise", type=float, default=15.0, help="noise sigma per axis, 10-bit LSB")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--ppm", type=float, default=0.0, help="VTX clock error in ppm (sync edges drift)")
+    ap.add_argument("--chroma", type=float, default=1.0, help="chroma and burst level (1 = nominal)")
     ap.add_argument("--no-preemphasis", action="store_true")
     ap.add_argument("--out", required=True, help="output prefix")
     a = ap.parse_args()
-    v = composite(a.std, a.seconds)
+    v = composite(a.std, a.seconds, ppm=a.ppm, chroma_gain=a.chroma)
     vp = v if a.no_preemphasis else preemphasis(v)
     b = quantize(fm_iq(vp, a.dev, a.offset, a.radius, a.noise, a.seed))
     with open(a.out + ".hex", "w") as f:

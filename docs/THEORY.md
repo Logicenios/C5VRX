@@ -338,6 +338,13 @@ Pre-emphasis is the inverse, `H_pre = 1/H_de`.
 NTSC network above. PAL links traditionally use the CCIR Rec. 405 curve, which has a
 similar shape; no PAL-specific values are adopted here until measured.
 
+**Measured on the Rush Tank II (MEASUREMENTS M76): little or no pre-emphasis.** Before
+de-emphasis its burst is 0.62 of the sync depth (nominal 0.5) and the sync edges show no
+overshoot, so the 13.4 dB roof cuts chroma by ~13 dB and smears edges to the right. The FPGA
+therefore offers the roof at run time (13.4 / 8 / 4 dB / off, same τ_p) and defaults to
+**4 dB**, which kept colour and sharpness in the hardware A/B while removing part of the
+high-frequency noise that the 4-bit I/Q produces.
+
 ### §6.3 Implementation per board
 
 - **FPGA.** Bilinear transform of `H_de` at the discriminator output rate f_s, pre-warped at

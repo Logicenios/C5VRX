@@ -16,7 +16,7 @@ module tb_chain_a;
     wire [10:0] cv_x; wire [9:0] line_no; wire signed [17:0] tip, blank;
     integer i, fo;
     always #(GAP ? 6.734 : 12.5) clk = ~clk;
-    fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) fe (.clk(clk), .rst(rst), .iq(iq), .iq_valid(iq_valid),
+    fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) fe (.clk(clk), .rst(rst), .deemph(2'd0), .iq(iq), .iq_valid(iq_valid),
         .f20(f20), .f20_valid(f20_valid), .click(click));
     video_timing vt (.clk(clk), .rst(rst), .f(f20), .f_valid(f20_valid), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x),
         .line_start(line_start), .line_no(line_no), .field_odd(field_odd), .field_start(field_start),

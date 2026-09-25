@@ -125,9 +125,9 @@ module top (
     wire prst = prst_cnt != 0;
 
     // settings into the receive (pixel-clock) domain
-    wire [1:0]  std_l; wire notch_l, test_l, idle_l, fmonly_l; wire [15:0] hue_l; wire [7:0] sat_l, bri_l, con_l;
-    cdc_bus #(.W(46)) u_set_l (.clk(pclk), .d({set0[9], set0[8], set0[7], set0[1:0], set0[6], set1[23:0], set2[15:0]}),
-                               .q({fmonly_l, idle_l, test_l, std_l, notch_l, sat_l, hue_l, con_l, bri_l}));
+    wire [1:0]  std_l, deemph_l; wire notch_l, test_l, idle_l, fmonly_l; wire [15:0] hue_l; wire [7:0] sat_l, bri_l, con_l;
+    cdc_bus #(.W(48)) u_set_l (.clk(pclk), .d({set0[11:10], set0[9], set0[8], set0[7], set0[1:0], set0[6], set1[23:0], set2[15:0]}),
+                               .q({deemph_l, fmonly_l, idle_l, test_l, std_l, notch_l, sat_l, hue_l, con_l, bri_l}));
     // menu "Decoder" (diagnostics): Idle holds the receive DSP chain (fm_frontend, video_timing,
     // chroma_dec) in reset; FM only keeps fm_frontend running and holds the rest. Used to find
     // which block's activity disturbs the HDMI output (MEASUREMENTS M73).
@@ -157,7 +157,7 @@ module top (
 
     wire signed [17:0] f20; wire f20_valid, click;
     fm_frontend #(.LUT_FILE("rtl/dsp/phase_lut.hex")) u_fm (
-        .clk(pclk), .rst(drst), .iq(iq), .iq_valid(iq_v),
+        .clk(pclk), .rst(drst), .deemph(deemph_l), .iq(iq), .iq_valid(iq_v),
         .f20(f20), .f20_valid(f20_valid), .click(click));
 
     wire signed [11:0] cv; wire cv_valid; wire [10:0] cv_x;
