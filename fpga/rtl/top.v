@@ -40,6 +40,7 @@ module top (
     // ================================================================== clk27: control
     wire [31:0] set0, set1, set2, osd_ctrl, status, counters;
     wire [31:0] tip32, blank32, debug;
+    wire [7:0]  drops_a, drops_b, ovf_k, fbd_k, fb_dbg;   // diagnostics register 0x3000_0048
     wire [31:0] link_raw, link_freq, link_errp, link_errn, link_bits;
     wire        cap_req, cap_done_l; wire [10:0] cap_addr; wire [15:0] cap_data;
     reg  [1:0]  cap_done_s = 0;
@@ -54,6 +55,7 @@ module top (
         .status(status), .meas_tip(tip32), .meas_blank(blank32), .counters(counters), .debug(debug),
         .link_raw(link_raw), .link_freq(link_freq), .link_errp(link_errp), .link_errn(link_errn), .link_bits(link_bits),
         .cap_req(cap_req), .cap_done(cap_done_k), .cap_addr(cap_addr), .cap_data(cap_data),
+        .vt_dbg({8'd0, vt_dbg_k}), .vt_pulses({br_k, hs_k}), .diag({drops_a, drops_b, ovf_k, fbd_k}),
         .settings0(set0), .settings1(set1), .settings2(set2), .osd_ctrl(osd_ctrl));
 
     // output-rate selection: Force 60, or follow the (effective) standard once it has been
@@ -77,8 +79,22 @@ module top (
 
     wire fclk, pclk, plocked;
     wire [7:0] clk_restarts; wire [1:0] clk_cause;
+`ifdef SINGLE_PLL
+    // EXPERIMENT (make SINGLE_PLL=1): pixel clock from one rPLL fed by the crystal pin, as in the
+    // colour-bar bitstream (27 x 55/4 = 371.25 MHz, 74.25 MHz pixel clock). 60 and 50 Hz only
+    // (both use 74.25 MHz); 59.94 needs the cascade and is output with 60 Hz timing here.
+    wire sp_lock;
+    pll_tmds_60 u_pll1 (.clock_in(clk27), .clock_out(fclk), .locked(sp_lock));
+    CLKDIV #(.DIV_MODE("5")) u_div1 (.CLKOUT(pclk), .HCLKIN(fclk), .RESETN(sp_lock), .CALIB(1'b0));
+    reg [1:0] sp_ls = 0;
+    always @(posedge clk27) sp_ls <= {sp_ls[0], sp_lock};
+    assign plocked = sp_ls[1];
+    assign mode_cur = (mode_req == 2'd1) ? 2'd0 : mode_req;
+    assign clk_restarts = 8'd0; assign clk_cause = 2'd0; assign drops_a = 8'd0; assign drops_b = {7'd0, ~sp_ls[1]};
+`else
     clk_gen u_clk (.clk27(clk27), .mode(mode_req), .fclk(fclk), .pclk(pclk), .locked(plocked), .mode_cur(mode_cur),
-                   .restarts(clk_restarts), .last_cause(clk_cause));
+                   .restarts(clk_restarts), .last_cause(clk_cause), .drops_a(drops_a), .drops_b(drops_b));
+`endif
     // debug word: {mode changes requested[7:0], restarts[7:0], cause, mode_want, mode_req, 8'd0, ...}
     reg [7:0] mode_changes = 0;
     reg [1:0] mode_req_d = 0;
@@ -90,14 +106,20 @@ module top (
 
     // ================================================================== lclk: receive chain
     wire lclk = link_strobe;
+    reg [24:0] win_cnt = 0; reg win_tog = 0;           // 1 s windows from the crystal
+    always @(posedge clk27) if (win_cnt == 25'd26_999_999) begin win_cnt <= 0; win_tog <= ~win_tog; end
+                            else win_cnt <= win_cnt + 25'd1;
     reg [3:0] lrst_cnt = 4'hF;
     always @(posedge lclk) if (lrst_cnt != 0) lrst_cnt <= lrst_cnt - 4'd1;
     wire lrst = lrst_cnt != 0;
 
     // settings into the link domain
-    wire [1:0]  std_l; wire notch_l; wire [15:0] hue_l; wire [7:0] sat_l, bri_l, con_l;
-    cdc_bus #(.W(43)) u_set_l (.clk(lclk), .d({set0[1:0], set0[6], set1[23:0], set2[15:0]}),
-                               .q({std_l, notch_l, sat_l, hue_l, con_l, bri_l}));
+    wire [1:0]  std_l; wire notch_l, test_l, idle_l; wire [15:0] hue_l; wire [7:0] sat_l, bri_l, con_l;
+    cdc_bus #(.W(45)) u_set_l (.clk(lclk), .d({set0[8], set0[7], set0[1:0], set0[6], set1[23:0], set2[15:0]}),
+                               .q({idle_l, test_l, std_l, notch_l, sat_l, hue_l, con_l, bri_l}));
+    // menu "Decoder: Idle" (diagnostics): hold the receive DSP chain (fm_frontend, video_timing,
+    // chroma_dec) in reset, e.g. to see whether its activity disturbs the HDMI output
+    wire drst = lrst | idle_l;
 
     // capture in fabric flip-flops. The pad input register (nextpnr --vopt ireg_in_iob) reads a
     // constant 0 with this toolchain (docs/MEASUREMENTS.md M61), so it is not used. STROBE is the
@@ -113,39 +135,58 @@ module top (
 
     wire signed [17:0] f20; wire f20_valid, click;
     fm_frontend #(.LUT_FILE("rtl/dsp/phase_lut.hex")) u_fm (
-        .clk(lclk), .rst(lrst), .iq(iq), .iq_valid(1'b1),
+        .clk(lclk), .rst(drst), .iq(iq), .iq_valid(1'b1),
         .f20(f20), .f20_valid(f20_valid), .click(click));
 
     wire signed [11:0] cv; wire cv_valid; wire [10:0] cv_x;
     wire line_start, field_odd, field_start, pal_det, vlocked;
     wire [9:0] line_no; wire signed [17:0] meas_tip, meas_blank;
     video_timing u_vt (
-        .clk(lclk), .rst(lrst), .f(f20), .f_valid(f20_valid),
+        .clk(lclk), .rst(drst), .f(f20), .f_valid(f20_valid),
         .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x), .line_start(line_start), .line_no(line_no),
         .field_odd(field_odd), .field_start(field_start), .is_pal(pal_det), .locked(vlocked),
-        .meas_tip(meas_tip), .meas_blank(meas_blank));
+        .meas_tip(meas_tip), .meas_blank(meas_blank), .dbg(vt_dbg), .hsync_pulse(vt_hs), .broad_pulse(vt_broad));
+    wire [23:0] vt_dbg; wire vt_hs, vt_broad;
+    // per-second H sync / broad pulse counts (same 1 s windows as the link monitor)
+    reg [2:0] vw = 0; reg [15:0] hs_c = 0, br_c = 0, hs_n = 0, br_n = 0;
+    always @(posedge lclk) begin
+        vw <= {vw[1:0], win_tog};
+        if (vw[2] ^ vw[1]) begin hs_n <= hs_c; br_n <= br_c; hs_c <= 0; br_c <= 0; end
+        else begin
+            if (vt_hs && hs_c != 16'hFFFF) hs_c <= hs_c + 16'd1;
+            if (vt_broad && br_c != 16'hFFFF) br_c <= br_c + 16'd1;
+        end
+    end
     // menu override of the standard (Auto uses the detected line period)
     wire is_pal = (std_l == 2'd1) ? 1'b0 : (std_l == 2'd2) ? 1'b1 : pal_det;
 
     wire signed [11:0] y_c; wire signed [15:0] u_c, v_c; wire [10:0] x_c;
     wire c_valid, killed, pal_sw_neg;
     chroma_dec #(.SIN_FILE("rtl/dsp/sin_lut.hex"), .COS_FILE("rtl/dsp/cos_lut.hex")) u_chroma (
-        .clk(lclk), .rst(lrst), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x), .is_pal(is_pal),
+        .clk(lclk), .rst(drst), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x), .is_pal(is_pal),
         .comb(~notch_l), .hue(hue_l), .sat(sat_l),
         .y_out(y_c), .u_out(u_c), .v_out(v_c), .x_out(x_c), .out_valid(c_valid),
         .killed(killed), .pal_sw_neg(pal_sw_neg));
 
+    // menu "Test pattern": the internal PAL colour bars replace the decoder at fb_format's input
+    // (the whole frame-buffer / SDRAM / scaler / HDMI path runs as with real video)
+    wire signed [11:0] ts_y; wire signed [15:0] ts_u, ts_v; wire [10:0] ts_x; wire [9:0] ts_line;
+    wire ts_valid, ts_odd;
+    test_src u_tsrc (.clk(lclk), .rst(lrst | ~test_l), .y(ts_y), .u(ts_u), .v(ts_v), .x(ts_x),
+                     .valid(ts_valid), .line(ts_line), .odd(ts_odd));
+
     wire [35:0] ff_wdata; wire ff_wr;
     fb_format u_fmt (
-        .clk(lclk), .rst(lrst), .y_in(y_c), .u_in(u_c), .v_in(v_c), .x_in(x_c), .in_valid(c_valid),
-        .tag_strobe(cv_valid && cv_x == 11'd0), .line_no(line_no), .field_odd(field_odd), .is_pal(is_pal), .locked(vlocked),
+        .clk(lclk), .rst(lrst),
+        .y_in(test_l ? ts_y : y_c), .u_in(test_l ? ts_u : u_c), .v_in(test_l ? ts_v : v_c),
+        .x_in(test_l ? ts_x : x_c), .in_valid(test_l ? ts_valid : c_valid),
+        .tag_strobe(test_l ? (ts_valid && ts_x == 11'd0) : (cv_valid && cv_x == 11'd0)),
+        .line_no(test_l ? ts_line : line_no), .field_odd(test_l ? ts_odd : field_odd),
+        .is_pal(test_l | is_pal), .locked(test_l | vlocked),
         .brightness(bri_l), .contrast(con_l),
         .fifo_data(ff_wdata), .fifo_wr(ff_wr));
 
     // link monitor (docs/FPGA_LINK.md §2.3, §2.5): strobe frequency, bit activity, edge placement
-    reg [24:0] win_cnt = 0; reg win_tog = 0;           // 1 s windows from the crystal
-    always @(posedge clk27) if (win_cnt == 25'd26_999_999) begin win_cnt <= 0; win_tog <= ~win_tog; end
-                            else win_cnt <= win_cnt + 25'd1;
     wire [25:0] lm_samples, lm_errp, lm_errn; wire [7:0] lm_seen0, lm_seen1, lm_edges;
     link_mon u_lmon (.lclk(lclk), .link_d(link_d), .dp_in(iq_cap), .win_tog(win_tog),
                      .samples(lm_samples), .err_p(lm_errp), .err_n(lm_errn),
@@ -184,7 +225,13 @@ module top (
         .frame_evt(frame_evt), .req(req), .req_line(req_line), .req_prev(req_prev), .req_slot(req_slot),
         .done(done), .busy(busy), .cur_odd(cur_odd), .cur_pal(cur_pal), .cur_valid(cur_valid),
         .prev_valid(prev_valid), .field_count(field_count),
-        .lc_we(lc_we), .lc_slot(lc_slot), .lc_word(lc_word), .lc_wdata(lc_wdata));
+        .lc_we(lc_we), .lc_slot(lc_slot), .lc_word(lc_word), .lc_wdata(lc_wdata), .dbg(fb_dbg));
+
+    // diagnostics: fb_ctrl state snapshot and FIFO overflows (writes dropped while full)
+    reg  [7:0] ff_ovf = 0;
+    always @(posedge lclk) if (lrst) ff_ovf <= 0; else if (ff_wr && ff_full && ff_ovf != 8'hFF) ff_ovf <= ff_ovf + 8'd1;
+    cdc_bus #(.W(8)) u_ovf_k (.clk(clk27), .d(ff_ovf), .q(ovf_k));
+    cdc_bus #(.W(8)) u_fbd_k (.clk(clk27), .d(fb_dbg), .q(fbd_k));
 
     sdram_ctrl #(.REFRESH_CYCLES(579), .INIT_CYCLES(14850), .CL(2)) u_sdram (
         .clk(pclk), .rst(prst), .rd_lat(3'd4), .rd_neg(1'b0),
@@ -231,7 +278,7 @@ module top (
 
     wire [9:0] t0, t1, t2;
     hdmi_tx #(.PIX_LATENCY(7)) u_tx (
-        .clk(pclk), .rst(prst), .fmt50(mode_p == 2'd2), .dvi_only(1'b0), .afd_4x3(!aspect_p),
+        .clk(pclk), .rst(prst), .fmt50(mode_p == 2'd2), .dvi_only(1'b0),
         .hc(hc), .vc(vc), .req_de(de), .frame_start(fs), .rgb(rgb),
         .tmds0(t0), .tmds1(t1), .tmds2(t2));
     hdmi_phy u_phy (.pclk(pclk), .fclk(fclk), .rst(prst), .d0(t0), .d1(t1), .d2(t2),
@@ -239,11 +286,14 @@ module top (
 
     // ================================================================== status back to clk27
     wire [3:0] st_l;                          // {killed, pal_det, vlocked, lbeat}
-    cdc_bus #(.W(4)) u_st_l (.clk(clk27), .d({killed, pal_det, vlocked, lbeat[15]}), .q(st_l));
+    cdc_bus #(.W(4)) u_st_l (.clk(clk27), .d({killed, pal_det | test_l, vlocked | test_l, lbeat[15]}), .q(st_l));
     assign vlocked_k = st_l[1];
     assign pal_det_k = st_l[2];
     wire [3:0] st_p;                          // {lost, sd_ready, cur_valid, -}
     cdc_bus #(.W(4)) u_st_p (.clk(clk27), .d({lost, sd_ready, cur_valid, 1'b0}), .q(st_p));
+    wire [23:0] vt_dbg_k; wire [15:0] hs_k, br_k;
+    cdc_bus #(.W(24)) u_vtd (.clk(clk27), .d(vt_dbg), .q(vt_dbg_k));
+    cdc_bus #(.W(32)) u_vtp (.clk(clk27), .d({br_n, hs_n}), .q({br_k, hs_k}));
     cdc_bus #(.W(36)) u_meas (.clk(clk27), .d({meas_tip, meas_blank}), .q({tip32[17:0], blank32[17:0]}));
     assign tip32[31:18] = {14{tip32[17]}};
     assign blank32[31:18] = {14{blank32[17]}};

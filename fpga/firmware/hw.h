@@ -21,6 +21,9 @@
 #define LINK_ERRP   REG(0x30000030u)   /* rising-edge placement errors in the window */
 #define LINK_ERRN   REG(0x30000034u)   /* falling-edge placement errors in the window */
 #define LINK_BITS   REG(0x30000038u)   /* {seen0[15:8], seen1[7:0]} in the window */
+#define VT_DBG      REG(0x30000040u)   /* {8'd0, have_levels, locked, good[5:0], miss[7:0], 8'd0} */
+#define VT_PULSES   REG(0x30000044u)   /* {broad pulses[31:16], H syncs[15:0]} per second */
+#define DIAG        REG(0x30000048u)   /* {PLL A drops, PLL B drops, FIFO overflows, fb_ctrl state} */
 #define CAP_CTRL    REG(0x3000003Cu)   /* W: start raw capture; R bit 0: done toggle */
 #define CAP_WORD(i) REG(0x40000000u + 4u * (i))   /* {falling byte, rising byte}, 2048 words */
 
@@ -44,6 +47,8 @@
 #define SET0_WEAVE      (1u << 4)
 #define SET0_NOSIGSCR   (1u << 5)
 #define SET0_NOTCH      (1u << 6)
+#define SET0_TESTPAT    (1u << 7)   /* internal PAL colour bars replace the decoder (not saved) */
+#define SET0_DECIDLE    (1u << 8)   /* hold the receive DSP chain in reset (diagnostics, not saved) */
 /* SET1: [15:0] hue (1/65536 turn), [23:16] saturation (146 nominal)
  * SET2: [7:0] brightness (signed), [15:8] contrast (128 = 1.0)
  * OSD_CTRL: [10:0] x0, [25:16] y0, [31] enable */

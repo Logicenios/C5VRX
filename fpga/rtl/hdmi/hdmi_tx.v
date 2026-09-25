@@ -15,7 +15,6 @@ module hdmi_tx #(
     input  wire        rst,
     input  wire        fmt50,      // 1 = 720p50 (VIC 19), 0 = 720p60/59.94 (VIC 4)
     input  wire        dvi_only,   // 1 = no data islands / guard bands (DVI fallback)
-    input  wire        afd_4x3,    // AVI active format: 1 = 4:3 centred (pillarbox), 0 = same as picture
     output reg  [10:0] hc = 0,     // pixel position being requested now
     output reg  [9:0]  vc = 0,
     output wire        req_de,     // (hc, vc) inside the 1280x720 active area
@@ -75,11 +74,14 @@ module hdmi_tx #(
     // ---- AVI InfoFrame (CEA-861-F Table 8/10), rebuilt from inputs ----
     // HB0 0x82 type, HB1 0x02 version, HB2 0x0D length.
     // PB1: Y=00 RGB, A0=1 active-format present   -> 0x10
-    // PB2: C=10 BT.709, M=10 16:9, R=1000/1001     -> 0xA8 / 0xA9
+    // PB2: C=10 BT.709, M=10 16:9, R=1000 (active format = same as picture) -> 0xA8.
+    //      Always R=1000, also for the 4:3 pillarbox (out_path draws the bars into the frame).
+    //      R=1001 (4:3 centred, 0xA9) made the user's monitor lose and regain the picture every
+    //      few seconds at 720p50 (steady at 720p60); 0xA8 is steady at both (MEASUREMENTS M70).
     // PB3: Q=10 full-range RGB                      -> 0x08
     // PB4: VIC 4 / 19
     wire [7:0] pb1 = 8'h10;
-    wire [7:0] pb2 = afd_4x3 ? 8'hA9 : 8'hA8;
+    wire [7:0] pb2 = 8'hA8;
     wire [7:0] pb3 = 8'h08;
     wire [7:0] pb4 = fmt50 ? 8'd19 : 8'd4;
     wire [7:0] pb0 = 8'd0 - (8'h82 + 8'h02 + 8'h0D + pb1 + pb2 + pb3 + pb4);  // checksum

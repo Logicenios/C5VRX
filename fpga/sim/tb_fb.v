@@ -17,6 +17,11 @@ module tb_fb;
     parameter OUT50 = 1;
     parameter WEAVE = 0;
     parameter FRAMES = 7;
+    parameter SHORT = 0;                  // > 0: every 37th active line carries only SHORT of its
+                                          //    360 pixel words (a real line cut short); checks that
+                                          //    fb_ctrl keeps publishing fields instead of wedging.
+                                          //    A multiple of 8 (e.g. 296) puts the next descriptor
+                                          //    at the FIFO head on a burst boundary.
 
     reg lclk = 0, pclk = 0;
     always #12.5 lclk = ~lclk;            // 40 MHz
@@ -37,7 +42,8 @@ module tb_fb;
             if (gl < NACT) begin
                 if (gc == 0) begin
                     wdata <= {1'b1, (gl == 0), odd, IN_PAL[0], 23'd0, gl[8:0]}; wr <= 1'b1;
-                end else if (gc >= 200 && gc < 200 + 6 * 360 && (gc - 200) % 6 == 0) begin
+                end else if (gc >= 200 && gc < 200 + 6 * ((SHORT != 0 && gl % 37 == 5) ? SHORT : 360) &&
+                             (gc - 200) % 6 == 0) begin
                     widx = (gc - 200) / 6; wdata <= {4'd0, fid, gl[8:0], widx, fid[5:0]}; wr <= 1'b1;
                 end
             end
@@ -183,6 +189,12 @@ module tb_fb;
         $display("IN %s -> OUT %s %s: frames %0d (%0d with a field pair), repeats %0d, drops %0d, cache words %0d, lines checked %0d, late %0d, SDRAM errors %0d, fifo overflow %0d, errors %0d",
                  IN_PAL ? "PAL 50" : "NTSC 59.94", OUT50 ? "720p50" : "720p60", WEAVE ? "weave" : "bob",
                  frames, weave_frames, repeats, drops, fetch_words, checked_lines, late - late0, mdl.errors, ovf, errs);
+        if (SHORT != 0) begin
+            // short lines leave stale words in the SDRAM (content errors are expected there);
+            // what must hold is that every input field is still published
+            $display("SHORT lines: generator fields %0d, fb_ctrl fields published %0d, fifo overflow %0d", fid, u_fb.field_count, ovf);
+            $display("%s", (((fid - u_fb.field_count) & 8'hFF) <= 8'd2 && fid > 4 && ovf == 0) ? "PASS" : "FAIL");
+        end else
         $display("%s", (errs == 0 && mdl.errors == 0 && ovf == 0 && late == late0 && checked_lines > 0) ? "PASS" : "FAIL");
         $finish;
     end

@@ -22,9 +22,9 @@ define vl_run
 	./vobj/$(1)/V$(2) > $(D)/$(1).log 2>&1
 endef
 
-.PHONY: all quick soc-faults fe chroma sdram uart clkgen linkmon fb fb-quick scaler scaler-quick soc full clean
-all: fe chroma sdram uart clkgen linkmon fb scaler soc soc-faults full
-quick: fe chroma sdram uart clkgen linkmon fb-quick scaler-quick soc
+.PHONY: all quick soc-faults fe chroma sdram uart clkgen linkmon real fb fb-quick fb-short scaler scaler-quick soc full testsrc clean
+all: fe chroma sdram uart clkgen linkmon real fb fb-short scaler soc soc-faults full testsrc
+quick: fe chroma sdram uart clkgen linkmon real fb-quick scaler-quick soc testsrc
 
 $(D):
 	mkdir -p $@ vobj
@@ -95,6 +95,14 @@ linkmon: | $(D)
 	vvp -n lm_edge.vvp | tee -a $(D)/linkmon.log | grep tb_link_mon
 	[ $$(grep -c PASS $(D)/linkmon.log) -eq 2 ]
 
+# ---- recorded Tank II PAL signal (vectors/README.md): fm_frontend + video_timing must lock ----
+real: | $(D)
+	$(PY) -c "b=[l for l in open('vectors/tank2_pal_10lines.hex') if l.strip()]; open('$(D)/tank2_x5.hex','w').write(''.join(b*5))"
+	$(IV) -Ptb_chain_a.N=128000 -Ptb_chain_a.HEX='"$(D)/tank2_x5.hex"' -Ptb_chain_a.OUT='"$(D)/tank2_cv.txt"' \
+	  -o real.vvp tb_chain_a.v ../rtl/dsp/fm_frontend.v ../rtl/dsp/video_timing.v
+	vvp -n real.vvp | tee $(D)/real.log | grep '^end'
+	grep -q 'locked=1 pal=1' $(D)/real.log
+
 # ---- frame buffer: field buffering, no tearing, tap lines, rate mismatch both ways ----
 FB_CFG := n50b:-GWEAVE=0 n50w:-GWEAVE=1 p60b:-GIN_PAL=1+-GOUT50=0 p60w:-GIN_PAL=1+-GOUT50=0+-GWEAVE=1
 fb: | $(D)
@@ -106,6 +114,20 @@ fb: | $(D)
 fb-quick: | $(D)
 	$(call vl_run,fb_p60w,tb_fb,-GIN_PAL=1 -GOUT50=0 -GWEAVE=1,tb_fb.v $(FB_SRC))
 	grep '^IN ' $(D)/fb_p60w.log && grep -qx PASS $(D)/fb_p60w.log
+
+# ---- short lines (a real line cut early): fb_ctrl must keep publishing fields. 296 words (a
+# multiple of 8) put the next descriptor at the FIFO head on a burst boundary, which wedged the
+# writer before the fix (MEASUREMENTS M71); 300 words make a burst swallow the descriptor ----
+fb-short: | $(D)
+	$(call vl_run,fb_short296,tb_fb,-GIN_PAL=1 -GOUT50=1 -GSHORT=296,tb_fb.v $(FB_SRC))
+	$(call vl_run,fb_short300,tb_fb,-GIN_PAL=1 -GOUT50=1 -GSHORT=300,tb_fb.v $(FB_SRC))
+	grep -h '^SHORT' $(D)/fb_short296.log $(D)/fb_short300.log
+	grep -qx PASS $(D)/fb_short296.log && grep -qx PASS $(D)/fb_short300.log
+
+# ---- internal test source (menu "Test pattern") through fb_format: line/field structure, bar codes ----
+testsrc: | $(D)
+	$(call vl_run,testsrc,tb_testsrc,,tb_testsrc.v ../rtl/dsp/test_src.v ../rtl/fb/fb_format.v)
+	grep tb_testsrc $(D)/testsrc.log && grep -q PASS $(D)/testsrc.log
 
 # ---- output path: deinterlace + 4-tap scaler + RGB vs model/scaler_ref.py, bit-exact ----
 # config PAL_WEAVE_ASPECT_CAPTURE; c5 captures an even newest field (PAL)

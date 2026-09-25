@@ -61,7 +61,7 @@ module top_pattern (
 
     wire [9:0] t0, t1, t2;
     hdmi_tx #(.PIX_LATENCY(2)) u_tx (
-        .clk(pclk), .rst(rst), .fmt50(fmt50), .dvi_only(dvi_only), .afd_4x3(1'b0),
+        .clk(pclk), .rst(rst), .fmt50(fmt50), .dvi_only(dvi_only),
         .hc(hc), .vc(vc), .req_de(de), .frame_start(fs), .rgb(rgb_q2),
         .tmds0(t0), .tmds1(t1), .tmds2(t2));
     hdmi_phy u_phy (.pclk(pclk), .fclk(fclk), .rst(rst), .d0(t0), .d1(t1), .d2(t2),

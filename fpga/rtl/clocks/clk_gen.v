@@ -16,7 +16,9 @@ module clk_gen (
     output reg        locked = 1'b0,
     output reg  [1:0] mode_cur = 2'd0,
     output reg  [7:0] restarts = 8'd0,    // times the pixel domain was restarted after first lock
-    output reg  [1:0] last_cause = 2'd0   // 1 = PLL A lock lost, 2 = PLL B lock lost, 3 = mode change
+    output reg  [1:0] last_cause = 2'd0,  // 1 = PLL A lock lost, 2 = PLL B lock lost, 3 = mode change
+    output reg  [7:0] drops_a = 8'd0,     // diagnostics: LOCK A / B falling edges while running,
+    output reg  [7:0] drops_b = 8'd0      //   of any length (saturating)
 );
     reg  rst_a = 1'b1, rst_b = 1'b1;
     reg  sel5994 = 1'b0;
@@ -64,6 +66,8 @@ module clk_gen (
             end
             S_RUN: begin
                 locked <= 1'b1;
+                if (la_s == 2'b10 && drops_a != 8'hFF) drops_a <= drops_a + 8'd1;
+                if (lb_s == 2'b10 && drops_b != 8'hFF) drops_b <= drops_b + 8'd1;
                 bad <= (la_s[1] && lb_s[1]) ? 16'd0 : bad + 16'd1;
                 if (bad == 16'd27000 || mode_m != mode_cur) begin                       // 1 ms low
                     last_cause <= (mode_m != mode_cur) ? 2'd3 : !la_s[1] ? 2'd1 : 2'd2;

@@ -20,8 +20,8 @@ NPROC    ?= $(shell nproc)
 
 HDMI_SRC := rtl/hdmi/tmds_encoder.v rtl/hdmi/hdmi_tx.v rtl/hdmi/hdmi_phy.v
 PATTERN_SRC := rtl/top_pattern.v rtl/clocks/pll_tmds_60.v $(HDMI_SRC)
-TOP_SRC  := rtl/top.v rtl/clocks/clk_gen.v $(HDMI_SRC) \
-            rtl/dsp/fm_frontend.v rtl/dsp/video_timing.v rtl/dsp/chroma_dec.v \
+TOP_SRC  := rtl/top.v rtl/clocks/clk_gen.v rtl/clocks/pll_tmds_60.v $(HDMI_SRC) \
+            rtl/dsp/fm_frontend.v rtl/dsp/video_timing.v rtl/dsp/chroma_dec.v rtl/dsp/test_src.v \
             rtl/fb/fb_format.v rtl/fb/fb_ctrl.v rtl/mem/async_fifo.v rtl/mem/sdram_ctrl.v \
             rtl/out/out_path.v rtl/osd/osd.v rtl/soc/soc.v rtl/soc/uart.v rtl/soc/cdc_bus.v rtl/link/link_mon.v rtl/link/link_cap.v \
             third_party/picorv32/picorv32.v
@@ -29,6 +29,9 @@ TOP_SRC  := rtl/top.v rtl/clocks/clk_gen.v $(HDMI_SRC) \
 # input is undriven); nextpnr has no BEL for them. Tie undriven bits to 0 and map the
 # buffers to wires.
 POST_SYNTH := setundef -undriven -zero; techmap -map +/techmap.v t:\$$buf; opt_clean
+# Signed DSP multiplies return wrong products with this flow (MEASUREMENTS M68): rewrite every
+# signed $$mul as an unsigned multiply plus sign corrections before synthesis (tools/smul_map.v).
+PRE_SYNTH := read_verilog -lib -specify +/gowin/cells_sim.v +/gowin/cells_xtra_gw2a.v; hierarchy -top top; proc; flatten; opt; wreduce; opt_clean; techmap -map tools/smul_map.v t:\$$mul; opt
 TOP_HEX  := rtl/dsp/phase_lut.hex rtl/dsp/sin_lut.hex rtl/dsp/cos_lut.hex rtl/out/cr_coef.vh \
             rtl/osd/font.hex firmware/build/fw.hex
 
@@ -37,8 +40,8 @@ all: top
 
 top: $(BUILD)/top.fs
 
-$(BUILD)/top-synth.json: $(TOP_SRC) $(TOP_HEX) | $(BUILD)
-	yosys -q -l $(BUILD)/top-yosys.log -p "read_verilog -sv -I rtl/out $(TOP_SRC); synth_gowin -top top -family gw2a; $(POST_SYNTH); write_json $@; tee -o $(BUILD)/top-stat.txt stat"
+$(BUILD)/top-synth.json: $(TOP_SRC) $(TOP_HEX) tools/smul_map.v | $(BUILD)
+	yosys -q -l $(BUILD)/top-yosys.log -p "read_verilog -sv $(if $(SINGLE_PLL),-DSINGLE_PLL) -I rtl/out $(TOP_SRC); $(PRE_SYNTH); synth_gowin -top top -family gw2a; $(POST_SYNTH); write_json $@; tee -o $(BUILD)/top-stat.txt stat"
 
 # timing: tangnano20k.sdc states the pclk / sclk / lclk periods (nextpnr does not derive
 # them from the PLLs). fclk (371.25 MHz) only clocks the OSER10 serialisers.
@@ -46,9 +49,19 @@ $(BUILD)/top-synth.json: $(TOP_SRC) $(TOP_HEX) | $(BUILD)
 # --threads + router2: placer ~180 s (was ~306 s), router ~25 s (was 127 s). The Gowin global/
 # segment routing pass (~290 s) has no option to skip, so a full place-and-route is ~10 min:
 # run `make lint` and the simulations first.
+# Seeds: with the DSP blocks ~90 % full (the scaler's 9x9 multipliers), the HeAP legaliser often
+# cannot place a MULT9X9 and, with the default attempt limit (cells^2 / 8 ~ 1e8), spins for
+# hours. A timeout of 20000 makes such a seed fail within seconds naming the cell, and the next
+# seed is tried. The `static` placer is not supported for Gowin and `sa` crashes.
+PNR_SEEDS ?= 1 7 2 3 4 5
 $(BUILD)/top-pnr.json: $(BUILD)/top-synth.json $(CST) $(SDC)
-	nextpnr-himbaechel --json $< --write $@ --device $(DEVICE) --vopt family=$(FAMILY) --vopt cst=$(CST) \
-		--sdc $(SDC) --threads $(NPROC) --router router2 --report $(BUILD)/top-report.json -l $(BUILD)/top-pnr.log
+	@for s in $(PNR_SEEDS); do \
+	  echo "place-and-route: seed $$s"; \
+	  nextpnr-himbaechel --json $< --write $@ --device $(DEVICE) --vopt family=$(FAMILY) --vopt cst=$(CST) \
+	    --sdc $(SDC) --threads $(NPROC) --router router2 --seed $$s --placer-heap-cell-placement-timeout 20000 \
+	    $(PNR_OPTS) --report $(BUILD)/top-report.json -l $(BUILD)/top-pnr.log > /dev/null 2>&1 && exit 0; \
+	  grep -m1 '^ERROR' $(BUILD)/top-pnr.log; \
+	done; echo "place-and-route failed for seeds $(PNR_SEEDS)"; exit 1
 
 $(BUILD)/top.fs: $(BUILD)/top-pnr.json
 	gowin_pack -d $(FAMILY) -o $@ $<

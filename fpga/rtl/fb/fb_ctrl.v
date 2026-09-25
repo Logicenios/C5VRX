@@ -46,7 +46,8 @@ module fb_ctrl (
     output reg         lc_we,
     output reg  [2:0]  lc_slot,
     output reg  [8:0]  lc_word,
-    output reg  [31:0] lc_wdata
+    output reg  [31:0] lc_wdata,
+    output wire [7:0]  dbg             // {w_line, w_inflight, r_pend, r_active, r_inflight, sd_req, w_started, have_newest}
 );
     function [20:0] buf_base(input [2:0] b);
         case (b)
@@ -89,6 +90,7 @@ module fb_ctrl (
     reg        r_prev;
     reg [5:0]  r_burst;
     reg [8:0]  r_word;
+    assign dbg = {w_line, w_inflight, r_pend, r_active, r_inflight, sd_req, w_started, have_newest};
 
     always @(posedge clk) begin
         lc_we <= 1'b0;
@@ -106,6 +108,13 @@ module fb_ctrl (
                 prev_valid <= have_prev && (p_pal == n_pal);
             end
             if (req) begin r_pend <= 1'b1; busy <= 1'b1; r_line <= req_line; r_prev <= req_prev; lc_slot <= req_slot; end
+
+            // a descriptor at the head while still inside a line: the line arrived short (the
+            // resampler restarted it early on a real signal, or the FIFO dropped words while
+            // full). Close the line so the descriptor is handled; without this the writer waits
+            // for pixel words that never come and the FIFO wedges (hardware: fields frozen,
+            // FIFO overflowing; MEASUREMENTS M71).
+            if (w_line && head_desc && !w_inflight && !sd_req) w_line <= 1'b0;
 
             // descriptor handling
             if (!w_line && head_desc) begin

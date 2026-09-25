@@ -12,6 +12,8 @@
 //   0x3000_001C  osd       (RW)  0x3000_0020 millisecond counter (R)  0x3000_0024 debug (R)
 //   0x3000_0028..38  link monitor: raw pins, strobe freq, edge errors p/n, bit activity (R)
 //   0x3000_003C  capture: W any = start, R bit 0 = done toggle   0x4000_0000 capture buffer (R)
+//   0x3000_0040  video_timing debug (R)   0x3000_0044 {broad, H sync} pulses per second (R)
+//   0x3000_0048  diagnostics (R): {PLL A LOCK drops, PLL B LOCK drops, FIFO overflows, fb_ctrl state}
 `default_nettype none
 module soc #(
     parameter integer MEM_WORDS = 4096,
@@ -38,6 +40,9 @@ module soc #(
     input  wire        cap_done,       // toggles when the capture buffer is full (synchronised)
     output wire [10:0] cap_addr,
     input  wire [15:0] cap_data,
+    input  wire [31:0] vt_dbg,         // video_timing {have_levels, locked, good[5:0], miss[7:0], 8'd0}
+    input  wire [31:0] vt_pulses,      // {broad pulses, H sync pulses} in the last 1 s
+    input  wire [31:0] diag,           // {PLL A drops, PLL B drops, FIFO overflows, fb_ctrl state}
     output reg  [31:0] settings0,
     output reg  [31:0] settings1,
     output reg  [31:0] settings2,
@@ -119,23 +124,26 @@ module soc #(
                     4'h2: if (mem_wstrb != 4'd0) begin
                               osd_we <= 1'b1; osd_waddr <= mem_addr[11:2]; osd_wdata <= mem_wdata[15:0];
                           end
-                    4'h3: case (mem_addr[5:2])
-                              4'd0: mem_rdata <= status;
-                              4'd1: mem_rdata <= meas_tip;
-                              4'd2: mem_rdata <= meas_blank;
-                              4'd3: mem_rdata <= counters;
-                              4'd4: begin mem_rdata <= settings0; if (mem_wstrb != 0) settings0 <= mem_wdata; end
-                              4'd5: begin mem_rdata <= settings1; if (mem_wstrb != 0) settings1 <= mem_wdata; end
-                              4'd6: begin mem_rdata <= settings2; if (mem_wstrb != 0) settings2 <= mem_wdata; end
-                              4'd7: begin mem_rdata <= osd_ctrl;  if (mem_wstrb != 0) osd_ctrl  <= mem_wdata; end
-                              4'd8: mem_rdata <= ms;
-                              4'd9: mem_rdata <= debug;
-                              4'd10: mem_rdata <= link_raw;
-                              4'd11: mem_rdata <= link_freq;
-                              4'd12: mem_rdata <= link_errp;
-                              4'd13: mem_rdata <= link_errn;
-                              4'd14: mem_rdata <= link_bits;
-                              4'd15: begin mem_rdata <= {31'd0, cap_done}; if (mem_wstrb != 0) cap_req <= ~cap_req; end
+                    4'h3: case (mem_addr[6:2])
+                              5'd0: mem_rdata <= status;
+                              5'd1: mem_rdata <= meas_tip;
+                              5'd2: mem_rdata <= meas_blank;
+                              5'd3: mem_rdata <= counters;
+                              5'd4: begin mem_rdata <= settings0; if (mem_wstrb != 0) settings0 <= mem_wdata; end
+                              5'd5: begin mem_rdata <= settings1; if (mem_wstrb != 0) settings1 <= mem_wdata; end
+                              5'd6: begin mem_rdata <= settings2; if (mem_wstrb != 0) settings2 <= mem_wdata; end
+                              5'd7: begin mem_rdata <= osd_ctrl;  if (mem_wstrb != 0) osd_ctrl  <= mem_wdata; end
+                              5'd8: mem_rdata <= ms;
+                              5'd9: mem_rdata <= debug;
+                              5'd10: mem_rdata <= link_raw;
+                              5'd11: mem_rdata <= link_freq;
+                              5'd12: mem_rdata <= link_errp;
+                              5'd13: mem_rdata <= link_errn;
+                              5'd14: mem_rdata <= link_bits;
+                              5'd15: begin mem_rdata <= {31'd0, cap_done}; if (mem_wstrb != 0) cap_req <= ~cap_req; end
+                              5'd16: mem_rdata <= vt_dbg;
+                              5'd17: mem_rdata <= vt_pulses;
+                              5'd18: mem_rdata <= diag;
                               default: ;
                           endcase
                     default: ;

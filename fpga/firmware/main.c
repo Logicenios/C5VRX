@@ -53,12 +53,15 @@ _Static_assert(sizeof(fpga_settings_t) <= LINK_FPGA_BLOB_MAX, "blob size");
 static fpga_settings_t cfg = {
     BLOB_MAGIC, BLOB_VERSION, LINK_STD_AUTO, 0, 0, 0, 0, 0, 0, 128, 146, 0,
 };
+static bool test_pat;      /* menu "Test pattern": runtime only, not part of the saved blob */
+static bool dec_idle;      /* menu "Decoder": Idle holds the receive DSP chain in reset (runtime only) */
 
 static void apply_settings(void)
 {
     SET0 = ((uint32_t)cfg.std_mode << SET0_STD_SH) | (cfg.force60 ? SET0_FORCE60 : 0) |
            (cfg.aspect169 ? SET0_ASPECT169 : 0) | (cfg.weave ? SET0_WEAVE : 0) |
-           (cfg.loss_nosig ? SET0_NOSIGSCR : 0) | (cfg.notch ? SET0_NOTCH : 0);
+           (cfg.loss_nosig ? SET0_NOSIGSCR : 0) | (cfg.notch ? SET0_NOTCH : 0) |
+           (test_pat ? SET0_TESTPAT : 0) | (dec_idle ? SET0_DECIDLE : 0);
     /* hue: degrees -> 1/65536 turn (65536 / 360 = 182.04) */
     uint32_t hue = (uint32_t)((int32_t)cfg.hue_deg * 182) & 0xFFFFu;
     SET1 = hue | ((uint32_t)cfg.saturation << 16);
@@ -319,11 +322,12 @@ static void capture_and_send(void)
 /* ---------------------------------------------------------------- menu model */
 enum {
     M_CHANNEL, M_SCAN, M_STD, M_RATE, M_ASPECT, M_DEINT, M_BRIGHT, M_CONTRAST, M_SAT, M_HUE,
-    M_YC, M_LOSS, M_LINK, M_SAVE, M_EXIT, M_COUNT
+    M_YC, M_LOSS, M_TEST, M_DEC, M_LINK, M_SAVE, M_EXIT, M_COUNT
 };
 static const char *const ITEM[M_COUNT] = {
     "Channel", "Scan", "Standard", "Output rate", "Aspect", "Deinterlace", "Brightness",
-    "Contrast", "Saturation", "Hue (NTSC)", "Y/C filter", "Signal loss", "Link status", "Save", "Exit",
+    "Contrast", "Saturation", "Hue (NTSC)", "Y/C filter", "Signal loss", "Test pattern", "Decoder", "Link status",
+    "Save", "Exit",
 };
 static const char *const STD_NAME[3] = { "Auto", "NTSC", "PAL" };
 
@@ -357,6 +361,8 @@ static void edit_step(int d)
     case M_HUE:      cfg.hue_deg = (int8_t)clampi(cfg.hue_deg + 3 * d, -45, 45); break;
     case M_YC:       cfg.notch ^= 1u; break;
     case M_LOSS:     cfg.loss_nosig ^= 1u; break;
+    case M_TEST:     test_pat = !test_pat; break;
+    case M_DEC:      dec_idle = !dec_idle; break;
     default: break;
     }
     apply_settings();
@@ -406,6 +412,8 @@ static void value_text(int r, int c, int it, uint8_t attr)
     case M_HUE:      c = put_num(r, c, cfg.hue_deg, attr); put(r, c, " deg", attr); break;
     case M_YC:       put(r, c, cfg.notch ? "Notch" : "Comb", attr); break;
     case M_LOSS:     put(r, c, cfg.loss_nosig ? "No signal" : "Last frame", attr); break;
+    case M_TEST:     put(r, c, test_pat ? "Colour bars" : "Off", attr); break;
+    case M_DEC:      put(r, c, dec_idle ? "Idle" : "Run", attr); break;
     case M_SAVE:     if ((int32_t)(saved_msg_until_ms - now_ms()) > 0) put(r, c, "sent to C5", attr); break;
     case M_LINK:     put(r, c, wt_state == WT_DONE ? (wt_bad ? "WIRING FAULT" : "wiring OK") : "not tested", attr); break;
     default: break;
@@ -439,8 +447,10 @@ static void draw(void)
         osd = (1u << 31) | (104u << 16) | 320u;
         draw_title(0);
         fill_row(1, A_BOX);
-        for (int i = 0; i < M_COUNT; ++i) {
-            int r = 2 + i;
+        /* 14 rows (2..15) are visible; the window follows the cursor (M_COUNT > 14) */
+        int first = clampi(item - 13, 0, M_COUNT > 14 ? M_COUNT - 14 : 0);
+        for (int i = first; i < M_COUNT && i < first + 14; ++i) {
+            int r = 2 + i - first;
             bool cur = i == item;
             uint8_t a = A_BOX | (cur ? (view == V_EDIT ? A_YEL : A_WHITE) | A_INV : A_WHITE);
             fill_row(r, a);
@@ -608,12 +618,8 @@ int main(void)
             uint32_t d[15] = { ST_STATUS, ST_DEBUG, t, ST_COUNTERS,
                                ((uint32_t)wt_state << 28) | (wt_runs & 0xFFFu) << 16 | ((uint32_t)wt_strobe << 12) | wt_bad,
                                LINK_FREQ, LINK_ERRP, LINK_ERRN, LINK_BITS, 0, 0, 0, 0, 0, 0 };
-            /* raw wiring-test samples: zero, ones[0..8], zeros[0..8], end, then a false-start count */
-            uint8_t *raw = (uint8_t *)&d[9];
-            raw[0] = wt_z;
-            for (int k = 0; k < 9; ++k) { raw[1 + k] = wt_ones[k]; raw[10 + k] = wt_zeros[k]; }
-            raw[19] = wt_e;
-            raw[20] = (uint8_t)wt_false;
+            /* video_timing: measured tip / blanking (f LSB = 610 Hz), state, pulses per second */
+            d[9] = ST_TIP; d[10] = ST_BLANK; d[11] = VT_DBG; d[12] = VT_PULSES; d[13] = wt_false; d[14] = DIAG;
             send(LINK_MSG_FPGA_DEBUG, d, sizeof d);
             last_dbg = t;
         }

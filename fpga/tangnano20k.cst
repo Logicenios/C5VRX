@@ -163,8 +163,12 @@ IO_PORT "IO_sdram_dq[31]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
 // Header pin numbers from Sipeed's Tang Nano 20K pinlabel figure (wiki.sipeed.com,
 // tang/tang-nano-20k). All header banks are 3.3 V LVCMOS, like the C5.
 // STROBE on 77 = GCLKT_1 (true global-clock input pin; shared with the unused LCD FPC LCD_CLK).
+// HYSTERESIS=HIGH: without it the unterminated STROBE edge double-clocks the lclk domain in
+// some placements (strobe count 40.01..40.74 MHz instead of 40.000236, both directions; the DSP
+// chain then never finds H sync). Same placement with only this fuse set: exact count
+// (docs/MEASUREMENTS.md M69).
 IO_LOC  "link_strobe" 77;
-IO_PORT "link_strobe" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+IO_PORT "link_strobe" IO_TYPE=LVCMOS33 PULL_MODE=DOWN HYSTERESIS=HIGH;
 // link_d[k] = PARLIO data bit k = C5-Zero GPIO {0,1,4,5,6,7,8,9}[k]; right header, top to bottom
 IO_LOC  "link_d[0]" 42;
 IO_PORT "link_d[0]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;

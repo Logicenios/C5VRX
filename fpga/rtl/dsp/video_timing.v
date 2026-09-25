@@ -5,7 +5,7 @@
 //         line-locked grid of 1280 points per line, plus line/field timing.
 //
 //  * Slicer    : midpoint of measured sync tip S and blanking B (THEORY §11); bootstraps
-//                from a slowly-released running minimum + 400 kHz.
+//                from a running minimum (released 1 LSB per 16 samples) + 400 kHz.
 //  * Levels    : S = mean of samples 20..83 (64) inside the sync pulse, B = mean of samples
 //                110..173 after the leading edge (back porch; burst averages out),
 //                IIR 1/8 per line. G = 300 mV / (B - S) (serial divider, per line).
@@ -30,7 +30,10 @@ module video_timing (
     output reg                is_pal,
     output reg                locked,
     output reg signed [17:0]  meas_tip,
-    output reg signed [17:0]  meas_blank
+    output reg signed [17:0]  meas_blank,
+    output wire [23:0]        dbg,                 // {have_levels, locked, good[5:0], miss[7:0], 8'd0}
+    output wire               hsync_pulse,         // one clock per accepted-width H sync pulse
+    output wire               broad_pulse          // one clock per broad (vertical) pulse
 );
     localparam integer LS = 1280;
 
@@ -43,10 +46,14 @@ module video_timing (
 
     // ---------------- slicer, pulse classifier, level measurement ----------------
     reg signed [17:0] run_min, slice;
+    reg [3:0]  rm_div;
     reg        have_levels, below;
+    reg [14:0] no_sync;           // samples since the last accepted H sync (saturating)
     reg [11:0] low_cnt;
     reg [31:0] edge_idx, broad_idx, pend_edge;
     reg        hsync_evt, broad_evt;
+    assign hsync_pulse = hsync_evt;
+    assign broad_pulse = broad_evt;
     reg signed [25:0] tip_acc, tip_hold, blank_acc;
     // Slicer input: 8-sample moving average (-13 dB at 3.58 MHz, -18 dB at 4.43 MHz),
     // so burst troughs (-20 IRE, exactly at the 50 % slice of a 40 IRE sync) cannot
@@ -69,10 +76,21 @@ module video_timing (
         hsync_evt <= 1'b0;
         broad_evt <= 1'b0;
         if (rst) begin
-            below <= 1'b0; low_cnt <= 0; run_min <= 0; slice <= 0; have_levels <= 1'b0; tip_hold <= 0;
+            below <= 1'b0; low_cnt <= 0; run_min <= 0; rm_div <= 0; slice <= 0; have_levels <= 1'b0; tip_hold <= 0;
             meas_tip <= 0; meas_blank <= 0; porch_pending <= 1'b0; tip_acc <= 0; blank_acc <= 0;
+            no_sync <= 0;
         end else if (f_valid) begin
-            run_min <= (fl < run_min) ? fl : run_min + 18'sd1;
+            // level watchdog: levels latched from noise (VTX off) put the midpoint slice above the
+            // real blanking level, after which no H sync is ever accepted and the levels never
+            // update (hardware, VTX switched on after noise). No H sync for 16 lines (20480
+            // samples): drop the levels and return to the bootstrap slicer.
+            if (no_sync != 15'h7FFF) no_sync <= no_sync + 15'd1;
+            if (no_sync == 15'd20480) begin have_levels <= 1'b0; porch_pending <= 1'b0; end
+            // slow release: 1 LSB (610 Hz) per 16 samples = ~49 kHz per line. Releasing every
+            // sample (~0.78 MHz per line) lifted the bootstrap slice above blanking when the
+            // carrier is off-tune (real Tank II PAL: blanking -0.6 MHz, tip -1.5 MHz; MEASUREMENTS M66)
+            rm_div <= rm_div + 4'd1;
+            run_min <= (fl < run_min) ? fl : (rm_div == 4'd15 ? run_min + 18'sd1 : run_min);
             slice <= have_levels ? ((meas_tip + meas_blank) >>> 1) : (run_min + 18'sd655);
 
             if (fl < slice) begin
@@ -85,6 +103,7 @@ module video_timing (
                 below <= 1'b0;
                 if (low_cnt >= 12'd70 && low_cnt <= 12'd120) begin          // H sync (3.5..6 us)
                     hsync_evt <= 1'b1;
+                    no_sync <= 0;
                     edge_idx <= in_idx - {20'd0, low_cnt};
                     pend_edge <= in_idx - {20'd0, low_cnt};
                     porch_pending <= 1'b1;
@@ -143,11 +162,16 @@ module video_timing (
     reg [47:0] period, line_pos;
     reg [7:0]  good;
     reg [7:0]  miss;
+    assign dbg = {have_levels, locked, good[5:0], miss, 8'd0};
     wire [47:0] edge_q = {edge_idx, 16'd0};
     wire [47:0] next_pred = line_pos + period;
-    wire signed [48:0] perr = $signed({1'b0, edge_q}) - $signed({1'b0, next_pred});
+    // positions are sample indices in Q16 and wrap every 2^32 samples (3.6 min at 20 MS/s):
+    // differences are taken modulo 2^48 and read as signed, so the wrap is invisible
+    wire [47:0] perr_m = edge_q - next_pred;
+    wire signed [48:0] perr = $signed({perr_m[47], perr_m});
     wire [47:0] now_q = {in_idx, 16'd0};
-    wire coast = locked && (now_q > next_pred + (48'd140 << 16));   // no edge by +7 us after prediction
+    wire [47:0] late_m = now_q - next_pred - (48'd140 << 16);
+    wire coast = locked && !late_m[47] && (late_m < (48'd1 << 46));   // no edge by +7 us after prediction
     // Corrections computed in an explicitly signed context (an unsigned operand would
     // turn >>> into a logical shift and a small negative error into a huge one).
     wire signed [49:0] phase_corr = perr >>> 3;
