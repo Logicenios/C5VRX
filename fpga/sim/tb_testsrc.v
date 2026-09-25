@@ -5,7 +5,7 @@ module tb_testsrc;
     reg clk = 0, rst = 1;
     always #12.5 clk = ~clk;
     wire signed [11:0] y; wire signed [15:0] u, v; wire [10:0] x; wire [9:0] line; wire valid, odd;
-    test_src dut (.clk(clk), .rst(rst), .y(y), .u(u), .v(v), .x(x), .valid(valid), .line(line), .odd(odd));
+    test_src dut (.clk(clk), .rst(rst), .en(1'b1), .y(y), .u(u), .v(v), .x(x), .valid(valid), .line(line), .odd(odd));
     wire [35:0] fd; wire fw;
     fb_format fmt (.clk(clk), .rst(rst), .y_in(y), .u_in(u), .v_in(v), .x_in(x), .in_valid(valid),
         .tag_strobe(valid && x == 11'd0), .line_no(line), .field_odd(odd), .is_pal(1'b1), .locked(1'b1),

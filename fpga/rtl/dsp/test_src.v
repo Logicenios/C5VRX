@@ -1,9 +1,9 @@
-// Internal PAL test source (link clock domain): 75 % EBU colour bars with a white line that
+// Internal PAL test source (receive chain, pixel-clock domain): 75 % EBU colour bars with a white line that
 // moves down one line per field, in the format chroma_dec + video_timing hand to fb_format.
 // Selected from the menu ("Test pattern"); it exercises the whole frame-buffer path (FIFO,
 // fb_ctrl, SDRAM, scaler, HDMI) without a VTX.
 //
-// Timing: 20 MS/s samples (every second lclk), 1280 samples per 64 us line, fields of 312 and
+// Timing: 20 MS/s samples (every second `en` tick at 40 MS/s), 1280 samples per 64 us line, fields of 312 and
 // 313 lines alternating (odd/even), like video_timing's resampled output.
 // Levels (fb_format input units): y = luma in mV (black 0, white 700), u / v = 1.497 x the
 // colour-difference amplitude in mV. 75 % bars: Y = .299R + .587G + .114B, U = .492 (B - Y),
@@ -13,6 +13,7 @@
 module test_src (
     input  wire               clk,
     input  wire               rst,
+    input  wire               en,             // 40 MS/s sample tick (the link sample rate)
     output reg  signed [11:0] y = 0,
     output reg  signed [15:0] u = 0,
     output reg  signed [15:0] v = 0,
@@ -51,7 +52,7 @@ module test_src (
         valid <= 1'b0;
         if (rst) begin
             ph <= 1'b0; xc <= 0; lc <= 0; odd <= 1'b1; fcnt <= 0;
-        end else begin
+        end else if (en) begin
             ph <= ~ph;
             if (ph) begin
                 valid <= 1'b1;

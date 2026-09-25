@@ -4,3 +4,5 @@ sim/*.vvp
 model/__pycache__/
 sim/vobj/
 firmware/build/
+impl/
+gowin/tangnano20k.cst

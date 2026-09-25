@@ -49,6 +49,7 @@
 #define SET0_NOTCH      (1u << 6)
 #define SET0_TESTPAT    (1u << 7)   /* internal PAL colour bars replace the decoder (not saved) */
 #define SET0_DECIDLE    (1u << 8)   /* hold the receive DSP chain in reset (diagnostics, not saved) */
+#define SET0_FMONLY     (1u << 9)   /* hold video_timing + chroma_dec in reset, fm_frontend runs (diagnostics) */
 /* SET1: [15:0] hue (1/65536 turn), [23:16] saturation (146 nominal)
  * SET2: [7:0] brightness (signed), [15:8] contrast (128 = 1.0)
  * OSD_CTRL: [10:0] x0, [25:16] y0, [31] enable */

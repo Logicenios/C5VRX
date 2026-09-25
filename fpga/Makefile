@@ -35,7 +35,7 @@ PRE_SYNTH := read_verilog -lib -specify +/gowin/cells_sim.v +/gowin/cells_xtra_g
 TOP_HEX  := rtl/dsp/phase_lut.hex rtl/dsp/sin_lut.hex rtl/dsp/cos_lut.hex rtl/out/cr_coef.vh \
             rtl/osd/font.hex firmware/build/fw.hex
 
-.PHONY: all top prog-top pattern prog-pattern sim sim-quick lint clean
+.PHONY: all top prog-top pattern prog-pattern gowin prog-gowin sim sim-quick lint clean
 all: top
 
 top: $(BUILD)/top.fs
@@ -65,6 +65,18 @@ $(BUILD)/top-pnr.json: $(BUILD)/top-synth.json $(CST) $(SDC)
 
 $(BUILD)/top.fs: $(BUILD)/top-pnr.json
 	gowin_pack -d $(FAMILY) -o $@ $<
+
+# ---- Gowin EDA (vendor) flow: the timing-clean build (MEASUREMENTS M75) ----
+# Needs Gowin EDA (Education edition is enough) in $$GOWIN (default ~/.local/opt/gowin).
+# Output: impl/pnr/top.fs. The build fails if Gowin's timing analysis reports any violation.
+gowin/tangnano20k.cst: $(CST) gowin/make_cst.py
+	python3 gowin/make_cst.py
+gowin: $(TOP_HEX) gowin/tangnano20k.cst
+	tools/gowin.sh gowin/top.tcl > $(BUILD)/gowin-top.log 2>&1 || (tail -30 $(BUILD)/gowin-top.log; false)
+	python3 tools/gowin_timing.py impl/pnr
+prog-gowin:
+	@test -f impl/pnr/top.fs || { echo "no impl/pnr/top.fs: run 'make gowin' first"; exit 1; }
+	openFPGALoader -b tangnano20k impl/pnr/top.fs
 
 # prog-* only load an existing bitstream (seconds); they never start a rebuild
 prog-top:

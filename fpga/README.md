@@ -29,6 +29,20 @@ The firmware is built with the RISC-V GCC that PlatformIO installs for the ESP32
 (`~/.platformio/packages/toolchain-riscv32-esp`, rv32i/ilp32 multilib; override with
 `make -C firmware CROSS=...`).
 
+**Release builds use Gowin EDA** (`make gowin`, MEASUREMENTS M75). nextpnr's timing model is
+optimistic on this device: it passed a design that Gowin's analysis showed failing 608 paths at
+74.25 MHz, and that design broke the HDMI output on real hardware. The open flow stays useful
+for quick iteration, but check timing with Gowin before trusting a bitstream on the board.
+Gowin EDA 1.9.11 Education (free) is enough; unpack it to `~/.local/opt/gowin` (or set `GOWIN=`).
+`tools/gowin.sh` runs its shell headless, `gowin/top.tcl` is the project (same sources as
+`make top`), `gowin/make_cst.py` converts the pin constraints to Gowin syntax, and
+`tools/gowin_timing.py` fails the build on any setup or hold violation.
+
+```sh
+make gowin         # vendor build -> impl/pnr/top.fs (~2 min), then the timing check
+make prog-gowin    # load impl/pnr/top.fs into SRAM
+```
+
 Vendored third-party sources (`third_party/`, pinned commits):
 
 | component | licence | source |
@@ -145,7 +159,7 @@ LED4 = a complete field is in the frame buffer, LED5 = the C5 STROBE is running.
 ### 3.0 First power-up with the C5 wired
 
 1. Flash the C5-Zero: `pio run -e waveshare_c5zero_fpga -t upload`.
-2. Load the FPGA: `make -C fpga prog-top` (or `openFPGALoader -b tangnano20k -f fpga/build/top.fs`
+2. Load the FPGA: `make -C fpga prog-gowin` (or `openFPGALoader -b tangnano20k -f fpga/impl/pnr/top.fs`
    to write it to flash).
 3. The C5 sends the wiring pattern at every boot. If the FPGA was loaded later, it asks the C5
    to reboot once and resend it. A wiring fault opens **Link status** on the OSD with the faulty

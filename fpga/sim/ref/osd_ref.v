@@ -6,12 +6,10 @@
 //   attr[0]   cell has a background box (video darkened to 1/4 and tinted)
 //   attr[3:1] colour: 0 white, 1 yellow, 2 green, 3 red, 4 cyan, 5 grey, 6 black, 7 orange
 //   attr[4]   inverse (box in the colour, glyph black): the menu cursor line
-// Timing: overlay decision is ready 4 clocks after (hc, vc); `rgb_out` is registered from
+// Timing: overlay decision is ready 3 clocks after (hc, vc); `rgb_out` is registered from
 // `rgb_in` (which must be valid 6 clocks after (hc, vc)), so rgb_out is valid after 7.
-// The window position is registered before the text-RAM read: computing the RAM address from
-// hc - x0 in the same clock failed timing by 2.3 ns at 74.25 MHz (MEASUREMENTS M75).
 `default_nettype none
-module osd (
+module osd_ref (
     input  wire        clk,
     input  wire [10:0] hc,
     input  wire [9:0]  vc,
@@ -31,28 +29,23 @@ module osd (
     initial $readmemh("rtl/osd/font.hex", font);
     always @(posedge wclk) if (we) text[waddr] <= wdata;
 
-    // c0: position (registered)
-    wire [10:0] dx_w = hc - x0;
-    wire [9:0]  dy_w = vc - y0;
-    reg  [10:0] dx; reg [9:0] dy; reg in0;
-    always @(posedge clk) begin
-        dx <= dx_w; dy <= dy_w;
-        in0 <= enable && (dx_w < 11'd640) && (dy_w < 10'd512);
-    end
-    // c1: text RAM
+    // c0: position
+    wire [10:0] dx = hc - x0;
+    wire [9:0]  dy = vc - y0;
+    wire in_win = enable && (dx < 11'd640) && (dy < 10'd512);
     reg  [15:0] tq;
     reg  [3:0]  gy1; reg [2:0] gx1; reg in1;
     always @(posedge clk) begin
         tq <= text[{dy[8:5], dx[9:4]}];
-        gy1 <= dy[4:1]; gx1 <= dx[3:1]; in1 <= in0;
+        gy1 <= dy[4:1]; gx1 <= dx[3:1]; in1 <= in_win;
     end
-    // c2: glyph row
+    // c1: glyph row
     reg [7:0] fq; reg [7:0] at2; reg [2:0] gx2; reg in2;
     always @(posedge clk) begin
         fq <= font[{tq[6:0], gy1}];
         at2 <= tq[15:8]; gx2 <= gx1; in2 <= in1;
     end
-    // c3: pixel classification
+    // c2: pixel classification
     function [23:0] colour(input [2:0] c);
         case (c)
             3'd0: colour = 24'hF0F0F0; 3'd1: colour = 24'hF0E040; 3'd2: colour = 24'h40E060;
@@ -67,14 +60,14 @@ module osd (
         o_inv <= at2[4];
         o_col <= colour(at2[3:1]);
     end
-    // delay the decision by 2 to align with rgb_in (valid 6 after (hc, vc))
-    reg [1:0] fg_d, box_d, inv_d; reg [23:0] col_d [0:1];
+    // delay the decision by 3 to align with rgb_in (valid 6 after (hc, vc))
+    reg [2:0] fg_d, box_d, inv_d; reg [23:0] col_d [0:2];
     always @(posedge clk) begin
-        fg_d <= {fg_d[0], o_fg}; box_d <= {box_d[0], o_box}; inv_d <= {inv_d[0], o_inv};
-        col_d[0] <= o_col; col_d[1] <= col_d[0];
+        fg_d <= {fg_d[1:0], o_fg}; box_d <= {box_d[1:0], o_box}; inv_d <= {inv_d[1:0], o_inv};
+        col_d[0] <= o_col; col_d[1] <= col_d[0]; col_d[2] <= col_d[1];
     end
-    wire fg = fg_d[1], box = box_d[1], inv = inv_d[1];
-    wire [23:0] col = col_d[1];
+    wire fg = fg_d[2], box = box_d[2], inv = inv_d[2];
+    wire [23:0] col = col_d[2];
     wire [23:0] dark = {2'b0, rgb_in[23:18], 2'b0, rgb_in[15:10], 2'b0, rgb_in[7:2]} + 24'h080818;
     always @(posedge clk) begin
         if (inv && box) rgb_out <= fg ? 24'h000000 : col;

@@ -54,14 +54,14 @@ static fpga_settings_t cfg = {
     BLOB_MAGIC, BLOB_VERSION, LINK_STD_AUTO, 0, 0, 0, 0, 0, 0, 128, 146, 0,
 };
 static bool test_pat;      /* menu "Test pattern": runtime only, not part of the saved blob */
-static bool dec_idle;      /* menu "Decoder": Idle holds the receive DSP chain in reset (runtime only) */
+static uint8_t dec_mode;   /* menu "Decoder": 0 Run, 1 FM only, 2 Idle (diagnostics, runtime only) */
 
 static void apply_settings(void)
 {
     SET0 = ((uint32_t)cfg.std_mode << SET0_STD_SH) | (cfg.force60 ? SET0_FORCE60 : 0) |
            (cfg.aspect169 ? SET0_ASPECT169 : 0) | (cfg.weave ? SET0_WEAVE : 0) |
            (cfg.loss_nosig ? SET0_NOSIGSCR : 0) | (cfg.notch ? SET0_NOTCH : 0) |
-           (test_pat ? SET0_TESTPAT : 0) | (dec_idle ? SET0_DECIDLE : 0);
+           (test_pat ? SET0_TESTPAT : 0) | (dec_mode == 2 ? SET0_DECIDLE : 0) | (dec_mode == 1 ? SET0_FMONLY : 0);
     /* hue: degrees -> 1/65536 turn (65536 / 360 = 182.04) */
     uint32_t hue = (uint32_t)((int32_t)cfg.hue_deg * 182) & 0xFFFFu;
     SET1 = hue | ((uint32_t)cfg.saturation << 16);
@@ -362,7 +362,7 @@ static void edit_step(int d)
     case M_YC:       cfg.notch ^= 1u; break;
     case M_LOSS:     cfg.loss_nosig ^= 1u; break;
     case M_TEST:     test_pat = !test_pat; break;
-    case M_DEC:      dec_idle = !dec_idle; break;
+    case M_DEC:      dec_mode = (uint8_t)((dec_mode + 3 + d) % 3); break;
     default: break;
     }
     apply_settings();
@@ -413,7 +413,7 @@ static void value_text(int r, int c, int it, uint8_t attr)
     case M_YC:       put(r, c, cfg.notch ? "Notch" : "Comb", attr); break;
     case M_LOSS:     put(r, c, cfg.loss_nosig ? "No signal" : "Last frame", attr); break;
     case M_TEST:     put(r, c, test_pat ? "Colour bars" : "Off", attr); break;
-    case M_DEC:      put(r, c, dec_idle ? "Idle" : "Run", attr); break;
+    case M_DEC:      put(r, c, dec_mode == 2 ? "Idle" : dec_mode == 1 ? "FM only" : "Run", attr); break;
     case M_SAVE:     if ((int32_t)(saved_msg_until_ms - now_ms()) > 0) put(r, c, "sent to C5", attr); break;
     case M_LINK:     put(r, c, wt_state == WT_DONE ? (wt_bad ? "WIRING FAULT" : "wiring OK") : "not tested", attr); break;
     default: break;

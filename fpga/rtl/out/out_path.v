@@ -85,13 +85,16 @@ module out_path (
     endfunction
 
     // ------------------------------------------------------------------ line cache + fetch
-    // Pipelined (posA only changes at hc == 0): A = needed keys and slots, B = hit/miss per key,
-    // then the request. A 4-clock cool-down after each request/completion lets A/B catch up.
+    // Pipelined (posA only changes at hc == 0): A1 = needed keys (clamped), A2 = their slots
+    // (key mod 5), B = hit/miss per key, then the request. A 5-clock cool-down after each
+    // request/completion lets A/B catch up. Clamp and mod 5 in one clock failed timing by 3.7 ns
+    // at 74.25 MHz (MEASUREMENTS M75); ns/miss_r are first used at hc == 6.
     reg [9:0] tag [0:4];
     reg [4:0] tvalid;
     reg       fgen, pend_gen, fetching;
     reg [2:0] pend_slot;
     reg [2:0] cool;
+    reg [9:0] nk0 [0:4];
     reg [9:0] nk [0:4];
     reg [2:0] ns [0:4];
     reg [4:0] miss_r;
@@ -99,9 +102,11 @@ module out_path (
     reg [2:0] ms_r;
     integer j;
     always @(posedge clk) begin
-        for (j = 0; j < 5; j = j + 1) begin                            // stage A
-            nk[j] <= clampk(kf + j - 1, kmax);
-            ns[j] <= mod5(clampk(kf + j - 1, kmax));
+        for (j = 0; j < 5; j = j + 1)                                  // stage A1
+            nk0[j] <= clampk(kf + j - 1, kmax);
+        for (j = 0; j < 5; j = j + 1) begin                            // stage A2
+            nk[j] <= nk0[j];
+            ns[j] <= mod5(nk0[j]);
         end
         for (j = 0; j < 5; j = j + 1)                                  // stage B
             miss_r[j] <= !tvalid[ns[j]] || tag[ns[j]] != nk[j];
@@ -115,9 +120,9 @@ module out_path (
         if (rst) begin
             tvalid <= 5'd0; fetching <= 1'b0; fgen <= 1'b0; cool <= 3'd0;
         end else begin
-            if (frame_evt) begin tvalid <= 5'd0; fgen <= ~fgen; cool <= 3'd4; end
+            if (frame_evt) begin tvalid <= 5'd0; fgen <= ~fgen; cool <= 3'd5; end
             if (done && fetching) begin
-                fetching <= 1'b0; cool <= 3'd4;
+                fetching <= 1'b0; cool <= 3'd5;
                 if (pend_gen == fgen && !frame_evt) tvalid[pend_slot] <= 1'b1;
             end
             // new requests from line 741 on (after the frame event has settled)
@@ -221,12 +226,23 @@ module out_path (
     wire [10:0] xw  = aspect_169 ? 11'd1280 : 11'd960;
     wire signed [27:0] S_h = aspect_169 ? 28'sd36864 : 28'sd49152;
     wire signed [27:0] U0  = aspect_169 ? -28'sd14336 : -28'sd8192;
-    reg  signed [27:0] hacc;
-    wire signed [27:0] hcur = (hc == xs) ? U0 : hacc + S_h;
-    always @(posedge clk) hacc <= hcur;
+    // hcur(t) = (hc == xs) ? U0 : hcur(t-1) + S_h. The step and the +3 indices are registered a
+    // clock ahead (hnext), so the bank read addresses only see a select: computing them in the
+    // same clock left 0.4 ns at 74.25 MHz (MEASUREMENTS M75). Same values, same latency.
+    reg  signed [27:0] hsum;                  // hcur(t-1) + S_h
+    reg  [9:0] s4n; reg [8:0] sc4n;           // its +3 indices
+    wire       hstart = (hc == xs);
+    wire signed [27:0] hcur = hstart ? U0 : hsum;
+    wire signed [27:0] hnext = hcur + S_h;
+    wire signed [27:0] u0p = U0;
+    // (x + 3 * 2^16)[25:16] = x[25:16] + 3 exactly (the low 16 bits are untouched), so each +3
+    // index is one add in parallel with hnext rather than a second add after it
+    wire signed [27:0] h3y = hcur + S_h + 28'sd196608;     // + 3 << 16
+    wire signed [27:0] h3c = hcur + S_h + 28'sd393216;     // + 3 << 17
+    always @(posedge clk) begin hsum <= hnext; s4n <= h3y[25:16]; sc4n <= h3c[25:17]; end
     wire signed [27:0] ccur = hcur >>> 1;
-    wire [9:0] s4  = hcur[25:16] + 10'd3;     // (n - 1) + 4, n = floor(u) >= -1
-    wire [8:0] sc4 = ccur[24:16] + 9'd3;      // (m - 1) + 4
+    wire [9:0] s4  = hstart ? u0p[25:16] + 10'd3 : s4n;   // (n - 1) + 4, n = floor(u) >= -1
+    wire [8:0] sc4 = hstart ? u0p[25:17] + 9'd3 : sc4n;   // (m - 1) + 4
     wire       rpp = vc[0];
     reg  [7:0]  yq [0:3];
     reg  [15:0] cq [0:3];
@@ -276,7 +292,9 @@ module out_path (
     end
 
     // ------------------------------------------------------------------ YCbCr (BT.601 limited) -> RGB
-    reg signed [21:0] yy, rv, gu, gv, bu;
+    // constant coefficients with 3-5 set bits: shift-and-add logic, keeping the DSP blocks for
+    // the variable multiplies (Gowin attribute; MEASUREMENTS M75)
+    reg signed [21:0] yy, rv, gu, gv, bu /* synthesis syn_dspstyle = "logic" */;
     always @(posedge clk) begin
         yy <= ($signed({1'b0, Y}) - 22'sd16) * 22'sd1192;
         rv <= ($signed({1'b0, Cr}) - 22'sd128) * 22'sd1634;

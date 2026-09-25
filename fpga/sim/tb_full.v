@@ -10,19 +10,27 @@ module tb_full;
     parameter HEX = "data/full_ntsc.hex";
     parameter CV_OUT = "data/full_ntsc_cv.txt";
     parameter OUT = "data/full_ntsc_rgb.txt";
+    parameter GAP = 1;                  // 1: the receive chain runs on the pixel clock (74.25 MHz)
+                                        //    with one sample per 74.25/40 clocks, as in top.v (default)
 
     reg lclk = 0, pclk = 0;
-    always #12.5 lclk = ~lclk;
+    always #(GAP ? 6.734 : 12.5) lclk = ~lclk;
     always #6.734 pclk = ~pclk;
     reg lrst = 1, prst = 1;
 
     // ---------------- link domain ----------------
     reg [7:0] mem [0:N-1];
     initial $readmemh(HEX, mem);
-    reg [7:0] iq = 0; integer ii = 0;
-    always @(posedge lclk) if (!lrst) begin iq <= (ii < N) ? mem[ii] : 8'h00; ii <= ii + 1; end
+    reg [7:0] iq = 0; integer ii = 0, acc = 0; reg iq_valid = 0;
+    always @(posedge lclk) if (!lrst) begin
+        acc = acc + 40000;
+        if (!GAP || acc >= 74250) begin
+            if (GAP) acc = acc - 74250;
+            iq <= (ii < N) ? mem[ii] : 8'h00; ii <= ii + 1; iq_valid <= 1'b1;
+        end else iq_valid <= 1'b0;
+    end
     wire signed [17:0] f20; wire f20_valid, click;
-    fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) u_fm (.clk(lclk), .rst(lrst), .iq(iq), .iq_valid(1'b1),
+    fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) u_fm (.clk(lclk), .rst(lrst), .iq(iq), .iq_valid(iq_valid),
         .f20(f20), .f20_valid(f20_valid), .click(click));
     wire signed [11:0] cv; wire cv_valid, line_start, field_odd, field_start, is_pal, vlocked;
     wire [10:0] cv_x; wire [9:0] line_no; wire signed [17:0] tip, blank;

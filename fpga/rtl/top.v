@@ -104,7 +104,13 @@ module top (
     end
     assign debug = {mode_changes, clk_restarts, 2'd0, clk_cause, mode_want, mode_req, 8'd0};
 
-    // ================================================================== lclk: receive chain
+    // ================================================================== lclk: link capture only
+    // Only the capture runs on the STROBE clock. Logic clocked by the asynchronous STROBE disturbed
+    // the HDMI output (the capture card lost lock: 4 copies of fm_frontend on STROBE broke the
+    // colour-bar bitstream, the same 4 copies on pclk did not; MEASUREMENTS M74). So each sample
+    // crosses into the pixel-clock domain through a 16-entry FIFO right after capture, and the
+    // receive chain runs on pclk (74.25 / 74.176 MHz) with a sample-valid enable (~54 % duty).
+    // The chain is clock-rate independent: sim/tb_full GAP=1 gives a bit-identical frame.
     wire lclk = link_strobe;
     reg [24:0] win_cnt = 0; reg win_tog = 0;           // 1 s windows from the crystal
     always @(posedge clk27) if (win_cnt == 25'd26_999_999) begin win_cnt <= 0; win_tog <= ~win_tog; end
@@ -113,20 +119,36 @@ module top (
     always @(posedge lclk) if (lrst_cnt != 0) lrst_cnt <= lrst_cnt - 4'd1;
     wire lrst = lrst_cnt != 0;
 
-    // settings into the link domain
-    wire [1:0]  std_l; wire notch_l, test_l, idle_l; wire [15:0] hue_l; wire [7:0] sat_l, bri_l, con_l;
-    cdc_bus #(.W(45)) u_set_l (.clk(lclk), .d({set0[8], set0[7], set0[1:0], set0[6], set1[23:0], set2[15:0]}),
-                               .q({idle_l, test_l, std_l, notch_l, sat_l, hue_l, con_l, bri_l}));
-    // menu "Decoder: Idle" (diagnostics): hold the receive DSP chain (fm_frontend, video_timing,
-    // chroma_dec) in reset, e.g. to see whether its activity disturbs the HDMI output
-    wire drst = lrst | idle_l;
+    reg [3:0] prst_cnt = 4'hF;
+    always @(posedge pclk or negedge plocked)
+        if (!plocked) prst_cnt <= 4'hF; else if (prst_cnt != 0) prst_cnt <= prst_cnt - 4'd1;
+    wire prst = prst_cnt != 0;
+
+    // settings into the receive (pixel-clock) domain
+    wire [1:0]  std_l; wire notch_l, test_l, idle_l, fmonly_l; wire [15:0] hue_l; wire [7:0] sat_l, bri_l, con_l;
+    cdc_bus #(.W(46)) u_set_l (.clk(pclk), .d({set0[9], set0[8], set0[7], set0[1:0], set0[6], set1[23:0], set2[15:0]}),
+                               .q({fmonly_l, idle_l, test_l, std_l, notch_l, sat_l, hue_l, con_l, bri_l}));
+    // menu "Decoder" (diagnostics): Idle holds the receive DSP chain (fm_frontend, video_timing,
+    // chroma_dec) in reset; FM only keeps fm_frontend running and holds the rest. Used to find
+    // which block's activity disturbs the HDMI output (MEASUREMENTS M73).
+    wire drst = prst | idle_l;               // fm_frontend
+    wire vrst = prst | idle_l | fmonly_l;    // video_timing, chroma_dec
 
     // capture in fabric flip-flops. The pad input register (nextpnr --vopt ireg_in_iob) reads a
     // constant 0 with this toolchain (docs/MEASUREMENTS.md M61), so it is not used. STROBE is the
-    // source-synchronous clock, so no synchroniser is needed. A LUT1 buffer per bit adds delay
-    // before the phase-LUT BSRAM address pins, which otherwise miss hold by ~0.12 ns.
-    reg [7:0] iq_cap, iq_r;
-    always @(posedge lclk) begin iq_cap <= link_d; iq_r <= iq_cap; end
+    // source-synchronous clock, so no synchroniser is needed.
+    reg [7:0] iq_cap;
+    always @(posedge lclk) iq_cap <= link_d;
+    // STROBE -> pclk: pclk (74 MHz) reads faster than STROBE writes (40 MHz), so the FIFO stays
+    // near empty; while pclk is held in reset (PLL restart) it fills and further writes are dropped
+    wire lf_empty; wire [7:0] lf_data;
+    async_fifo #(.WIDTH(8), .AW(4)) u_lfifo (
+        .wclk(lclk), .wrst(lrst), .wr_en(1'b1), .wr_data(iq_cap), .full(), .wr_level(),
+        .rclk(pclk), .rrst(prst), .rd_en(!lf_empty), .rd_data(lf_data), .empty(lf_empty), .rd_level());
+    // one sample per pop; a LUT1 buffer per bit adds delay before the phase-LUT BSRAM address
+    // pins, which otherwise miss hold by ~0.12 ns
+    reg [7:0] iq_r; reg iq_v = 1'b0;
+    always @(posedge pclk) begin iq_r <= lf_data; iq_v <= !lf_empty && !prst; end
     wire [7:0] iq;
     genvar gi;
     generate for (gi = 0; gi < 8; gi = gi + 1) begin : iq_dly
@@ -135,21 +157,21 @@ module top (
 
     wire signed [17:0] f20; wire f20_valid, click;
     fm_frontend #(.LUT_FILE("rtl/dsp/phase_lut.hex")) u_fm (
-        .clk(lclk), .rst(drst), .iq(iq), .iq_valid(1'b1),
+        .clk(pclk), .rst(drst), .iq(iq), .iq_valid(iq_v),
         .f20(f20), .f20_valid(f20_valid), .click(click));
 
     wire signed [11:0] cv; wire cv_valid; wire [10:0] cv_x;
     wire line_start, field_odd, field_start, pal_det, vlocked;
     wire [9:0] line_no; wire signed [17:0] meas_tip, meas_blank;
     video_timing u_vt (
-        .clk(lclk), .rst(drst), .f(f20), .f_valid(f20_valid),
+        .clk(pclk), .rst(vrst), .f(f20), .f_valid(f20_valid),
         .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x), .line_start(line_start), .line_no(line_no),
         .field_odd(field_odd), .field_start(field_start), .is_pal(pal_det), .locked(vlocked),
         .meas_tip(meas_tip), .meas_blank(meas_blank), .dbg(vt_dbg), .hsync_pulse(vt_hs), .broad_pulse(vt_broad));
     wire [23:0] vt_dbg; wire vt_hs, vt_broad;
     // per-second H sync / broad pulse counts (same 1 s windows as the link monitor)
     reg [2:0] vw = 0; reg [15:0] hs_c = 0, br_c = 0, hs_n = 0, br_n = 0;
-    always @(posedge lclk) begin
+    always @(posedge pclk) begin
         vw <= {vw[1:0], win_tog};
         if (vw[2] ^ vw[1]) begin hs_n <= hs_c; br_n <= br_c; hs_c <= 0; br_c <= 0; end
         else begin
@@ -163,7 +185,7 @@ module top (
     wire signed [11:0] y_c; wire signed [15:0] u_c, v_c; wire [10:0] x_c;
     wire c_valid, killed, pal_sw_neg;
     chroma_dec #(.SIN_FILE("rtl/dsp/sin_lut.hex"), .COS_FILE("rtl/dsp/cos_lut.hex")) u_chroma (
-        .clk(lclk), .rst(drst), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x), .is_pal(is_pal),
+        .clk(pclk), .rst(vrst), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x), .is_pal(is_pal),
         .comb(~notch_l), .hue(hue_l), .sat(sat_l),
         .y_out(y_c), .u_out(u_c), .v_out(v_c), .x_out(x_c), .out_valid(c_valid),
         .killed(killed), .pal_sw_neg(pal_sw_neg));
@@ -172,12 +194,18 @@ module top (
     // (the whole frame-buffer / SDRAM / scaler / HDMI path runs as with real video)
     wire signed [11:0] ts_y; wire signed [15:0] ts_u, ts_v; wire [10:0] ts_x; wire [9:0] ts_line;
     wire ts_valid, ts_odd;
-    test_src u_tsrc (.clk(lclk), .rst(lrst | ~test_l), .y(ts_y), .u(ts_u), .v(ts_v), .x(ts_x),
+    // 40 MS/s sample tick from the pixel clock (the test pattern needs no C5)
+    reg [16:0] ts_acc = 0; reg ts_en = 1'b0;
+    always @(posedge pclk) begin
+        ts_en <= (ts_acc + 17'd40000 >= 17'd74250);
+        ts_acc <= (ts_acc + 17'd40000 >= 17'd74250) ? ts_acc + 17'd40000 - 17'd74250 : ts_acc + 17'd40000;
+    end
+    test_src u_tsrc (.clk(pclk), .rst(prst | ~test_l), .en(ts_en), .y(ts_y), .u(ts_u), .v(ts_v), .x(ts_x),
                      .valid(ts_valid), .line(ts_line), .odd(ts_odd));
 
     wire [35:0] ff_wdata; wire ff_wr;
     fb_format u_fmt (
-        .clk(lclk), .rst(lrst),
+        .clk(pclk), .rst(prst),
         .y_in(test_l ? ts_y : y_c), .u_in(test_l ? ts_u : u_c), .v_in(test_l ? ts_v : v_c),
         .x_in(test_l ? ts_x : x_c), .in_valid(test_l ? ts_valid : c_valid),
         .tag_strobe(test_l ? (ts_valid && ts_x == 11'd0) : (cv_valid && cv_x == 11'd0)),
@@ -197,19 +225,14 @@ module top (
                      .rclk(clk27), .raddr(cap_addr), .rdata(cap_data));
 
     reg [15:0] click_cnt = 0;
-    always @(posedge lclk) if (click) click_cnt <= click_cnt + 16'd1;
+    always @(posedge pclk) if (click) click_cnt <= click_cnt + 16'd1;
     reg [23:0] lbeat = 0;
     always @(posedge lclk) lbeat <= lbeat + 24'd1;
 
     // ================================================================== pclk: frame buffer and output
-    reg [3:0] prst_cnt = 4'hF;
-    always @(posedge pclk or negedge plocked)
-        if (!plocked) prst_cnt <= 4'hF; else if (prst_cnt != 0) prst_cnt <= prst_cnt - 4'd1;
-    wire prst = prst_cnt != 0;
-
     wire [35:0] ff_rdata; wire ff_empty, ff_full, ff_pop; wire [9:0] ff_rlevel, ff_wlevel;
     async_fifo #(.WIDTH(36), .AW(9)) u_fifo (
-        .wclk(lclk), .wrst(lrst), .wr_en(ff_wr), .wr_data(ff_wdata), .full(ff_full), .wr_level(ff_wlevel),
+        .wclk(pclk), .wrst(prst), .wr_en(ff_wr), .wr_data(ff_wdata), .full(ff_full), .wr_level(ff_wlevel),
         .rclk(pclk), .rrst(prst), .rd_en(ff_pop), .rd_data(ff_rdata), .empty(ff_empty), .rd_level(ff_rlevel));
 
     wire sd_req, sd_we, sd_ack, sd_wd_pop, sd_rd_valid, sd_ready;
@@ -229,7 +252,7 @@ module top (
 
     // diagnostics: fb_ctrl state snapshot and FIFO overflows (writes dropped while full)
     reg  [7:0] ff_ovf = 0;
-    always @(posedge lclk) if (lrst) ff_ovf <= 0; else if (ff_wr && ff_full && ff_ovf != 8'hFF) ff_ovf <= ff_ovf + 8'd1;
+    always @(posedge pclk) if (prst) ff_ovf <= 0; else if (ff_wr && ff_full && ff_ovf != 8'hFF) ff_ovf <= ff_ovf + 8'd1;
     cdc_bus #(.W(8)) u_ovf_k (.clk(clk27), .d(ff_ovf), .q(ovf_k));
     cdc_bus #(.W(8)) u_fbd_k (.clk(clk27), .d(fb_dbg), .q(fbd_k));
 

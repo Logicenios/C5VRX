@@ -23,14 +23,17 @@ module fm_frontend #(
     // ---- stage 0: LUT (synchronous ROM) ----
     reg [24:0] lut [0:255];
     initial $readmemh(LUT_FILE, lut);
-    reg [24:0] lut_q;
-    reg        v0;
+    reg [24:0] lut_q, lut_r;
+    reg        vq, v0;
     always @(posedge clk) begin
         lut_q <= lut[iq];
-        v0 <= iq_valid & ~rst;
+        vq <= iq_valid & ~rst;
+        // extra register after the block RAM: its clock-to-output fed the discriminator / click
+        // logic directly (0.5 ns slack at 74.25 MHz; MEASUREMENTS M75)
+        lut_r <= lut_q; v0 <= vq & ~rst;
     end
-    wire [15:0] ph = lut_q[15:0];
-    wire [8:0]  r2 = lut_q[24:16];
+    wire [15:0] ph = lut_r[15:0];
+    wire [8:0]  r2 = lut_r[24:16];
 
     // ---- stage 1: discriminator + click repair (one-sample look-ahead) ----
     reg [15:0] ph_prev;
@@ -70,8 +73,13 @@ module fm_frontend #(
     reg        y_valid_d;
     always @(posedge clk) y_valid_d <= y_valid & ~rst;
     integer k;
-    wire signed [21:0] hb_acc = -$signed(yr[0]) + 22'sd9 * $signed(yr[2]) + 22'sd16 * $signed(yr[3])
-                                + 22'sd9 * $signed(yr[4]) - $signed(yr[6]);
+    // the 5-term sum in two clocks: partial sums registered from yr at the evaluation clock (yr
+    // may shift again on the next clock), added the clock after
+    wire signed [21:0] hb_a = 22'sd16 * $signed(yr[3]) - $signed(yr[0]) - $signed(yr[6]);
+    wire signed [21:0] hb_b = 22'sd9 * ($signed(yr[2]) + $signed(yr[4]));
+    reg  signed [21:0] hb_ra, hb_rb;
+    reg        hb_v;
+    wire signed [21:0] hb_acc = hb_ra + hb_rb;
     always @(posedge clk) begin
         z_valid <= 1'b0;
         if (rst) begin
@@ -83,7 +91,9 @@ module fm_frontend #(
             yidx <= yidx + 1;
         end
         // yr now holds y[j..j-6] for j = yidx-1; evaluate one clock after the shift
-        if (!rst && y_valid_d && yidx >= 7 && yidx[0] == 1'b1) begin
+        hb_v <= !rst && y_valid_d && yidx >= 7 && yidx[0] == 1'b1;
+        hb_ra <= hb_a; hb_rb <= hb_b;
+        if (hb_v && !rst) begin
             z <= hb_acc >>> 5;
             z_valid <= 1'b1;
         end
