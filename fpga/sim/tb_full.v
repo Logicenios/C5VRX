@@ -30,7 +30,7 @@ module tb_full;
         end else iq_valid <= 1'b0;
     end
     wire signed [17:0] f20; wire f20_valid, click;
-    fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) u_fm (.clk(lclk), .rst(lrst), .deemph(2'd0), .iq(iq), .iq_valid(iq_valid),
+    fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) u_fm (.clk(lclk), .rst(lrst), .deemph(2'd0), .lpf(1'b0), .iq(iq), .iq_valid(iq_valid),
         .f20(f20), .f20_valid(f20_valid), .click(click));
     wire signed [11:0] cv; wire cv_valid, line_start, field_odd, field_start, is_pal, vlocked;
     wire [10:0] cv_x; wire [9:0] line_no; wire signed [17:0] tip, blank;
@@ -80,7 +80,8 @@ module tb_full;
         else hc <= hc + 11'd1;
     end
     wire [23:0] rgb; wire [15:0] late;
-    out_path u_out (.clk(pclk), .rst(prst), .hc(hc), .vc(vc), .aspect_169(1'b0), .weave_req(1'b0),
+    wire [10:0] hc_next = (hc == 11'd1649) ? 11'd0 : hc + 11'd1;
+    out_path u_out (.clk(pclk), .rst(prst), .hc(hc), .hc_next(hc_next), .vc(vc), .aspect_169(1'b0), .weave_req(1'b0),
         .dim(1'b0), .nosig_screen(1'b0),
         .frame_evt(frame_evt), .req(req), .req_line(req_line), .req_prev(req_prev), .req_slot(req_slot),
         .done(done), .busy(busy), .cur_odd(cur_odd), .cur_pal(cur_pal), .cur_valid(cur_valid),

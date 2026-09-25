@@ -82,8 +82,9 @@ module tb_scaler;
         else hc <= hc + 11'd1;
     end
     wire [23:0] rgb; wire [15:0] late;
+    wire [10:0] hc_next = (hc == 11'd1649) ? 11'd0 : hc + 11'd1;
     out_path u_out (
-        .clk(pclk), .rst(prst), .hc(hc), .vc(vc), .aspect_169(ASPECT[0]), .weave_req(WEAVE[0]),
+        .clk(pclk), .rst(prst), .hc(hc), .hc_next(hc_next), .vc(vc), .aspect_169(ASPECT[0]), .weave_req(WEAVE[0]),
         .dim(1'b0), .nosig_screen(1'b0),
         .frame_evt(frame_evt), .req(req), .req_line(req_line), .req_prev(req_prev), .req_slot(req_slot),
         .done(done), .busy(busy), .cur_odd(cur_odd), .cur_pal(cur_pal), .cur_valid(cur_valid),

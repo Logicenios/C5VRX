@@ -4,7 +4,7 @@
   python3 tools/gowin_timing.py [impl/pnr]
 Prints the per-clock Fmax, the number of failing setup / hold paths among the reported ones
 (gowin/tangnano20k.sdc asks for the 700 worst setup paths), and the worst paths grouped by
-start and end register. Exit status 1 if any reported path has negative slack.
+start and end register (or, when none fail, the tightest ones). Exit status 1 if any reported path has negative slack.
 """
 import collections
 import html
@@ -21,6 +21,7 @@ for m in re.finditer(r"\d+ (\S+) ([\d.]+)\(MHz\) ([\d.]+)\(MHz\)", t[t.find("Max
 
 paths = (d / "top.timing_paths").read_text().split("=====")
 fails = {"SETUP": [], "HOLD": []}
+tight = []
 for p in paths:
     lines = [x.strip() for x in p.strip().splitlines() if x.strip()]
     if len(lines) < 4 or lines[0] not in fails:
@@ -29,6 +30,8 @@ for p in paths:
     nodes = [x for x in lines[4:] if not re.fullmatch(r"-?[\d.]+", x)]
     if slack < 0:
         fails[lines[0]].append((slack, nodes[0], nodes[-1]))
+    elif lines[0] == "SETUP":
+        tight.append((slack, nodes[0], nodes[-1]))
 for kind, f in fails.items():
     print(f"{len(f)} failing {kind.lower()} paths")
     groups = collections.defaultdict(list)
@@ -36,4 +39,8 @@ for kind, f in fails.items():
         groups[(re.sub(r"(_\d+)?(_s\d*)?$", "", a), re.sub(r"(_\d+)?(_s\d*)?$", "", b))].append(slack)
     for (a, b), v in sorted(groups.items(), key=lambda kv: min(kv[1]))[:10]:
         print(f"  {min(v):7.2f} ns  {len(v):3d}  {a} -> {b}")
+if not fails["SETUP"] and tight:
+    print("tightest setup paths:")
+    for slack, a, b in sorted(tight)[:6]:
+        print(f"  {slack:7.2f} ns  {a} -> {b}")
 sys.exit(1 if fails["SETUP"] or fails["HOLD"] else 0)

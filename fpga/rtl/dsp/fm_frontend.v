@@ -1,6 +1,6 @@
 // FM front end, one I/Q byte per clock (link strobe, 40 MS/s).
 //   phase LUT -> adjacent discriminator (k = 1, +-20 MHz, THEORY §5.1/§5.2)
-//   -> click repair (THEORY §10) -> halfband 2:1 -> de-emphasis (THEORY §6.3)
+//   -> click repair (THEORY §10) -> halfband 2:1 -> de-emphasis (THEORY §6.3) -> optional video low-pass
 // Bit-exact with fpga/model/ref.py fm_frontend(). Frequency word: 1 LSB = 610.35 Hz.
 `default_nettype none
 module fm_frontend #(
@@ -12,6 +12,7 @@ module fm_frontend #(
     input  wire               clk,
     input  wire               rst,
     input  wire [1:0]         deemph,      // de-emphasis roof: 0 13.4 dB (NTSC), 1 8 dB, 2 4 dB, 3 off
+    input  wire               lpf,         // 1: video low-pass after the de-emphasis
     input  wire [7:0]         iq,          // {I[3:0], Q[3:0]}
     input  wire               iq_valid,
     output reg signed [17:0]  f20,         // de-emphasised frequency, 20 MS/s
@@ -97,6 +98,53 @@ module fm_frontend #(
         end
     end
 
+    // stage 4 (video low-pass) registers, declared here because stage 3's output selects them
+    reg               lpf_r;
+    reg signed [17:0] tl [0:24];
+    reg signed [18:0] ps [0:12];
+    reg signed [31:0] pa0, pb0;
+    reg signed [31:0] pa1, pb1;
+    reg signed [31:0] pa2, pb2;
+    reg signed [31:0] pa3, pb3;
+    reg signed [31:0] pa4, pb4;
+    reg signed [31:0] pa5, pb5;
+    reg signed [31:0] pa6, pb6;
+    reg signed [31:0] pa7, pb7;
+    reg signed [31:0] pa8, pb8;
+    reg signed [31:0] pa9, pb9;
+    reg signed [31:0] pa10, pb10;
+    reg signed [31:0] pa11, pb11;
+    reg signed [31:0] pa12, pb12;
+    reg signed [31:0] pr0;
+    reg signed [31:0] pr1;
+    reg signed [31:0] pr2;
+    reg signed [31:0] pr3;
+    reg signed [31:0] pr4;
+    reg signed [31:0] pr5;
+    reg signed [31:0] pr6;
+    reg signed [31:0] pr7;
+    reg signed [31:0] pr8;
+    reg signed [31:0] pr9;
+    reg signed [31:0] pr10;
+    reg signed [31:0] pr11;
+    reg signed [31:0] pr12;
+    reg signed [34:0] g0, g1, g2, g3;
+    reg               l0_v, l1_v, l2_v, l3_v, l4_v, l5_v;
+    wire signed [31:0] pw0 = ps[0];
+    wire signed [31:0] pw1 = ps[1];
+    wire signed [31:0] pw2 = ps[2];
+    wire signed [31:0] pw3 = ps[3];
+    wire signed [31:0] pw4 = ps[4];
+    wire signed [31:0] pw5 = ps[5];
+    wire signed [31:0] pw6 = ps[6];
+    wire signed [31:0] pw7 = ps[7];
+    wire signed [31:0] pw8 = ps[8];
+    wire signed [31:0] pw9 = ps[9];
+    wire signed [31:0] pw10 = ps[10];
+    wire signed [31:0] pw11 = ps[11];
+    wire signed [31:0] pw12 = ps[12];
+    reg  signed [34:0] lsr;
+    wire signed [34:0] lout = lsr >>> 12;
     // ---- stage 3: de-emphasis, y = (B0 x + B1 x1) * 16 + A1N y1 >> 14 (y with 4 frac bits) ----
     // Q14 coefficients per mode (ref.DEEMPH_ROOF / ref.deemph_coeffs; same pole, tau_p = 0.8162 us).
     // The Tank II has little or no pre-emphasis (MEASUREMENTS M76), so the NTSC roof over-filters.
@@ -129,10 +177,74 @@ module fm_frontend #(
             end
             if (d_v) begin
                 yf1 <= yf_w[23:0];
-                f20 <= yf_w[21:4];
-                f20_valid <= 1'b1;
+                if (!lpf_r) begin f20 <= yf_w[21:4]; f20_valid <= 1'b1; end
             end
+            if (lpf_r && l5_v) begin f20 <= lout[17:0]; f20_valid <= 1'b1; end
         end
+    end
+    // ---- stage 4: video low-pass (menu "Noise filter"), 25-tap linear-phase FIR in Q12 ----
+    // Coefficients ref.LPF_C (remez: flat to 5.3 MHz, -33 dB from 7 MHz, unity DC gain). The DSP
+    // blocks are full, so the constant products are written as canonical signed-digit shift-and-add
+    // terms (a generic '*' became a slow array multiplier in logic). Fully pipelined: shift on
+    // d_v -> pair pre-adds -> product halves -> products -> four partial sums -> rounded total (registered). With the filter off
+    // f20 is the de-emphasis output exactly as before; with it on the stream stays one output per
+    // sample (12 samples of signal delay, the same for sync and picture).
+    integer li;
+    always @(posedge clk) begin
+        lpf_r <= lpf;
+        l0_v <= d_v && !rst; l1_v <= l0_v; l2_v <= l1_v; l3_v <= l2_v; l4_v <= l3_v; l5_v <= l4_v;
+        if (rst) begin
+            for (li = 0; li < 25; li = li + 1) tl[li] <= 0;
+        end else if (d_v && lpf_r) begin      // held while off: no switching activity (M78)
+            tl[0] <= yf_w[21:4];
+            for (li = 1; li < 25; li = li + 1) tl[li] <= tl[li-1];
+        end
+        if (l0_v) begin
+            ps[0] <= tl[0] + tl[24];
+            ps[1] <= tl[1] + tl[23];
+            ps[2] <= tl[2] + tl[22];
+            ps[3] <= tl[3] + tl[21];
+            ps[4] <= tl[4] + tl[20];
+            ps[5] <= tl[5] + tl[19];
+            ps[6] <= tl[6] + tl[18];
+            ps[7] <= tl[7] + tl[17];
+            ps[8] <= tl[8] + tl[16];
+            ps[9] <= tl[9] + tl[15];
+            ps[10] <= tl[10] + tl[14];
+            ps[11] <= tl[11] + tl[13];
+            ps[12] <= tl[12];
+        end
+        pa0 <= (-(pw0 <<< 2)); pb0 <= 32'sd0;   // -4
+        pa1 <= ((-pw1) + (-(pw1 <<< 4))); pb1 <= (pw1 <<< 6);   // 47
+        pa2 <= (-pw2); pb2 <= (pw2 <<< 4);   // 15
+        pa3 <= (-(pw3 <<< 2)); pb3 <= (-(pw3 <<< 6));   // -68
+        pa4 <= (pw4 <<< 3); pb4 <= (pw4 <<< 5);   // 40
+        pa5 <= ((-(pw5 <<< 1)) + (-(pw5 <<< 3))); pb5 <= ((-(pw5 <<< 5)) + (pw5 <<< 7));   // 86
+        pa6 <= (pw6 + (-(pw6 <<< 4))); pb6 <= (-(pw6 <<< 7));   // -143
+        pa7 <= ((-pw7) + (pw7 <<< 3)); pb7 <= (-(pw7 <<< 5));   // -25
+        pa8 <= ((-(pw8 <<< 1)) + (-(pw8 <<< 3))); pb8 <= ((pw8 <<< 5) + (pw8 <<< 8));   // 278
+        pa9 <= ((-(pw9 <<< 2)) + (-(pw9 <<< 4))); pb9 <= ((pw9 <<< 6) + (-(pw9 <<< 8)));   // -212
+        pa10 <= ((pw10 <<< 2) + (-(pw10 <<< 4))); pb10 <= ((pw10 <<< 7) + (-(pw10 <<< 9)));   // -396
+        pa11 <= (((-pw11) + (pw11 <<< 2)) + (-(pw11 <<< 6))); pb11 <= ((pw11 <<< 8) + (pw11 <<< 10));   // 1219
+        pa12 <= (((-(pw12 <<< 1)) + (-(pw12 <<< 3))) + (-(pw12 <<< 7))); pb12 <= ((pw12 <<< 9) + (pw12 <<< 11));   // 2422
+        pr0 <= pa0 + pb0;
+        pr1 <= pa1 + pb1;
+        pr2 <= pa2 + pb2;
+        pr3 <= pa3 + pb3;
+        pr4 <= pa4 + pb4;
+        pr5 <= pa5 + pb5;
+        pr6 <= pa6 + pb6;
+        pr7 <= pa7 + pb7;
+        pr8 <= pa8 + pb8;
+        pr9 <= pa9 + pb9;
+        pr10 <= pa10 + pb10;
+        pr11 <= pa11 + pb11;
+        pr12 <= pa12 + pb12;
+        g0 <= (pr0 + pr1) + (pr2 + pr3);
+        g1 <= (pr4 + pr5) + (pr6 + pr7);
+        g2 <= (pr8 + pr9) + (pr10 + pr11);
+        g3 <= pr12 + 32'sd2048;          // rounding
+        lsr <= (g0 + g1) + (g2 + g3);
     end
 endmodule
 `default_nettype wire

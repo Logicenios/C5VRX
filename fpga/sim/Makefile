@@ -39,7 +39,7 @@ $(D)/ntsc_field.hex: | $(D)
 $(D)/pal_field.hex: | $(D)
 	cd .. && $(PY) model/iqsynth.py --std pal --seconds 0.035 --out sim/$(D)/pal_field
 
-# ---- FM front end: bit-exact vs model/ref.py (strong NTSC and weak, clicky PAL; every de-emphasis mode) ----
+# ---- FM front end: bit-exact vs model/ref.py (strong NTSC and weak, clicky PAL; every de-emphasis mode, low-pass) ----
 fe: $(D)/ntsc_bars.hex $(D)/weak.hex
 	$(IV) -o fe.vvp tb_fm_frontend.v ../rtl/dsp/fm_frontend.v
 	vvp -n fe.vvp > /dev/null
@@ -54,6 +54,12 @@ fe: $(D)/ntsc_bars.hex $(D)/weak.hex
 	  vvp -n fe_weak$$m.vvp > /dev/null && \
 	  (cd .. && $(PY) model/ref.py frontend sim/$(D)/weak.hex sim/$(D)/weak_fe_ref$$m.txt $$m > /dev/null) && \
 	  echo "de-emphasis mode $$m:" && $(PY) cmp_prefix.py $(D)/weak_fe_rtl$$m.txt $(D)/weak_fe_ref$$m.txt || exit 1; \
+	done
+	@for m in 2 3; do \
+	  $(IV) -Ptb_fm_frontend.HEX='"$(D)/weak.hex"' -Ptb_fm_frontend.DEEMPH=$$m -Ptb_fm_frontend.LPF=1 -Ptb_fm_frontend.OUT='"$(D)/weak_fe_rtl'$$m'l.txt"' -o fe_weak$$m'l'.vvp tb_fm_frontend.v ../rtl/dsp/fm_frontend.v && \
+	  vvp -n fe_weak$$m'l'.vvp > /dev/null && \
+	  (cd .. && $(PY) model/ref.py frontend sim/$(D)/weak.hex sim/$(D)/weak_fe_ref$$m'l'.txt $$m 1 > /dev/null) && \
+	  echo "de-emphasis mode $$m + video low-pass:" && $(PY) cmp_prefix.py $(D)/weak_fe_rtl$$m'l'.txt $(D)/weak_fe_ref$$m'l'.txt || exit 1; \
 	done
 
 # ---- sync/levels/resampler on one field, then chroma: bit-exact vs model/chroma_ref.py ----
@@ -101,13 +107,17 @@ linkmon: | $(D)
 	vvp -n lm_edge.vvp | tee -a $(D)/linkmon.log | grep tb_link_mon
 	[ $$(grep -c PASS $(D)/linkmon.log) -eq 2 ]
 
-# ---- recorded Tank II PAL signal (vectors/README.md): fm_frontend + video_timing must lock ----
+# ---- recorded Tank II PAL signal (vectors/README.md): fm_frontend + video_timing must lock (also 4 dB + low-pass) ----
 real: | $(D)
 	$(PY) -c "b=[l for l in open('vectors/tank2_pal_10lines.hex') if l.strip()]; open('$(D)/tank2_x5.hex','w').write(''.join(b*5))"
 	$(IV) -Ptb_chain_a.N=128000 -Ptb_chain_a.HEX='"$(D)/tank2_x5.hex"' -Ptb_chain_a.OUT='"$(D)/tank2_cv.txt"' \
 	  -o real.vvp tb_chain_a.v ../rtl/dsp/fm_frontend.v ../rtl/dsp/video_timing.v
 	vvp -n real.vvp | tee $(D)/real.log | grep '^end'
 	grep -q 'locked=1 pal=1' $(D)/real.log
+	$(IV) -Ptb_chain_a.N=128000 -Ptb_chain_a.DEEMPH=2 -Ptb_chain_a.LPF=1 -Ptb_chain_a.HEX='"$(D)/tank2_x5.hex"' \
+	  -Ptb_chain_a.OUT='"$(D)/tank2_lpf_cv.txt"' -o real_lpf.vvp tb_chain_a.v ../rtl/dsp/fm_frontend.v ../rtl/dsp/video_timing.v
+	vvp -n real_lpf.vvp | tee $(D)/real_lpf.log | grep '^end'
+	grep -q 'locked=1 pal=1' $(D)/real_lpf.log
 
 # ---- frame buffer: field buffering, no tearing, tap lines, rate mismatch both ways ----
 FB_CFG := n50b:-GWEAVE=0 n50w:-GWEAVE=1 p60b:-GIN_PAL=1+-GOUT50=0 p60w:-GIN_PAL=1+-GOUT50=0+-GWEAVE=1

@@ -25,6 +25,7 @@ module out_path (
     input  wire        clk,
     input  wire        rst,
     input  wire [10:0] hc,
+    input  wire [10:0] hc_next,        // hc of the next clock (hdmi_tx)
     input  wire [9:0]  vc,
     // settings (quasi-static)
     input  wire        aspect_169,     // 1 = stretch to 1280
@@ -231,7 +232,11 @@ module out_path (
     // same clock left 0.4 ns at 74.25 MHz (MEASUREMENTS M75). Same values, same latency.
     reg  signed [27:0] hsum;                  // hcur(t-1) + S_h
     reg  [9:0] s4n; reg [8:0] sc4n;           // its +3 indices
-    wire       hstart = (hc == xs);
+    // hstart is registered from hc_next: the comparison fed the line-bank read addresses through
+    // the index mux and adders in one clock, the tightest path at 74.25 MHz (MEASUREMENTS M78)
+    reg        hstart = 1'b0;
+    reg  [9:0] s4s; reg [8:0] sc4s;          // the +3 indices at the line start (U0 is quasi-static)
+    always @(posedge clk) begin hstart <= (hc_next == xs); s4s <= U0[25:16] + 10'd3; sc4s <= U0[25:17] + 9'd3; end
     wire signed [27:0] hcur = hstart ? U0 : hsum;
     wire signed [27:0] hnext = hcur + S_h;
     wire signed [27:0] u0p = U0;
@@ -241,8 +246,8 @@ module out_path (
     wire signed [27:0] h3c = hcur + S_h + 28'sd393216;     // + 3 << 17
     always @(posedge clk) begin hsum <= hnext; s4n <= h3y[25:16]; sc4n <= h3c[25:17]; end
     wire signed [27:0] ccur = hcur >>> 1;
-    wire [9:0] s4  = hstart ? u0p[25:16] + 10'd3 : s4n;   // (n - 1) + 4, n = floor(u) >= -1
-    wire [8:0] sc4 = hstart ? u0p[25:17] + 9'd3 : sc4n;   // (m - 1) + 4
+    wire [9:0] s4  = hstart ? s4s : s4n;    // (n - 1) + 4, n = floor(u) >= -1
+    wire [8:0] sc4 = hstart ? sc4s : sc4n;  // (m - 1) + 4
     wire       rpp = vc[0];
     reg  [7:0]  yq [0:3];
     reg  [15:0] cq [0:3];
@@ -255,14 +260,15 @@ module out_path (
         localparam [1:0] BK = gb;
         (* ram_style = "block" *) reg [7:0]  ym [0:511];
         (* ram_style = "block" *) reg [15:0] cmm [0:511];
-        wire [1:0] yo = BK - s4[1:0], co = BK - sc4[1:0];
-        wire [9:0] yi = s4 + {8'd0, yo};
-        wire [8:0] ci = sc4 + {7'd0, co};
+        // bank BK holds the first index >= s4 with low bits BK: s4 + ((BK - s4) mod 4), whose
+        // upper bits are s4[9:2] + (s4[1:0] > BK) (one increment instead of two adds)
+        wire [7:0] ya = s4[9:2] + {7'd0, s4[1:0] > BK};
+        wire [6:0] ca = sc4[8:2] + {6'd0, sc4[1:0] > BK};
         always @(posedge clk) begin
             if (ybk_we[gb]) ym[{wpp, ybk_a[gb]}] <= ybk_d[gb];
             if (cbk_we[gb]) cmm[{wpp, cbk_a[gb]}] <= cbk_d[gb];
-            yq[gb] <= ym[{rpp, yi[9:2]}];
-            cq[gb] <= cmm[{rpp, 1'b0, ci[8:2]}];
+            yq[gb] <= ym[{rpp, ya}];
+            cq[gb] <= cmm[{rpp, 1'b0, ca}];
         end
     end endgenerate
     always @(posedge clk) begin

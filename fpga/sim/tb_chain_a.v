@@ -4,6 +4,8 @@ module tb_chain_a;
     parameter N = 1400000;
     parameter HEX = "data/ntsc_field.hex";
     parameter OUT = "data/ntsc_field_cv.txt";
+    parameter DEEMPH = 0;               // fm_frontend de-emphasis mode
+    parameter LPF = 0;                  // fm_frontend video low-pass
     parameter GAP = 1;                  // 1: 74.25 MHz clock, one sample per 74.25/40 clocks
                                         //    (the pixel-clock receive chain, as in top.v; the default).
                                         // 0: 40 MHz, one sample per clock: video_timing needs >= ~2.5
@@ -16,7 +18,7 @@ module tb_chain_a;
     wire [10:0] cv_x; wire [9:0] line_no; wire signed [17:0] tip, blank;
     integer i, fo;
     always #(GAP ? 6.734 : 12.5) clk = ~clk;
-    fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) fe (.clk(clk), .rst(rst), .deemph(2'd0), .iq(iq), .iq_valid(iq_valid),
+    fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) fe (.clk(clk), .rst(rst), .deemph(DEEMPH[1:0]), .lpf(LPF[0]), .iq(iq), .iq_valid(iq_valid),
         .f20(f20), .f20_valid(f20_valid), .click(click));
     video_timing vt (.clk(clk), .rst(rst), .f(f20), .f_valid(f20_valid), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x),
         .line_start(line_start), .line_no(line_no), .field_odd(field_odd), .field_start(field_start),

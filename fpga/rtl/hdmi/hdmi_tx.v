@@ -16,6 +16,7 @@ module hdmi_tx #(
     input  wire        fmt50,      // 1 = 720p50 (VIC 19), 0 = 720p60/59.94 (VIC 4)
     input  wire        dvi_only,   // 1 = no data islands / guard bands (DVI fallback)
     output reg  [10:0] hc = 0,     // pixel position being requested now
+    output wire [10:0] hc_next,    // hc of the next clock (lets consumers register hc comparisons)
     output reg  [9:0]  vc = 0,
     output wire        req_de,     // (hc, vc) inside the 1280x720 active area
     output reg         frame_start,// one clock at hc=0, vc=0
@@ -37,6 +38,7 @@ module hdmi_tx #(
     localparam ISL_PKT  = ISL_GB0 + 11'd2;    // 32-clock packet 1294..1325
     localparam ISL_GB1  = ISL_PKT + 11'd32;   // trailing guard band 1326..1327
 
+    assign hc_next = rst ? 11'd0 : (hc == h_total - 1) ? 11'd0 : hc + 11'd1;
     always @(posedge clk) begin
         if (rst) begin
             hc <= 0; vc <= 0;

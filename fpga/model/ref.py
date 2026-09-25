@@ -35,6 +35,16 @@ TAU_Z = TAU_P / 10 ** (13.4 / 20)
 # NTSC roof then cuts chroma by ~13 dB and smears edges; None = off (exact pass-through).
 DEEMPH_ROOF = {0: 13.4, 1: 8.0, 2: 4.0, 3: None}
 
+# Video low-pass after the de-emphasis (menu "Noise filter"): 25-tap linear-phase FIR at 20 MS/s,
+# scipy.signal.remez(25, [0, 5.3e6, 7.0e6, 10e6], [1, 0], weight=[1, 3], fs=20e6) in Q12 with
+# the centre tap adjusted for exact unity DC gain. Flat to 5.3 MHz (0.3 dB ripple, 4.43 MHz
+# -0.28 dB), -33 dB from 7 MHz: removes ~7 dB of the f^2 discriminator noise above the video
+# band without the one-sided smear of a shelf (MEASUREMENTS M77). Delay 12 samples.
+LPF_Q = 12
+LPF_HALF = [-4, 47, 15, -68, 40, 86, -143, -25, 278, -212, -396, 1219, 2422]
+LPF_C = LPF_HALF + LPF_HALF[-2::-1]
+assert sum(LPF_C) == 1 << LPF_Q
+
 
 def deemph_coeffs(q: int = 14, roof_db: float | None = 13.4):
     s = 1 << q
@@ -69,7 +79,7 @@ def s16(x: int) -> int:
     return x - 0x10000 if x & 0x8000 else x
 
 
-def fm_frontend(raw: np.ndarray, deemph: int = 0):
+def fm_frontend(raw: np.ndarray, deemph: int = 0, lpf: bool = False):
     """Returns (d40, y40, e20): discriminator, click-repaired, de-emphasised 20 MS/s."""
     ph, r2 = phase_lut()
     n = len(raw)
@@ -98,6 +108,10 @@ def fm_frontend(raw: np.ndarray, deemph: int = 0):
         yf = acc >> 14
         e[m] = yf >> 4
         x1, yf1 = int(x), yf
+    if lpf:                                  # FIR over e with zero history, round half up
+        ep = np.concatenate([np.zeros(len(LPF_C) - 1, dtype=np.int64), e])
+        e = np.array([(sum(LPF_C[k] * int(ep[m + len(LPF_C) - 1 - k]) for k in range(len(LPF_C)))
+                       + (1 << (LPF_Q - 1))) >> LPF_Q for m in range(len(e))], dtype=np.int64)
     return d, y, e, click
 
 
@@ -116,7 +130,8 @@ if __name__ == "__main__":
         write_luts(Path(sys.argv[2]))
     elif len(sys.argv) >= 3 and sys.argv[1] == "frontend":
         raw = np.array([int(l, 16) for l in open(sys.argv[2]) if l.strip()], dtype=np.int64)
-        d, y, e, click = fm_frontend(raw, deemph=int(sys.argv[4]) if len(sys.argv) >= 5 else 0)
+        d, y, e, click = fm_frontend(raw, deemph=int(sys.argv[4]) if len(sys.argv) >= 5 else 0,
+                                     lpf=len(sys.argv) >= 6 and sys.argv[5] == "1")
         with open(sys.argv[3], "w") as f:
             f.write("\n".join(str(int(v)) for v in e) + "\n")
         print(f"frontend: {len(raw)} in, {len(e)} out, clicks={int(click.sum())}, "

@@ -125,9 +125,9 @@ module top (
     wire prst = prst_cnt != 0;
 
     // settings into the receive (pixel-clock) domain
-    wire [1:0]  std_l, deemph_l; wire notch_l, test_l, idle_l, fmonly_l; wire [15:0] hue_l; wire [7:0] sat_l, bri_l, con_l;
-    cdc_bus #(.W(48)) u_set_l (.clk(pclk), .d({set0[11:10], set0[9], set0[8], set0[7], set0[1:0], set0[6], set1[23:0], set2[15:0]}),
-                               .q({deemph_l, fmonly_l, idle_l, test_l, std_l, notch_l, sat_l, hue_l, con_l, bri_l}));
+    wire [1:0]  std_l, deemph_l; wire lpf_l, notch_l, test_l, idle_l, fmonly_l; wire [15:0] hue_l; wire [7:0] sat_l, bri_l, con_l;
+    cdc_bus #(.W(49)) u_set_l (.clk(pclk), .d({set0[12], set0[11:10], set0[9], set0[8], set0[7], set0[1:0], set0[6], set1[23:0], set2[15:0]}),
+                               .q({lpf_l, deemph_l, fmonly_l, idle_l, test_l, std_l, notch_l, sat_l, hue_l, con_l, bri_l}));
     // menu "Decoder" (diagnostics): Idle holds the receive DSP chain (fm_frontend, video_timing,
     // chroma_dec) in reset; FM only keeps fm_frontend running and holds the rest. Used to find
     // which block's activity disturbs the HDMI output (MEASUREMENTS M73).
@@ -157,7 +157,7 @@ module top (
 
     wire signed [17:0] f20; wire f20_valid, click;
     fm_frontend #(.LUT_FILE("rtl/dsp/phase_lut.hex")) u_fm (
-        .clk(pclk), .rst(drst), .deemph(deemph_l), .iq(iq), .iq_valid(iq_v),
+        .clk(pclk), .rst(drst), .deemph(deemph_l), .lpf(lpf_l), .iq(iq), .iq_valid(iq_v),
         .f20(f20), .f20_valid(f20_valid), .click(click));
 
     wire signed [11:0] cv; wire cv_valid; wire [10:0] cv_x;
@@ -272,7 +272,7 @@ module top (
     wire [1:0] mode_p;
     cdc_bus #(.W(2)) u_mode_p (.clk(pclk), .d(mode_cur), .q(mode_p));
 
-    wire [10:0] hc; wire [9:0] vc; wire de, fs;
+    wire [10:0] hc, hc_next; wire [9:0] vc; wire de, fs;
     // signal loss: no new field for 8 output frames
     reg [7:0] fc_last; reg [3:0] stale; reg lost;
     always @(posedge pclk) begin
@@ -287,7 +287,7 @@ module top (
     wire [23:0] rgb_v, rgb;
     wire [15:0] late_count;
     out_path u_out (
-        .clk(pclk), .rst(prst), .hc(hc), .vc(vc), .aspect_169(aspect_p), .weave_req(weave_p),
+        .clk(pclk), .rst(prst), .hc(hc), .hc_next(hc_next), .vc(vc), .aspect_169(aspect_p), .weave_req(weave_p),
         .dim(lost && !nosig_p), .nosig_screen((lost || !cur_valid) && nosig_p),
         .frame_evt(frame_evt), .req(req), .req_line(req_line), .req_prev(req_prev), .req_slot(req_slot),
         .done(done), .busy(busy), .cur_odd(cur_odd), .cur_pal(cur_pal), .cur_valid(cur_valid),
@@ -302,7 +302,7 @@ module top (
     wire [9:0] t0, t1, t2;
     hdmi_tx #(.PIX_LATENCY(7)) u_tx (
         .clk(pclk), .rst(prst), .fmt50(mode_p == 2'd2), .dvi_only(1'b0),
-        .hc(hc), .vc(vc), .req_de(de), .frame_start(fs), .rgb(rgb),
+        .hc(hc), .hc_next(hc_next), .vc(vc), .req_de(de), .frame_start(fs), .rgb(rgb),
         .tmds0(t0), .tmds1(t1), .tmds2(t2));
     hdmi_phy u_phy (.pclk(pclk), .fclk(fclk), .rst(prst), .d0(t0), .d1(t1), .d2(t2),
         .tmds_clk_p(tmds_clk_p), .tmds_clk_n(tmds_clk_n), .tmds_d_p(tmds_d_p), .tmds_d_n(tmds_d_n));

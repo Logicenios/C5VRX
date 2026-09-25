@@ -51,6 +51,7 @@
 #define SET0_DECIDLE    (1u << 8)   /* hold the receive DSP chain in reset (diagnostics, not saved) */
 #define SET0_FMONLY     (1u << 9)   /* hold video_timing + chroma_dec in reset, fm_frontend runs (diagnostics) */
 #define SET0_DEEMPH_SH  10          /* [11:10] de-emphasis roof: 0 13.4 dB (NTSC), 1 8 dB, 2 4 dB, 3 off */
+#define SET0_LPF        (1u << 12)  /* video low-pass (5.3 MHz FIR) after the de-emphasis */
 /* SET1: [15:0] hue (1/65536 turn), [23:16] saturation (146 nominal)
  * SET2: [7:0] brightness (signed), [15:8] contrast (128 = 1.0)
  * OSD_CTRL: [10:0] x0, [25:16] y0, [31] enable */
