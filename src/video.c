@@ -4728,6 +4728,48 @@ static void console_diag_task(void *arg)
                     apply_frequency_offset_khz_tracked(0);
                     settings_save();
                     printf("[FINE TUNE] Offset reset to +0 kHz\n");
+                } else if (BOARD_HAS_FPGA_LINK && (c == 'i' || c == 'I')) {
+                    /* FPGA menu from the host: the same message as a BOOT button press
+                     * (i = short, I = long), so the menu can be driven without the buttons */
+                    link_button_t b = { .kind = c == 'I' ? LINK_BUTTON_LONG : LINK_BUTTON_SHORT,
+                                        .held_ms = c == 'I' ? 1000 : 100 };
+                    link_post(LINK_MSG_BUTTON, &b, sizeof b);
+                    printf("[FPGA] menu button: S1 %s\n", c == 'I' ? "long" : "short");
+                } else if (c == 'R') {
+                    /* Raw I/Q ring dump for FPGA link bring-up (fpga/bringup/c5_ring_dump.py).
+                     * A stretch of the ring is copied to a temporary heap buffer (not static:
+                     * DRAM limit), as large as the largest free block allows (<= 28 KiB). The
+                     * copy starts 4 KiB past the DMA write pointer, so it is one continuous
+                     * stretch of 40 MS/s samples (the DMA cannot catch up during the copy). */
+                    const uint32_t skip = 4096u;
+                    size_t avail = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                    uint32_t n = (uint32_t)(avail > 4096u ? avail - 1024u : 0u) & ~63u;  /* leave headroom */
+                    if (n > RAW_RING_BYTES - skip) n = RAW_RING_BYTES - skip;
+                    uint8_t *snap = n >= 4096u ? heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) : NULL;
+                    if (!snap) {
+                        printf("[RING] no memory for a snapshot (largest block %u)\n", (unsigned)avail);
+                    } else {
+                        /* copy the newest n bytes that end 4 KiB before... i.e. the oldest
+                         * part of the ring, starting just past the write pointer + skip */
+                        uint32_t w = get_rx_dma_offset(NULL) % RAW_RING_BYTES;
+                        uint32_t start = (w + skip) % RAW_RING_BYTES;          /* memcpy: stays ahead of the DMA */
+                        uint32_t first = RAW_RING_BYTES - start < n ? RAW_RING_BYTES - start : n;
+                        memcpy(snap, s_raw_ring + start, first);
+                        if (first < n) memcpy(snap + first, s_raw_ring, n - first);
+                        printf("[RING] BEGIN %lu bytes, 40 MS/s, byte = {I[3:0], Q[3:0]}\n", (unsigned long)n);
+                        for (uint32_t i = 0; i < n; i += 64u) {
+                            char line[132];
+                            for (uint32_t k = 0; k < 64u; ++k) {
+                                uint8_t b = snap[i + k];
+                                line[2 * k] = "0123456789abcdef"[b >> 4];
+                                line[2 * k + 1] = "0123456789abcdef"[b & 15u];
+                            }
+                            line[128] = '\0';
+                            printf("%s\n", line);
+                        }
+                        printf("[RING] END\n");
+                        free(snap);
+                    }
                 } else if (c == 'e') {
                     PARL_IO.rx_clk_cfg.rx_clk_i_inv = !PARL_IO.rx_clk_cfg.rx_clk_i_inv;
                     printf("[EDGE] RX SAMPLE EDGE TOGGLED -> %s (rx_clk_i_inv=%d)\n",
@@ -4902,6 +4944,8 @@ static void console_diag_task(void *arg)
                     printf("  'e':         Toggle RX sample edge (POS/NEG)\n");
                     printf("  'v'/'o'/'O': Menu controls\n");
                     printf("  'd':         Print this diagnostic summary\n");
+                    printf("  'R':         Dump the raw I/Q ring (28 KiB hex, fpga/bringup/c5_ring_dump.py)\n");
+                    if (BOARD_HAS_FPGA_LINK) printf("  'i' / 'I':   FPGA menu: S1 short / long press\n");
                     printf("=======================================================\n\n");
                 }
             }

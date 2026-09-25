@@ -7,6 +7,7 @@
  * never touches the 40 MS/s sample path. */
 #include "link.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "boards/board.h"
@@ -143,8 +144,14 @@ static void handle(const link_frame_t *f)
         if (blob_save() != ESP_OK) { reply_ack(f, LINK_ERR_STORAGE); break; }
         reply_ack(f, video_post_link_command(VIDEO_LINK_CMD_SAVE, 0) ? LINK_ERR_NONE : LINK_ERR_BUSY);
         break;
-    case LINK_MSG_FPGA_DEBUG:          /* diagnostics for a host sniffing the link; no reply */
-    case LINK_MSG_FPGA_CAPTURE:
+    case LINK_MSG_FPGA_DEBUG:          /* FPGA diagnostics, 1 Hz; no reply */
+        /* echoed to the console as hex (fpga/bringup/c5_fpgadbg.py decodes it), so the FPGA
+         * can be monitored through the C5's USB when the Tang Nano has no host connection */
+        printf("[FPGADBG] ");
+        for (int i = 0; i < f->len; ++i) printf("%02x", f->payload[i]);
+        printf("\n");
+        break;
+    case LINK_MSG_FPGA_CAPTURE:        /* raw link samples for a host sniffing the link */
         break;
     case LINK_MSG_LINK_TEST:           /* the wiring test runs at boot, before RF owns the pads */
         reply_ack(f, LINK_ERR_NONE);
