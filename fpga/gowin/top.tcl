@@ -11,7 +11,7 @@ set_option -use_sspi_as_gpio 1
 foreach f {
     rtl/top.v rtl/clocks/clk_gen.v rtl/clocks/pll_tmds_60.v
     rtl/hdmi/tmds_encoder.v rtl/hdmi/hdmi_tx.v rtl/hdmi/hdmi_phy.v
-    rtl/dsp/fm_frontend.v rtl/dsp/video_timing.v rtl/dsp/chroma_dec.v rtl/dsp/test_src.v
+    rtl/dsp/fm_frontend.v rtl/dsp/video_timing.v rtl/dsp/chroma_dec.v rtl/dsp/chroma_log.v rtl/dsp/test_src.v
     rtl/fb/fb_format.v rtl/fb/fb_ctrl.v rtl/mem/async_fifo.v rtl/mem/sdram_ctrl.v
     rtl/out/out_path.v rtl/osd/osd.v rtl/soc/soc.v rtl/soc/uart.v rtl/soc/cdc_bus.v
     rtl/link/link_mon.v rtl/link/link_cap.v third_party/picorv32/picorv32.v

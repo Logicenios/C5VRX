@@ -34,13 +34,14 @@ module tb_full;
         .f20(f20), .f20_valid(f20_valid), .click(click));
     wire signed [11:0] cv; wire cv_valid, line_start, field_odd, field_start, is_pal, vlocked;
     wire [10:0] cv_x; wire [9:0] line_no; wire signed [17:0] tip, blank;
+    wire signed [15:0] ffp, ffn;
     video_timing u_vt (.clk(lclk), .rst(lrst), .f(f20), .f_valid(f20_valid), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x),
         .line_start(line_start), .line_no(line_no), .field_odd(field_odd), .field_start(field_start),
-        .is_pal(is_pal), .locked(vlocked), .meas_tip(tip), .meas_blank(blank));
+        .is_pal(is_pal), .locked(vlocked), .meas_tip(tip), .meas_blank(blank), .cv_ff_pal(ffp), .cv_ff_ntsc(ffn));
     wire signed [11:0] y_c; wire signed [15:0] u_c, v_c; wire [10:0] x_c; wire c_valid, killed, sw;
     chroma_dec #(.SIN_FILE("../rtl/dsp/sin_lut.hex"), .COS_FILE("../rtl/dsp/cos_lut.hex")) u_chroma (
-        .clk(lclk), .rst(lrst), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x), .is_pal(is_pal), .comb(1'b1),
-        .hue(16'd0), .sat(8'd146), .y_out(y_c), .u_out(u_c), .v_out(v_c), .x_out(x_c), .out_valid(c_valid),
+        .clk(lclk), .rst(lrst), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x), .cv_ff_pal(ffp), .cv_ff_ntsc(ffn), .is_pal(is_pal), .comb(1'b1),
+        .hue(16'd0), .sat(8'd146), .lock_legacy(1'b0), .y_out(y_c), .u_out(u_c), .v_out(v_c), .x_out(x_c), .out_valid(c_valid),
         .killed(killed), .pal_sw_neg(sw));
     wire [35:0] ff_wdata; wire ff_wr;
     fb_format u_fmt (.clk(lclk), .rst(lrst), .y_in(y_c), .u_in(u_c), .v_in(v_c), .x_in(x_c), .in_valid(c_valid),
@@ -108,7 +109,7 @@ module tb_full;
     // ---------------- dumps ----------------
     integer fcv, fo, npix = 0, cap = 0, cap_field = 0, cap_prev = 0, cap_odd = 0;
     initial begin fcv = $fopen(CV_OUT, "w"); fo = $fopen(OUT, "w"); end
-    always @(posedge lclk) if (cv_valid && fcv != 0) $fwrite(fcv, "%0d %0d %0d %0d\n", cv_x, cv, line_no, field_odd);
+    always @(posedge lclk) if (cv_valid && fcv != 0) $fwrite(fcv, "%0d %0d %0d %0d %0d %0d\n", cv_x, cv, line_no, field_odd, ffp, ffn);
     reg [10:0] hcd [0:5]; reg [9:0] vcd [0:5];
     always @(posedge pclk) begin
         hcd[0] <= hc; vcd[0] <= vc;

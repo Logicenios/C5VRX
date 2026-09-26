@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Decode the FPGA -> C5 link frames mirrored on the BL616 USB-UART (top.v dbg_tx, 1 Mbaud).
 
-  python3 bringup/link_sniff.py [/dev/ttyUSB1] [seconds]
+  python3 bringup/link_sniff.py [/dev/ttyUSB1] [seconds] [--capture=PREFIX] [--clog=PREFIX]
 Prints one line per frame with its arrival time. Uses the host framing of tools/link_cli.py.
+--capture saves raw link captures (2048 words), --clog the colour-lock recordings (1024 16-bit
+words = 256 line records, FPGA_CAPTURE offsets with bit 15 set; bringup/clog_analyze.py).
 """
 import os
 import sys
@@ -23,6 +25,8 @@ dev = args[0] if len(args) > 0 else "/dev/ttyUSB1"
 secs = float(args[1]) if len(args) > 1 else 10.0
 cap_prefix = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--capture=")), None)
 cap_words, cap_count = {}, 0
+clog_prefix = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--clog=")), None)
+clog_words, clog_count = {}, 0
 fd = os.open(dev, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
 a = termios.tcgetattr(fd)
 a[0] = 0; a[1] = 0; a[3] = 0
@@ -47,6 +51,20 @@ while time.time() - t0 < secs:
         body, crc = buf[2:6 + n], buf[6 + n] | buf[7 + n] << 8
         if crc16(body) == crc:
             payload = buf[6:6 + n]
+            if buf[3] == 11 and payload[1] & 0x80:             # colour-lock recording chunk
+                off = (payload[0] | payload[1] << 8) & 0x3FFF
+                clog_old = bool(payload[1] & 0x40)            # CLOG_AB firmware: old burst lock
+                for i in range((n - 2) // 2):
+                    clog_words[off + i] = payload[2 + 2 * i] | payload[3 + 2 * i] << 8
+                if len(clog_words) >= 1024:
+                    clog_count += 1
+                    if clog_prefix:
+                        name = f"{clog_prefix}{clog_count}{'_old' if clog_old else ''}.hex"
+                        Path(name).write_text("".join(f"{clog_words.get(i, 0):04x}\n" for i in range(1024)))
+                        print(f"{time.time() - t0:7.3f} s  colour-lock recording {clog_count} -> {name}", flush=True)
+                    clog_words = {}
+                buf = buf[8 + n:]
+                continue
             if buf[3] == 11:                                  # raw capture chunk
                 off = payload[0] | payload[1] << 8
                 for i in range((n - 2) // 2):

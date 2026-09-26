@@ -57,12 +57,14 @@ def fb_format_line(Y, U, V, pal: bool, brightness: int = 0, contrast: int = 128)
 def fields_from_dump(path: str, pal: bool):
     rows = np.loadtxt(path, dtype=np.int64)
     starts = np.where(rows[:, 0] == 0)[0]
-    lines, tags = [], []
+    lines, tags, ff = [], [], []
     for a in starts:
         if a + 1280 <= len(rows) and (rows[a:a + 1280, 0] == np.arange(1280)).all():
             lines.append(rows[a:a + 1280, 1])
             tags.append((int(rows[a, 2]), int(rows[a, 3])))
-    dec = chroma_decode(lines, is_pal=pal, comb=True)
+            # video_timing feed-forward (pal, ntsc) on the x = 1279 row, when the dump has it
+            ff.append((int(rows[a + 1279, 4]), int(rows[a + 1279, 5])) if rows.shape[1] >= 6 else (0, 0))
+    dec = chroma_decode(lines, is_pal=pal, comb=True, ff=ff)
     first, n = (22, 288) if pal else (17, 240)
     fields = []                                   # [(odd, {line: words})]
     for (Yl, Ul, Vl), (line_no, odd) in zip(dec, tags):

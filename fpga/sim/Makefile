@@ -63,23 +63,29 @@ fe: $(D)/ntsc_bars.hex $(D)/weak.hex
 	done
 
 # ---- sync/levels/resampler on one field, then chroma: bit-exact vs model/chroma_ref.py ----
-$(D)/%_field_cv.txt: $(D)/%_field.hex
+$(D)/%_field_cv.txt: $(D)/%_field.hex tb_chain_a.v ../rtl/dsp/fm_frontend.v ../rtl/dsp/video_timing.v
 	$(IV) -Ptb_chain_a.HEX='"$<"' -Ptb_chain_a.OUT='"$@"' -o chain_$*.vvp tb_chain_a.v ../rtl/dsp/fm_frontend.v ../rtl/dsp/video_timing.v
 	vvp -n chain_$*.vvp > $(D)/$*_chain.log
 $(D)/chroma_in.txt: $(D)/ntsc_field_cv.txt
-	head -n 256000 $< | awk '{print $$1, $$2}' > $@
+	head -n 256000 $< | awk '{print $$1, $$2, $$5, $$6}' > $@
 $(D)/chroma_in_pal.txt: $(D)/pal_field_cv.txt
-	head -n 256000 $< | awk '{print $$1, $$2}' > $@
+	head -n 256000 $< | awk '{print $$1, $$2, $$5, $$6}' > $@
 chroma: $(D)/chroma_in.txt $(D)/chroma_in_pal.txt
 	$(IV) -o chroma.vvp tb_chroma.v ../rtl/dsp/chroma_dec.v && vvp -n chroma.vvp > /dev/null
 	$(IV) -Ptb_chroma.COMB=0 -Ptb_chroma.OUT='"$(D)/chroma_rtl_notch.txt"' -o chroma_n.vvp tb_chroma.v ../rtl/dsp/chroma_dec.v && vvp -n chroma_n.vvp > /dev/null
 	$(IV) -Ptb_chroma_pal.IN='"$(D)/chroma_in_pal.txt"' -Ptb_chroma_pal.OUT='"$(D)/chroma_rtl_pal.txt"' -o chroma_p.vvp tb_chroma_pal.v ../rtl/dsp/chroma_dec.v && vvp -n chroma_p.vvp > /dev/null
 	cd .. && $(PY) model/chroma_ref.py decode sim/$(D)/chroma_in.txt sim/$(D)/chroma_ref.txt
 	cd .. && $(PY) model/chroma_ref.py decode sim/$(D)/chroma_in.txt sim/$(D)/chroma_ref_notch.txt ntsc notch
-	cd .. && $(PY) model/chroma_ref.py decode sim/$(D)/chroma_in_pal.txt sim/$(D)/chroma_ref_pal.txt pal
+	cd .. && $(PY) model/chroma_ref.py decode sim/$(D)/chroma_in_pal.txt sim/$(D)/chroma_ref_pal.txt pal --log=sim/$(D)/chroma_log_ref.txt
 	$(PY) cmp_prefix.py $(D)/chroma_rtl.txt $(D)/chroma_ref.txt
 	$(PY) cmp_prefix.py $(D)/chroma_rtl_notch.txt $(D)/chroma_ref_notch.txt
 	$(PY) cmp_prefix.py $(D)/chroma_rtl_pal.txt $(D)/chroma_ref_pal.txt
+	$(PY) cmp_prefix.py $(D)/chroma_log_rtl.txt $(D)/chroma_log_ref.txt   # colour-lock records
+	$(IV) -Ptb_chroma_pal.IN='"$(D)/chroma_in_pal.txt"' -Ptb_chroma_pal.OUT='"$(D)/chroma_rtl_pal_old.txt"' -Ptb_chroma_pal.LEGACY=1 \
+	  -Ptb_chroma_pal.LOG='"$(D)/chroma_log_rtl_old.txt"' -o chroma_po.vvp tb_chroma_pal.v ../rtl/dsp/chroma_dec.v && vvp -n chroma_po.vvp > /dev/null
+	cd .. && $(PY) model/chroma_ref.py decode sim/$(D)/chroma_in_pal.txt sim/$(D)/chroma_ref_pal_old.txt pal legacy --log=sim/$(D)/chroma_log_ref_old.txt
+	$(PY) cmp_prefix.py $(D)/chroma_rtl_pal_old.txt $(D)/chroma_ref_pal_old.txt   # old burst lock
+	$(PY) cmp_prefix.py $(D)/chroma_log_rtl_old.txt $(D)/chroma_log_ref_old.txt
 
 # ---- SDRAM controller vs behavioural model (protocol + data) ----
 sdram:

@@ -22,6 +22,7 @@ module tb_soc;
                        : {20'd0, 1'b0, 1'b1, 2'd1, 1'b1, 1'b1, 1'b1, 1'b0, 1'b0, 1'b1, s2, s1}),
         .meas_tip(32'd0), .meas_blank(32'd0), .counters(32'd0), .debug(32'd0),
         .link_raw({16'd0, wedges, wdata}), .link_freq(32'd0), .link_errp(32'd0), .link_errn(32'd0), .link_bits(32'd0),
+        .clog_done(1'b0), .clog_data(32'd0),
         .settings0(set0), .settings1(set1), .settings2(set2), .osd_ctrl(osd_ctrl));
 
     // C5 wiring test pattern (src/link_test.h) at 2000 ms (after the scripted menu presses),

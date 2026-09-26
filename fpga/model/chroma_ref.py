@@ -21,6 +21,7 @@ INC = {False: 11648, True: 14528}          # is_pal -> NCO increment
 BURST_X0, BURST_X1 = 112, 144              # 32 samples inside the burst (both standards)
 LOOP_SHIFT = 9                             # phase correction = -(err >> LOOP_SHIFT)
 KILL_BU = 60000                            # |burst U product| below this -> colour killer
+LOCK_GATE = 150000     # |bu| + |bv| below this: no burst on the line, hold the loop (~15 % of nominal)
 KILL_LINES = 8
 
 
@@ -44,12 +45,27 @@ X_ACT0 = 160                               # U/V forced to 0 before this (burst/
 SAT_DEFAULT = 146                          # compensates the ~12 % chroma roll-off (fpga/README.md)
 
 
-def chroma_decode(lines, is_pal: bool, comb: bool = True, hue: int = 0, sat: int = SAT_DEFAULT):
+def sat16(v: int) -> int:
+    """chroma_dec log value: v >> 8 saturated to signed 16 bits, as an unsigned 16-bit field"""
+    return max(-32768, min(32767, v >> 8)) & 0xFFFF
+
+
+def chroma_decode(lines, is_pal: bool, comb: bool = True, hue: int = 0, sat: int = SAT_DEFAULT, log=None,
+                  legacy_lock: bool = False, ff=None):
     """lines: list of 1280-sample int arrays (composite mV). Returns list of (Y, U, V) arrays.
 
     Streaming order (mirrored by the RTL): the burst products are complete at
     x = BURST_X1, where the PAL V-switch and the colour killer for this line are
     decided; the NCO correction is applied at the end of the line.
+    log: optional list; one colour-lock record per line is appended, as chroma_dec.v's log_* outputs
+    (bu, bv, corr, flags {flip, V switch, killed}).
+    Burst lock (MEASUREMENTS M79): the 180-degree flip is decided on the two-line sum of burst U, in
+    which the PAL +-45 degree swing cancels, with the previous line's values carried into the
+    flipped reference frame; lines without a burst (|bu| + |bv| < LOCK_GATE) hold the loop, and the
+    first line with a burst again only primes the two-line sums. legacy_lock: the old rule (flip
+    whenever this line's bu > 0, no gate), which can settle into a flip-every-line false lock.
+    ff: optional per-line (pal, ntsc) NCO feed-forward from video_timing (cv_ff_*, the jump of the
+    next line's start), added at the line end unless legacy_lock.
     """
     S, C = sincos_lut()
     inc = INC[is_pal]
@@ -58,6 +74,8 @@ def chroma_decode(lines, is_pal: bool, comb: bool = True, hue: int = 0, sat: int
     prev_u = np.zeros(LS, dtype=np.int64)
     prev_v = np.zeros(LS, dtype=np.int64)
     bv_prev = 0
+    bu_prev = 0
+    have_prev = False
     kill_cnt = 0
     out = []
     # the notch sees the continuous stream (x-2 / x+2 cross line boundaries), zero before the start
@@ -101,11 +119,23 @@ def chroma_decode(lines, is_pal: bool, comb: bool = True, hue: int = 0, sat: int
             else:
                 U[x], V[x] = uo, vo
         err = (bv + bv_prev) if is_pal else bv
-        bv_prev = bv
-        corr = -(err >> LOOP_SHIFT)
-        if bu > 0:
-            corr += 32768                          # locked 180 deg off: flip
-        phi_line = (phi_line + LS * inc + corr) & 0xFFFF
+        if legacy_lock:
+            flip = bu > 0
+            corr = -(err >> LOOP_SHIFT) + (32768 if flip else 0)
+            bv_prev = bv
+        else:
+            present = abs(bu) + abs(bv) >= LOCK_GATE
+            hold = not present or not have_prev
+            flip = not hold and ((bu + bu_prev) > 0 if is_pal else bu > 0)
+            corr = 0 if hold else -(err >> LOOP_SHIFT) + (32768 if flip else 0)
+            if present:                            # previous line in the (possibly flipped) new frame
+                bu_prev, bv_prev, have_prev = (-bu, -bv, True) if flip else (bu, bv, True)
+            else:
+                bu_prev, bv_prev, have_prev = 0, 0, False
+        ffv = 0 if (legacy_lock or ff is None) else ff[li][0 if is_pal else 1]
+        phi_line = (phi_line + LS * inc + corr + ffv) & 0xFFFF
+        if log is not None:
+            log.append((sat16(bu), sat16(bv), corr & 0xFFFF, int(flip) << 2 | (sw < 0) << 1 | int(killed)))
         prev = [cv, prev[0]]
         out.append((Y, U, V))
     return out
@@ -124,11 +154,19 @@ if __name__ == "__main__":
         write_sincos(sys.argv[2])
     elif len(sys.argv) >= 4 and sys.argv[1] == "decode":
         # decode <cv dump from tb_chain_a> <out> [pal] [notch]
-        rows = np.loadtxt(sys.argv[2], dtype=int)
+        rows = np.loadtxt(sys.argv[2], dtype=int, ndmin=2)
         starts = np.where(rows[:, 0] == 0)[0]
-        lines = [rows[a:a + LS, 1] for a in starts
-                 if a + LS <= len(rows) and (rows[a:a + LS, 0] == np.arange(LS)).all()]
-        res = chroma_decode(lines, is_pal="pal" in sys.argv[4:], comb="notch" not in sys.argv[4:])
+        good = [a for a in starts if a + LS <= len(rows) and (rows[a:a + LS, 0] == np.arange(LS)).all()]
+        lines = [rows[a:a + LS, 1] for a in good]
+        # optional columns 3, 4: feed-forward (pal, ntsc) on the x = 1279 row
+        ffl = [(int(rows[a + LS - 1, 2]), int(rows[a + LS - 1, 3])) for a in good] if rows.shape[1] >= 4 else None
+        lg = []
+        res = chroma_decode(lines, is_pal="pal" in sys.argv[4:], comb="notch" not in sys.argv[4:], log=lg,
+                            legacy_lock="legacy" in sys.argv[4:], ff=ffl)
+        logp = next((a.split("=", 1)[1] for a in sys.argv[4:] if a.startswith("--log=")), None)
+        if logp:
+            with open(logp, "w") as f:
+                f.write("".join(f"{a} {b} {c} {d}\n" for a, b, c, d in lg))
         with open(sys.argv[3], "w") as f:
             for Y, U, V in res:
                 for x in range(LS):

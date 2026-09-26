@@ -46,6 +46,9 @@ module top (
     reg  [1:0]  cap_done_s = 0;
     always @(posedge clk27) cap_done_s <= {cap_done_s[0], cap_done_l};
     wire        cap_done_k = cap_done_s[1];
+    wire        clog_req, clog_done_l; wire [8:0] clog_addr; wire [31:0] clog_data;   // colour-lock recorder
+    reg  [1:0]  clog_done_s = 0;
+    always @(posedge clk27) clog_done_s <= {clog_done_s[0], clog_done_l};
     wire        osd_we; wire [9:0] osd_waddr; wire [15:0] osd_wdata;
     reg  [3:0]  cpu_rst_cnt = 4'hF;
     always @(posedge clk27) if (cpu_rst_cnt != 0) cpu_rst_cnt <= cpu_rst_cnt - 4'd1;
@@ -55,6 +58,7 @@ module top (
         .status(status), .meas_tip(tip32), .meas_blank(blank32), .counters(counters), .debug(debug),
         .link_raw(link_raw), .link_freq(link_freq), .link_errp(link_errp), .link_errn(link_errn), .link_bits(link_bits),
         .cap_req(cap_req), .cap_done(cap_done_k), .cap_addr(cap_addr), .cap_data(cap_data),
+        .clog_req(clog_req), .clog_done(clog_done_s[1]), .clog_addr(clog_addr), .clog_data(clog_data),
         .vt_dbg({8'd0, vt_dbg_k}), .vt_pulses({br_k, hs_k}), .diag({drops_a, drops_b, ovf_k, fbd_k}),
         .settings0(set0), .settings1(set1), .settings2(set2), .osd_ctrl(osd_ctrl));
 
@@ -125,9 +129,9 @@ module top (
     wire prst = prst_cnt != 0;
 
     // settings into the receive (pixel-clock) domain
-    wire [1:0]  std_l, deemph_l; wire lpf_l, notch_l, test_l, idle_l, fmonly_l; wire [15:0] hue_l; wire [7:0] sat_l, bri_l, con_l;
-    cdc_bus #(.W(49)) u_set_l (.clk(pclk), .d({set0[12], set0[11:10], set0[9], set0[8], set0[7], set0[1:0], set0[6], set1[23:0], set2[15:0]}),
-                               .q({lpf_l, deemph_l, fmonly_l, idle_l, test_l, std_l, notch_l, sat_l, hue_l, con_l, bri_l}));
+    wire [1:0]  std_l, deemph_l; wire oldlock_l, lpf_l, notch_l, test_l, idle_l, fmonly_l; wire [15:0] hue_l; wire [7:0] sat_l, bri_l, con_l;
+    cdc_bus #(.W(50)) u_set_l (.clk(pclk), .d({set0[13], set0[12], set0[11:10], set0[9], set0[8], set0[7], set0[1:0], set0[6], set1[23:0], set2[15:0]}),
+                               .q({oldlock_l, lpf_l, deemph_l, fmonly_l, idle_l, test_l, std_l, notch_l, sat_l, hue_l, con_l, bri_l}));
     // menu "Decoder" (diagnostics): Idle holds the receive DSP chain (fm_frontend, video_timing,
     // chroma_dec) in reset; FM only keeps fm_frontend running and holds the rest. Used to find
     // which block's activity disturbs the HDMI output (MEASUREMENTS M73).
@@ -163,11 +167,13 @@ module top (
     wire signed [11:0] cv; wire cv_valid; wire [10:0] cv_x;
     wire line_start, field_odd, field_start, pal_det, vlocked;
     wire [9:0] line_no; wire signed [17:0] meas_tip, meas_blank;
+    wire signed [15:0] cv_ffp, cv_ffn;       // colour feed-forward (MEASUREMENTS M79)
     video_timing u_vt (
         .clk(pclk), .rst(vrst), .f(f20), .f_valid(f20_valid),
         .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x), .line_start(line_start), .line_no(line_no),
         .field_odd(field_odd), .field_start(field_start), .is_pal(pal_det), .locked(vlocked),
-        .meas_tip(meas_tip), .meas_blank(meas_blank), .dbg(vt_dbg), .hsync_pulse(vt_hs), .broad_pulse(vt_broad));
+        .meas_tip(meas_tip), .meas_blank(meas_blank), .dbg(vt_dbg), .hsync_pulse(vt_hs), .broad_pulse(vt_broad), .perr_q4(perr_q4),
+        .cv_ff_pal(cv_ffp), .cv_ff_ntsc(cv_ffn));
     wire [23:0] vt_dbg; wire vt_hs, vt_broad;
     // per-second H sync / broad pulse counts (same 1 s windows as the link monitor)
     reg [2:0] vw = 0; reg [15:0] hs_c = 0, br_c = 0, hs_n = 0, br_n = 0;
@@ -184,11 +190,18 @@ module top (
 
     wire signed [11:0] y_c; wire signed [15:0] u_c, v_c; wire [10:0] x_c;
     wire c_valid, killed, pal_sw_neg;
+    wire clog_we; wire [15:0] clog_bu, clog_bv, clog_corr; wire [2:0] clog_fl; wire signed [11:0] perr_q4;
     chroma_dec #(.SIN_FILE("rtl/dsp/sin_lut.hex"), .COS_FILE("rtl/dsp/cos_lut.hex")) u_chroma (
-        .clk(pclk), .rst(vrst), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x), .is_pal(is_pal),
-        .comb(~notch_l), .hue(hue_l), .sat(sat_l),
+        .clk(pclk), .rst(vrst), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x), .cv_ff_pal(cv_ffp), .cv_ff_ntsc(cv_ffn), .is_pal(is_pal),
+        .comb(~notch_l), .hue(hue_l), .sat(sat_l), .lock_legacy(oldlock_l),
         .y_out(y_c), .u_out(u_c), .v_out(v_c), .x_out(x_c), .out_valid(c_valid),
-        .killed(killed), .pal_sw_neg(pal_sw_neg));
+        .killed(killed), .pal_sw_neg(pal_sw_neg),
+        .log_we(clog_we), .log_bu(clog_bu), .log_bv(clog_bv), .log_corr(clog_corr), .log_fl(clog_fl));
+
+    // colour-lock recorder (MEASUREMENTS M79): 256 lines of the burst loop, read by the CPU
+    chroma_log u_clog (.clk(pclk), .rec_we(clog_we), .bu(clog_bu), .bv(clog_bv), .corr(clog_corr), .perr(perr_q4),
+        .fl(clog_fl), .field_start(field_start), .req_tog(clog_req), .done_tog(clog_done_l),
+        .rclk(clk27), .raddr(clog_addr), .rdata(clog_data));
 
     // menu "Test pattern": the internal PAL colour bars replace the decoder at fb_format's input
     // (the whole frame-buffer / SDRAM / scaler / HDMI path runs as with real video)

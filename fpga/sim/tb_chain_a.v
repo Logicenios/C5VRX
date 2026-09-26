@@ -6,6 +6,7 @@ module tb_chain_a;
     parameter OUT = "data/ntsc_field_cv.txt";
     parameter DEEMPH = 0;               // fm_frontend de-emphasis mode
     parameter LPF = 0;                  // fm_frontend video low-pass
+    parameter PERR_CLAMP = 2;           // video_timing H-PLL clamp (0: off)
     parameter GAP = 1;                  // 1: 74.25 MHz clock, one sample per 74.25/40 clocks
                                         //    (the pixel-clock receive chain, as in top.v; the default).
                                         // 0: 40 MHz, one sample per clock: video_timing needs >= ~2.5
@@ -20,9 +21,10 @@ module tb_chain_a;
     always #(GAP ? 6.734 : 12.5) clk = ~clk;
     fm_frontend #(.LUT_FILE("../rtl/dsp/phase_lut.hex")) fe (.clk(clk), .rst(rst), .deemph(DEEMPH[1:0]), .lpf(LPF[0]), .iq(iq), .iq_valid(iq_valid),
         .f20(f20), .f20_valid(f20_valid), .click(click));
-    video_timing vt (.clk(clk), .rst(rst), .f(f20), .f_valid(f20_valid), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x),
+    wire signed [15:0] ffp, ffn;
+    video_timing #(.PERR_CLAMP(PERR_CLAMP)) vt (.clk(clk), .rst(rst), .f(f20), .f_valid(f20_valid), .cv(cv), .cv_valid(cv_valid), .cv_x(cv_x),
         .line_start(line_start), .line_no(line_no), .field_odd(field_odd), .field_start(field_start),
-        .is_pal(is_pal), .locked(locked), .meas_tip(tip), .meas_blank(blank));
+        .is_pal(is_pal), .locked(locked), .meas_tip(tip), .meas_blank(blank), .cv_ff_pal(ffp), .cv_ff_ntsc(ffn));
     initial begin
         $readmemh(HEX, mem);
         fo = $fopen(OUT, "w");
@@ -45,7 +47,7 @@ module tb_chain_a;
         $finish;
     end
     always @(posedge clk) begin
-        if (cv_valid && fo != 0) $fwrite(fo, "%0d %0d %0d %0d\n", cv_x, cv, line_no, field_odd);
+        if (cv_valid && fo != 0) $fwrite(fo, "%0d %0d %0d %0d %0d %0d\n", cv_x, cv, line_no, field_odd, ffp, ffn);
         if (field_start) $display("field start t=%0t odd=%0d", $time, field_odd);
     end
 endmodule

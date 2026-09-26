@@ -40,6 +40,10 @@ module soc #(
     input  wire        cap_done,       // toggles when the capture buffer is full (synchronised)
     output wire [10:0] cap_addr,
     input  wire [15:0] cap_data,
+    output reg         clog_req = 1'b0,// toggle: start a colour-lock recording (chroma_log.v)
+    input  wire        clog_done,      // toggles when 256 lines are stored (synchronised)
+    output wire [8:0]  clog_addr,
+    input  wire [31:0] clog_data,
     input  wire [31:0] vt_dbg,         // video_timing {have_levels, locked, good[5:0], miss[7:0], 8'd0}
     input  wire [31:0] vt_pulses,      // {broad pulses, H sync pulses} in the last 1 s
     input  wire [31:0] diag,           // {PLL A drops, PLL B drops, FIFO overflows, fb_ctrl state}
@@ -93,6 +97,9 @@ module soc #(
     assign cap_addr = mem_addr[12:2];
     wire [15:0] cap_q = cap_data;
     wire        cap_sel = mem_addr[31:28] == 4'h4;
+    // ---- colour-lock recorder read-back: 0x5000_0000 + 4 * word (registered read, 1 wait) ----
+    assign clog_addr = mem_addr[10:2];
+    wire        clog_sel = mem_addr[31:28] == 4'h5;
 
     // ---- millisecond counter ----
     reg [14:0] pre = 0; reg [31:0] ms = 0;
@@ -107,8 +114,8 @@ module soc #(
             settings0 <= 32'd0; settings1 <= {8'd0, 8'd146, 16'd0}; settings2 <= {16'd0, 8'd128, 8'd0};
             osd_ctrl <= {1'b0, 5'd0, 10'd104, 5'd0, 11'd320};
         end else if (mem_valid && !mem_ready) begin
-            if (ram_sel || cap_sel) begin                 // registered-read memories: one wait cycle
-                if (ram_wait) begin mem_ready <= 1'b1; mem_rdata <= ram_sel ? ram_q : {16'd0, cap_q}; ram_wait <= 1'b0; end
+            if (ram_sel || cap_sel || clog_sel) begin     // registered-read memories: one wait cycle
+                if (ram_wait) begin mem_ready <= 1'b1; mem_rdata <= ram_sel ? ram_q : cap_sel ? {16'd0, cap_q} : clog_data; ram_wait <= 1'b0; end
                 else ram_wait <= 1'b1;
             end else begin
                 mem_ready <= 1'b1;
@@ -144,6 +151,7 @@ module soc #(
                               5'd16: mem_rdata <= vt_dbg;
                               5'd17: mem_rdata <= vt_pulses;
                               5'd18: mem_rdata <= diag;
+                              5'd19: begin mem_rdata <= {31'd0, clog_done}; if (mem_wstrb != 0) clog_req <= ~clog_req; end
                               default: ;
                           endcase
                     default: ;

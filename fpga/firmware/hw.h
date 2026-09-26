@@ -26,6 +26,8 @@
 #define DIAG        REG(0x30000048u)   /* {PLL A drops, PLL B drops, FIFO overflows, fb_ctrl state} */
 #define CAP_CTRL    REG(0x3000003Cu)   /* W: start raw capture; R bit 0: done toggle */
 #define CAP_WORD(i) REG(0x40000000u + 4u * (i))   /* {falling byte, rising byte}, 2048 words */
+#define CLOG_CTRL   REG(0x3000004Cu)   /* W: start a colour-lock recording; R bit 0: done toggle */
+#define CLOG_WORD(i) REG(0x50000000u + 4u * (i))  /* 512 words: 256 line records (rtl/dsp/chroma_log.v) */
 
 /* ST_STATUS bits */
 #define S_BTN1      (1u << 0)
@@ -52,6 +54,7 @@
 #define SET0_FMONLY     (1u << 9)   /* hold video_timing + chroma_dec in reset, fm_frontend runs (diagnostics) */
 #define SET0_DEEMPH_SH  10          /* [11:10] de-emphasis roof: 0 13.4 dB (NTSC), 1 8 dB, 2 4 dB, 3 off */
 #define SET0_LPF        (1u << 12)  /* video low-pass (5.3 MHz FIR) after the de-emphasis */
+#define SET0_OLDLOCK    (1u << 13)  /* old burst lock (diagnostics, MEASUREMENTS M79; not saved) */
 /* SET1: [15:0] hue (1/65536 turn), [23:16] saturation (146 nominal)
  * SET2: [7:0] brightness (signed), [15:8] contrast (128 = 1.0)
  * OSD_CTRL: [10:0] x0, [25:16] y0, [31] enable */

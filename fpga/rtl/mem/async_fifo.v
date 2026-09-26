@@ -13,7 +13,7 @@ module async_fifo #(
     input  wire             rclk, rrst,
     input  wire             rd_en,               // pop the head
     output reg  [WIDTH-1:0] rd_data,
-    output wire             empty,
+    output reg              empty = 1'b1,         // registered, conservative (see below)
     output reg  [AW:0]      rd_level             // words available after this clock's pop (registered;
                                                  // never more than are there: writes only add)
 );
@@ -46,12 +46,15 @@ module async_fifo #(
     // ---- read side (FWFT: read address looks ahead on pop) ----
     wire [AW:0] rbin_n = rbin + {{AW{1'b0}}, (rd_en && !empty)};
     wire [AW:0] rgray_n = (rbin_n >> 1) ^ rbin_n;
-    assign empty = (rgray == wgray_r2);
+    // empty is registered from the next read pointer and the current synchronised write pointer:
+    // writes only add words, so it can stay set one clock too long but is never wrongly clear.
+    // The combinational compare fed the reader's decisions through a carry chain and set the
+    // pixel clock's critical path (MEASUREMENTS M79).
     // registered (the Gray decode and subtract fed the reader's decision logic combinationally and
     // failed timing at 74.25 MHz; MEASUREMENTS M75)
     always @(posedge rclk) begin
-        if (rrst) begin rbin <= 0; rgray <= 0; rd_level <= 0; end
-        else begin rbin <= rbin_n; rgray <= rgray_n; rd_level <= g2b(wgray_r2) - rbin_n; end
+        if (rrst) begin rbin <= 0; rgray <= 0; rd_level <= 0; empty <= 1'b1; end
+        else begin rbin <= rbin_n; rgray <= rgray_n; rd_level <= g2b(wgray_r2) - rbin_n; empty <= (rgray_n == wgray_r2); end
         rd_data <= mem[rbin_n[AW-1:0]];
         wgray_r1 <= wgray; wgray_r2 <= wgray_r1;
     end

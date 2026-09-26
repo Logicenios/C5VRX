@@ -15,7 +15,9 @@
 //  * Vertical  : first broad pulse of a field -> field start; parity from its position
 //                within the line (0H = odd field, H/2 = even field).
 `default_nettype none
-module video_timing (
+module video_timing #(
+    parameter integer PERR_CLAMP = 2      // H-PLL: sync-edge errors clamped to +-N samples (0: off), M79
+) (
     input  wire               clk,
     input  wire               rst,
     input  wire signed [17:0] f,
@@ -33,7 +35,13 @@ module video_timing (
     output reg signed [17:0]  meas_blank,
     output wire [23:0]        dbg,                 // {have_levels, locked, good[5:0], miss[7:0], 8'd0}
     output wire               hsync_pulse,         // one clock per accepted-width H sync pulse
-    output wire               broad_pulse          // one clock per broad (vertical) pulse
+    output wire               broad_pulse,         // one clock per broad (vertical) pulse
+    output reg  signed [11:0] perr_q4 = 0,         // last sync-edge error vs prediction, 1/16 sample, saturated
+    // colour feed-forward (MEASUREMENTS M79): with the last sample of a line (cv_x = 1279), how far the
+    // next line's start moved from the continued sample grid, as chroma_dec NCO units for PAL and
+    // NTSC (jump in samples x NCO increment); 0 on every other sample
+    output reg  signed [15:0] cv_ff_pal = 0,
+    output reg  signed [15:0] cv_ff_ntsc = 0
 );
     localparam integer LS = 1280;
 
@@ -196,8 +204,13 @@ module video_timing (
     wire coast = locked && !late_m[47] && (late_m < (48'd1 << 46));   // no edge by +7 us after prediction
     // Corrections computed in an explicitly signed context (an unsigned operand would
     // turn >>> into a logical shift and a small negative error into a huge one).
-    wire signed [49:0] phase_corr = perr_r >>> 3;
-    wire signed [49:0] freq_corr  = perr_r >>> 8;
+    // One noisy sync edge must not move the line grid by a whole sample: every sample of grid shift
+    // is ~80 degrees of subcarrier (MEASUREMENTS M79: after an error > 4 samples the next line had
+    // the colour reference inverted 47 % of the time). The acceptance window below stays +-24.
+    localparam signed [48:0] PCL = PERR_CLAMP * 65536;
+    wire signed [48:0] perr_c = (PERR_CLAMP == 0) ? perr_r : (perr_r > PCL) ? PCL : (perr_r < -PCL) ? -PCL : perr_r;
+    wire signed [49:0] phase_corr = perr_c >>> 3;
+    wire signed [49:0] freq_corr  = perr_c >>> 8;
     wire [47:0] line_next_trk   = $unsigned($signed({2'b0, next_pred}) + phase_corr);
     wire [47:0] period_next_trk = $unsigned($signed({2'b0, period}) + freq_corr);
     reg  per_wr_n;                        // any line_pos / period write this clock
@@ -241,6 +254,10 @@ module video_timing (
         end
         is_pal <= period > (48'd1275 << 16);
     end
+
+    // colour-lock recorder: the edge error of the latest H sync (valid the clock after step A)
+    wire signed [48:0] perr_s = perr_r >>> 12;
+    always @(posedge clk) if (ev_a) perr_q4 <= (perr_s > 2047) ? 12'sd2047 : (perr_s < -2048) ? -12'sd2048 : perr_s[11:0];
 
     // ---------------- resampler ----------------
     reg [47:0] rs_pos, rs_line;
@@ -302,7 +319,8 @@ module video_timing (
     // p1..p4: in one clock (two multiplies in series) it failed timing by 14 ns at 74.25 MHz
     // (MEASUREMENTS M75). All outputs are delayed by the same 4 clocks, so the output stream is
     // the single-clock one shifted by 4 (sim/tb_chain_a, sim/tb_full).
-    reg        p0_v, p0_ls, ls_int;
+    reg        p0_v, p0_ls, ls_int, p0_last = 1'b0;
+    reg [47:0] rs_cont;
     reg [10:0] p0_x;
     reg signed [17:0] p0_s0, p0_s1, p0_blank;
     reg [15:0] p0_rf;
@@ -322,11 +340,13 @@ module video_timing (
             p0_v <= 1'b1; p0_x <= rs_x; p0_ls <= (rs_x == 0);
             p0_s0 <= s0; p0_s1 <= s1; p0_rf <= rf; p0_blank <= meas_blank; p0_gain <= gain;
             ls_int <= (rs_x == 0);
+            p0_last <= (rs_x == LS - 1);
             if (rs_x == LS - 1) begin
                 rs_x <= 0;
                 // next line starts one PLL period after this line's (corrected) start
                 rs_line <= anchor_next;
                 rs_pos  <= anchor_next;
+                rs_cont <= rs_pos + rs_step;         // where the grid would have continued
             end else begin
                 rs_x <= rs_x + 11'd1;
                 rs_pos <= rs_pos + rs_step;
@@ -343,6 +363,14 @@ module video_timing (
     reg        p2_v, p2_ls; reg [10:0] p2_x;
     reg signed [18:0] p2_rel;
     reg [17:0] p2_gain;
+    // feed-forward: p1 jump (Q8 samples, saturated), p2 NCO units for PAL (14528) and NTSC (11648)
+    // as shift-and-add, p3 carry, p4 output
+    wire [47:0] jd = rs_line - rs_cont;                  // modulo 2^48, read as signed
+    wire signed [47:0] jq8 = $signed(jd) >>> 8;
+    reg  signed [15:0] p1_jump;
+    reg  signed [31:0] p2_ffp, p2_ffn;
+    reg  signed [15:0] p3_ffp, p3_ffn;
+    wire signed [31:0] jx = p1_jump;
     // p3: gain
     reg        p3_v, p3_ls; reg [10:0] p3_x;
     reg signed [37:0] p3_mv;
@@ -352,6 +380,10 @@ module video_timing (
         p1_v <= p0_v; p1_ls <= p0_ls; p1_x <= p0_x;
         p1_prod <= ($signed(p0_s1) - $signed(p0_s0)) * $signed({1'b0, p0_rf});
         p1_s0 <= p0_s0; p1_blank <= p0_blank; p1_gain <= p0_gain;
+        p1_jump <= (p0_v && p0_last) ? ((jq8 > 32767) ? 16'sd32767 : (jq8 < -32768) ? -16'sd32768 : jq8[15:0]) : 16'sd0;
+        p2_ffp <= (jx <<< 13) + (jx <<< 12) + (jx <<< 11) + (jx <<< 7) + (jx <<< 6);     // x 14528
+        p2_ffn <= (jx <<< 13) + (jx <<< 11) + (jx <<< 10) + (jx <<< 8) + (jx <<< 7);     // x 11648
+        p3_ffp <= p2_ffp >>> 8; p3_ffn <= p2_ffn >>> 8;
         p2_v <= p1_v; p2_ls <= p1_ls; p2_x <= p1_x;
         p2_rel <= fi2 - p1_blank; p2_gain <= p1_gain;
         p3_v <= p2_v; p3_ls <= p2_ls; p3_x <= p2_x;
@@ -362,6 +394,7 @@ module video_timing (
         if (p3_v) begin
             cv <= (mv_i > 22'sd1023) ? 12'sd1023 : (mv_i < -22'sd1024) ? -12'sd1024 : mv_i[11:0];
             cv_x <= p3_x;
+            cv_ff_pal <= p3_ffp; cv_ff_ntsc <= p3_ffn;
         end
     end
 

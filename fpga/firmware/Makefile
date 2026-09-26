@@ -8,6 +8,11 @@ SIZE     := $(CROSS)size
 MEM_WORDS := 4096
 CFLAGS   := -march=rv32i_zicsr_zifencei -mabi=ilp32 -Os -ffreestanding -fno-builtin -nostdlib \
             -Wall -Wextra -Wno-unused-parameter -std=gnu11 -I. -I../../src -ffunction-sections -fdata-sections
+# make CLOG_AB=1: diagnostic build that alternates the burst lock (new / old) every 10 s and
+# records each period (MEASUREMENTS M79); never for normal use (bands every other period)
+ifeq ($(CLOG_AB),1)
+CFLAGS   += -DCLOG_AB
+endif
 LDFLAGS  := -T link.ld -Wl,--no-warn-rwx-segments -Wl,--gc-sections -Wl,-Map,build/fw.map
 
 build/fw.hex: build/fw.bin

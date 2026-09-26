@@ -56,7 +56,11 @@ static fpga_settings_t cfg = {
     BLOB_MAGIC, BLOB_VERSION, LINK_STD_AUTO, 0, 0, 0, 0, 0, 0, 128, 146, 0, 2, 1,
 };
 static bool test_pat;      /* menu "Test pattern": runtime only, not part of the saved blob */
-static uint8_t dec_mode;   /* menu "Decoder": 0 Run, 1 FM only, 2 Idle (diagnostics, runtime only) */
+#ifdef CLOG_AB
+static bool clog_old;      /* diagnostic build: this period runs the old burst lock (M79) */
+#endif
+static uint8_t dec_mode;   /* menu "Decoder": 0 Run, 1 FM only, 2 Idle, 3 Run with the old burst lock
+                            * (diagnostics, runtime only) */
 static const char *const DEEMPH_NAME[4] = { "NTSC 13 dB", "8 dB", "4 dB", "Off" };
 
 static void apply_settings(void)
@@ -64,7 +68,10 @@ static void apply_settings(void)
     SET0 = ((uint32_t)cfg.std_mode << SET0_STD_SH) | (cfg.force60 ? SET0_FORCE60 : 0) |
            (cfg.aspect169 ? SET0_ASPECT169 : 0) | (cfg.weave ? SET0_WEAVE : 0) |
            (cfg.loss_nosig ? SET0_NOSIGSCR : 0) | (cfg.notch ? SET0_NOTCH : 0) |
-           (test_pat ? SET0_TESTPAT : 0) | (dec_mode == 2 ? SET0_DECIDLE : 0) | (dec_mode == 1 ? SET0_FMONLY : 0) |
+           (test_pat ? SET0_TESTPAT : 0) | (dec_mode == 2 ? SET0_DECIDLE : 0) | (dec_mode == 1 ? SET0_FMONLY : 0) | (dec_mode == 3 ? SET0_OLDLOCK : 0) |
+#ifdef CLOG_AB
+           (clog_old ? SET0_OLDLOCK : 0) |
+#endif
            ((uint32_t)(cfg.deemph & 3u) << SET0_DEEMPH_SH) | (cfg.lpf ? SET0_LPF : 0);
     /* hue: degrees -> 1/65536 turn (65536 / 360 = 182.04) */
     uint32_t hue = (uint32_t)((int32_t)cfg.hue_deg * 182) & 0xFFFFu;
@@ -368,7 +375,7 @@ static void edit_step(int d)
     case M_LPF:      cfg.lpf ^= 1u; break;
     case M_LOSS:     cfg.loss_nosig ^= 1u; break;
     case M_TEST:     test_pat = !test_pat; break;
-    case M_DEC:      dec_mode = (uint8_t)((dec_mode + 3 + d) % 3); break;
+    case M_DEC:      dec_mode = (uint8_t)((dec_mode + 4 + d) % 4); break;
     default: break;
     }
     apply_settings();
@@ -421,7 +428,7 @@ static void value_text(int r, int c, int it, uint8_t attr)
     case M_LPF:      put(r, c, cfg.lpf ? "5.3 MHz" : "Off", attr); break;
     case M_LOSS:     put(r, c, cfg.loss_nosig ? "No signal" : "Last frame", attr); break;
     case M_TEST:     put(r, c, test_pat ? "Colour bars" : "Off", attr); break;
-    case M_DEC:      put(r, c, dec_mode == 2 ? "Idle" : dec_mode == 1 ? "FM only" : "Run", attr); break;
+    case M_DEC:      put(r, c, dec_mode == 3 ? "Run, old lock" : dec_mode == 2 ? "Idle" : dec_mode == 1 ? "FM only" : "Run", attr); break;
     case M_SAVE:     if ((int32_t)(saved_msg_until_ms - now_ms()) > 0) put(r, c, "sent to C5", attr); break;
     case M_LINK:     put(r, c, wt_state == WT_DONE ? (wt_bad ? "WIRING FAULT" : "wiring OK") : "not tested", attr); break;
     default: break;
@@ -605,6 +612,35 @@ static void on_event(int ev)
     }
 }
 
+/* ---------------------------------------------------------------- colour-lock recorder
+ * Every 10 s while video_timing is locked: 256 consecutive line records of chroma_dec's burst
+ * loop (rtl/dsp/chroma_log.v), sent as LINK_MSG_FPGA_CAPTURE frames whose 16-bit word offset
+ * has bit 15 set (fpga/bringup/link_sniff.py --clog saves them; MEASUREMENTS M79). */
+static uint32_t clog_last_ms;
+static bool clog_send(void)                 /* false: no recording (no lines within 40 ms) */
+{
+    uint32_t d0 = CLOG_CTRL & 1u;
+    CLOG_CTRL = 1u;
+    uint32_t t0 = now_ms();
+    while ((CLOG_CTRL & 1u) == d0) if (now_ms() - t0 > 40u) return false;   /* 256 lines take 16 ms */
+    uint8_t buf[2 + 56];
+    for (unsigned w = 0; w < 1024u; w += 28u) {                        /* 16-bit words */
+        unsigned off = 0x8000u | w, n = 1024u - w < 28u ? 1024u - w : 28u;
+#ifdef CLOG_AB
+        if (clog_old) off |= 0x4000u;                                  /* recorded with the old lock */
+#endif
+        buf[0] = (uint8_t)off; buf[1] = (uint8_t)(off >> 8);
+        for (unsigned i = 0; i < n; ++i) {
+            uint32_t v = CLOG_WORD((w + i) >> 1);
+            uint16_t h = ((w + i) & 1u) ? (uint16_t)(v >> 16) : (uint16_t)v;
+            buf[2 + 2 * i] = (uint8_t)h; buf[3 + 2 * i] = (uint8_t)(h >> 8);
+        }
+        send(LINK_MSG_FPGA_CAPTURE, buf, 2 + 2 * n);
+        link_poll();
+    }
+    return true;
+}
+
 /* ---------------------------------------------------------------- main */
 int main(void)
 {
@@ -621,6 +657,19 @@ int main(void)
         if ((ST_STATUS & S_STROBE) && wt_state != WT_RUN && t - cap_last_ms >= 20000u && t > 8000u) {
             capture_and_send();
             cap_last_ms = t;
+        }
+        if ((ST_STATUS & S_VLOCK) && wt_state != WT_RUN && t - clog_last_ms >= 10000u && t > 8000u) {
+            bool sent = clog_send();
+            clog_last_ms = t;
+#ifdef CLOG_AB
+            if (sent) {                            /* next period with the other lock (only after a
+                                                    * recording, or the tags lose step: M79) */
+                clog_old = !clog_old;
+                apply_settings();
+            }
+#else
+            (void)sent;
+#endif
         }
         if (t - last_dbg >= 1000u) {                         /* diagnostics (fpga/bringup/link_sniff.py) */
             uint32_t d[15] = { ST_STATUS, ST_DEBUG, t, ST_COUNTERS,

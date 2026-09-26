@@ -21,21 +21,32 @@ module chroma_dec #(
     input  wire signed [11:0] cv,
     input  wire               cv_valid,
     input  wire [10:0]        cv_x,
+    input  wire signed [15:0] cv_ff_pal,    // video_timing feed-forward, with cv_x = 1279 (NCO units)
+    input  wire signed [15:0] cv_ff_ntsc,
     input  wire               is_pal,
     input  wire               comb,         // 1 = comb, 0 = notch
     input  wire [15:0]        hue,          // NTSC hue offset (1/65536 turn)
     input  wire [7:0]         sat,          // 146 = nominal
+    input  wire               lock_legacy,  // 1: old burst lock (flip on one line's bu > 0, no gate)
     output reg  signed [11:0] y_out,
     output reg  signed [15:0] u_out,
     output reg  signed [15:0] v_out,
     output reg  [10:0]        x_out,
     output reg                out_valid,
     output reg                killed,
-    output reg                pal_sw_neg
+    output reg                pal_sw_neg,
+    // colour-lock recorder (top.v chroma_log): one record per line at the line end, when the NCO
+    // correction is applied. Observation only; nothing here feeds back into the decoder.
+    output reg                log_we = 1'b0,
+    output reg  [15:0]        log_bu,        // burst U sum >>> 8, saturated
+    output reg  [15:0]        log_bv,        // burst V sum >>> 8, saturated
+    output reg  [15:0]        log_corr,      // NCO phase correction added at this line end
+    output reg  [2:0]         log_fl         // {180-degree flip (bu > 0), V switch, killed}
 );
     localparam integer LS = 1280;
     localparam [10:0] BX0 = 11'd112, BX1 = 11'd144, BDEC = 11'd150, XACT0 = 11'd160;
     localparam signed [31:0] KILL_BU = 32'sd60000;
+    localparam [32:0]        LOCK_GATE = 33'd150000;   // |bu| + |bv| below: no burst, hold the loop
 
     reg signed [9:0] sin_rom [0:255];
     reg signed [9:0] cos_rom [0:255];
@@ -78,9 +89,34 @@ module chroma_dec #(
         if (kp_c) begin k3_c <= kp; k3_x <= kh_x; end
     end
 
+    // Burst lock (chroma_ref.chroma_decode, MEASUREMENTS M79). The 180-degree flip is decided on
+    // the two-line sum of burst U (the PAL +-45 degree swing cancels in it); after a flip the
+    // previous line's values are carried into the new frame (negated). Lines without a burst hold
+    // the loop, and the first line with one only primes the sums. The old rule (flip whenever this
+    // line's bu > 0) can settle into a flip-every-line false lock: 180 degrees per line plus the PAL
+    // swing looks like a burst at 0 +- 45 degrees, i.e. bands of hue-inverted lines.
+    // Everything is decided at x = BDEC (the sums are final) and applied at the line end.
+    reg  signed [31:0] bu_prev;
+    reg         have_prev;
+    // two steps (one sample each) so no clock chains the sums, the comparisons and the correction:
+    // x = BDEC: error sum, |bu| and |bv|, two-line U sum; x = BDEC + 1: burst present;
+    // x = BDEC + 2: flip and correction
     wire signed [32:0] err = pal ? (bv + bv_prev) : {bv[31], bv};
-    wire signed [32:0] err_sh = err >>> 9;
-    wire [15:0] corr16 = (-err_sh[15:0]) + ((bu > 0) ? 16'd32768 : 16'd0);
+    wire [31:0] abu = bu[31] ? -bu : bu, abv = bv[31] ? -bv : bv;
+    wire signed [32:0] usum = {bu[31], bu} + {bu_prev[31], bu_prev};
+    reg  signed [32:0] err_r;
+    reg         present_r, usum_pos, bu_pos, have_r;
+    reg  [31:0] abu_r, abv_r;
+    wire        hold = !present_r || !have_r;
+    wire        flip = lock_legacy ? bu_pos : (!hold && (pal ? usum_pos : bu_pos));
+    wire signed [32:0] err_sh = err_r >>> 9;
+    wire [15:0] corr16 = (!lock_legacy && hold) ? 16'd0 : (-err_sh[15:0]) + (flip ? 16'd32768 : 16'd0);
+    reg  [15:0] corr_r; reg flip_r;
+
+    function [15:0] sat16(input signed [31:0] v);
+        reg signed [31:0] s;
+        begin s = v >>> 8; sat16 = (s > 32767) ? 16'h7FFF : (s < -32768) ? 16'h8000 : s[15:0]; end
+    endfunction
 
     // ---------------- stage A register (input sample) ----------------
     reg signed [11:0] a_cv;
@@ -88,9 +124,10 @@ module chroma_dec #(
     reg [10:0] a_x;
     reg        a_v;
     always @(posedge clk) begin
-        a_v <= 1'b0;
+        a_v <= 1'b0; log_we <= 1'b0;
         if (rst) begin
-            phi_line <= 0; phi_run <= 0; bv_prev <= 0; kill_cnt <= 0;
+            phi_line <= 0; phi_run <= 0; bv_prev <= 0; bu_prev <= 0; have_prev <= 1'b0; kill_cnt <= 0;
+            corr_r <= 0; flip_r <= 1'b0; present_r <= 1'b0; have_r <= 1'b0; err_r <= 0; usum_pos <= 1'b0; bu_pos <= 1'b0;
             killed <= 1'b0; pal_sw_neg <= 1'b0;
         end else if (cv_valid) begin
             phi_run <= phi_in;
@@ -100,7 +137,13 @@ module chroma_dec #(
             lb2[cv_x] <= lb1[cv_x];
             if (cv_x == BDEC) begin
                 pal_sw_neg <= pal && (bv < 0);
-                if ((bu < 0 ? -bu : bu) < KILL_BU) begin
+                err_r <= err; abu_r <= abu; abv_r <= abv;
+                usum_pos <= usum > 0; bu_pos <= bu > 0; have_r <= have_prev;
+            end
+            if (cv_x == BDEC + 11'd1) begin
+                present_r <= ({1'b0, abu_r} + {1'b0, abv_r}) >= LOCK_GATE;
+                // colour killer from the registered |bu| (samples before XACT0 are blanked anyway)
+                if (abu_r < KILL_BU) begin
                     kill_cnt <= (kill_cnt == 4'd8) ? 4'd8 : kill_cnt + 4'd1;
                     killed <= (kill_cnt >= 4'd7);
                 end else begin
@@ -108,10 +151,23 @@ module chroma_dec #(
                     killed <= (kill_cnt >= 4'd9);   // i.e. (kill_cnt-1) >= 8: never
                 end
             end
+            if (cv_x == BDEC + 11'd2) begin
+                corr_r <= corr16; flip_r <= flip;
+            end
             if (cv_x == LS - 1) begin
                 // corr = -(err >> 9) (+ half turn if bu > 0), err = bv (+ bv_prev for PAL)
-                phi_line <= phi_line + inc * 16'd1280 + corr16;
-                bv_prev <= bv;
+                // + feed-forward: the resampler moved the next line's start by the jump that
+                // video_timing reports, so the subcarrier there moved by jump x inc (not in old-lock mode)
+                phi_line <= phi_line + inc * 16'd1280 + corr_r
+                            + (lock_legacy ? 16'd0 : pal ? cv_ff_pal : cv_ff_ntsc);
+                if (lock_legacy) bv_prev <= bv;
+                else if (present_r) begin
+                    bu_prev <= flip_r ? -bu : bu; bv_prev <= flip_r ? -bv : bv; have_prev <= 1'b1;
+                end else begin
+                    bu_prev <= 0; bv_prev <= 0; have_prev <= 1'b0;
+                end
+                log_we <= 1'b1; log_bu <= sat16(bu); log_bv <= sat16(bv); log_corr <= corr_r;
+                log_fl <= {flip_r, pal_sw_neg, killed};
             end
         end
     end
