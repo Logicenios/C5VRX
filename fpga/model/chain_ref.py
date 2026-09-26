@@ -51,19 +51,7 @@ def fb_format_line(Y, U, V, pal: bool, brightness: int = 0, contrast: int = 128)
             px += 1
             spos += step
         y_p = y_in
-    return chroma_smooth(words)
-
-
-def chroma_smooth(words):
-    """Horizontal chroma low-pass over the 360 pairs of a line, as fb_format.v: Cb and Cr each
-    (c[k-2] + 2 c[k-1] + 2 c[k] + 2 c[k+1] + c[k+2] + 4) >> 3, the edge pairs repeated."""
-    n = len(words)
-    cb = [(w >> 8) & 255 for w in words]
-    cr = [(w >> 24) & 255 for w in words]
-    def f(c, k):
-        t = [c[min(max(k + j, 0), n - 1)] for j in (-2, -1, 0, 1, 2)]
-        return (t[0] + 2 * (t[1] + t[2] + t[3]) + t[4] + 4) >> 3
-    return [(f(cr, k) << 24) | (w & 0x00FF00FF) | (f(cb, k) << 8) for k, w in enumerate(words)]
+    return words
 
 
 def fields_from_dump(path: str, pal: bool):
