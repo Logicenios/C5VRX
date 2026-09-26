@@ -137,20 +137,56 @@ module fb_format (
         p4_pix <= p3_pix; p4_desc <= p3_desc; p4_even <= p3_even; p4_word <= p3_word;
         p4_yc <= yc_w; p4_cb <= p3_cb; p4_cr <= p3_cr;
     end
-    // ---- P5: brightness, limits, pixel pairing, FIFO write ----
+    // ---- P5: brightness, limits, pixel pairing ----
     wire signed [31:0] yv = p4_yc + 32'sd16 + brightness;
     wire [7:0] y8 = (yv < 0) ? 8'd0 : (yv > 255) ? 8'd255 : yv[7:0];
     reg [7:0]  y0_q, cb_q;
+    reg        pr_v = 1'b0; reg [7:0] pr_y0, pr_y1, pr_cb, pr_cr;   // a completed pixel pair
+    reg        ds_v = 1'b0; reg [35:0] ds_word;                        // a descriptor
     always @(posedge clk) begin
-        fifo_wr <= 1'b0;
+        pr_v <= 1'b0; ds_v <= 1'b0;
         if (p4_desc) begin
-            fifo_data <= p4_word; fifo_wr <= 1'b1;
+            ds_v <= 1'b1; ds_word <= p4_word;
         end else if (p4_pix) begin
             if (p4_even) begin
                 y0_q <= y8; cb_q <= p4_cb;
             end else begin
-                fifo_data <= {4'd0, p4_cr, y8, cb_q, y0_q};
-                fifo_wr <= 1'b1;
+                pr_v <= 1'b1; pr_y0 <= y0_q; pr_y1 <= y8; pr_cb <= cb_q; pr_cr <= p4_cr;
+            end
+        end
+    end
+    // ---- P6: horizontal chroma low-pass over the pairs of a line (model/chain_ref.py
+    // chroma_smooth): (c[k-2] + 2 c[k-1] + 2 c[k] + 2 c[k+1] + c[k+2] + 4) >> 3 with the edge pairs
+    // repeated. Pair k is written when pair k + 2 arrives; the line's last two pairs are flushed
+    // right after its last pixel (the next descriptor is a line later).
+    reg [7:0]  hb0, hb1, hb2, hb3, hb4, hr0, hr1, hr2, hr3, hr4;   // chroma, h*0 = newest
+    reg [15:0] hy0, hy1;                                          // {Y1, Y0}
+    reg [8:0]  npair = 0;                                         // pairs taken this line
+    reg [1:0]  flush = 0;
+    wire       push = pr_v || (flush != 2'd0);
+    wire [7:0] nb = pr_v ? pr_cb : hb0, nr = pr_v ? pr_cr : hr0;  // a flush repeats the last pair
+    wire       first = pr_v && npair == 9'd0;                     // prime the history with pair 0
+    // taps after this push: {h3, h2, h1, h0, new} (all pair 0 at the line start)
+    wire [7:0] tb4 = first ? nb : hb3, tb3 = first ? nb : hb2, tb2 = first ? nb : hb1, tb1 = first ? nb : hb0;
+    wire [7:0] tr4 = first ? nr : hr3, tr3 = first ? nr : hr2, tr2 = first ? nr : hr1, tr1 = first ? nr : hr0;
+    wire [10:0] sb = {3'd0, tb4} + {2'd0, tb3, 1'b0} + {2'd0, tb2, 1'b0} + {2'd0, tb1, 1'b0} + {3'd0, nb} + 11'd4;
+    wire [10:0] sr = {3'd0, tr4} + {2'd0, tr3, 1'b0} + {2'd0, tr2, 1'b0} + {2'd0, tr1, 1'b0} + {3'd0, nr} + 11'd4;
+    wire [15:0] yo = first ? {pr_y1, pr_y0} : hy1;                // pair k = (this push) - 2
+    always @(posedge clk) begin
+        fifo_wr <= 1'b0;
+        if (rst) begin npair <= 0; flush <= 0; end
+        else if (ds_v) begin
+            fifo_data <= ds_word; fifo_wr <= 1'b1; npair <= 0; flush <= 0;
+        end else if (push) begin
+            hb4 <= tb4; hb3 <= tb3; hb2 <= tb2; hb1 <= tb1; hb0 <= nb;
+            hr4 <= tr4; hr3 <= tr3; hr2 <= tr2; hr1 <= tr1; hr0 <= nr;
+            hy1 <= first ? {pr_y1, pr_y0} : hy0; hy0 <= pr_v ? {pr_y1, pr_y0} : hy0;
+            if (pr_v) begin
+                npair <= npair + 9'd1;
+                if (npair == 9'd359) flush <= 2'd2;
+            end else flush <= flush - 2'd1;
+            if (!pr_v || npair >= 9'd2) begin
+                fifo_data <= {4'd0, sr[10:3], yo[15:8], sb[10:3], yo[7:0]}; fifo_wr <= 1'b1;
             end
         end
     end
