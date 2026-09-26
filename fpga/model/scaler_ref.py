@@ -12,9 +12,10 @@ import sys
 
 import numpy as np
 
-from scaler_coef import TABLE
+from scaler_coef import TABLE, TABLE_BS
 
-COEF = np.array(TABLE, dtype=np.int64)          # (32, 4)
+COEF = np.array(TABLE, dtype=np.int64)          # (32, 4) luma: Catmull-Rom
+COEFC = np.array(TABLE_BS, dtype=np.int64)      # chroma: cubic B-spline
 
 
 def clip7(s):
@@ -76,15 +77,15 @@ def render(top, bottom, newest_odd, pal, weave, aspect_169):
         keys = [min(max(k - 1 + j, 0), kmax) for j in range(4)]
         taps = [src(q) for q in keys]
         vy = clip7(sum(COEF[vph, j] * taps[j][0] for j in range(4)))
-        vcv = clip7(sum(COEF[vph, j] * taps[j][1] for j in range(4)))
+        vcv = clip7(sum(COEFC[vph, j] * taps[j][1] for j in range(4)))
         ypad = np.concatenate([[vy[0], vy[0]], vy, [vy[719], vy[719]]])       # index p + 2
         cb = vcv[0::2]
         cr = vcv[1::2]
         cbp = np.concatenate([[cb[0], cb[0]], cb, [cb[359], cb[359]]])
         crp = np.concatenate([[cr[0], cr[0]], cr, [cr[359], cr[359]]])
         Y = clip7(sum(COEF[ph, j] * ypad[n - 1 + j + 2] for j in range(4)))
-        Cb = clip7(sum(COEF[phc, j] * cbp[m - 1 + j + 2] for j in range(4)))
-        Cr = clip7(sum(COEF[phc, j] * crp[m - 1 + j + 2] for j in range(4)))
+        Cb = clip7(sum(COEFC[phc, j] * cbp[m - 1 + j + 2] for j in range(4)))
+        Cr = clip7(sum(COEFC[phc, j] * crp[m - 1 + j + 2] for j in range(4)))
         yy = (Y - 16) * 1192
         r = np.clip((yy + (Cr - 128) * 1634) >> 10, 0, 255)
         g = np.clip((yy - (Cb - 128) * 401 - (Cr - 128) * 833) >> 10, 0, 255)

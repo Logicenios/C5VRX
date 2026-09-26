@@ -7,7 +7,8 @@
 //   weave: frame line   v = ((2y + 1) L - 360) / 720, frame line q from field q & 1 (0 = top)
 //   L = 240 (NTSC) / 288 (PAL). Taps are source lines floor(v) - 1 .. + 2, clamped.
 // Horizontal: u = (x + 0.5) 720 / W - 0.5 luma samples; chroma (co-sited, 360 per line) at u / 2.
-// Filter: Catmull-Rom 4-tap, Q7 (rtl/out/cr_coef.vh from model/scaler_coef.py); the host
+// Filter: 4-tap, Q7, Catmull-Rom for luma and a cubic B-spline (low-pass) for chroma
+// (rtl/out/cr_coef.vh from model/scaler_coef.py); the host
 // model model/scaler_ref.py is bit-exact with this file.
 //
 // Data flow:
@@ -175,8 +176,9 @@ module out_path (
         vrun4 <= vrun3; vi4 <= vi3;
     end
     // v1: select the component and multiply (Y and the co-sited chroma component)
-    wire [35:0] vc4 = cr_coef(vph);
+    wire [35:0] vc4 = cr_coef(vph), vb4 = bs_coef(vph);     // luma Catmull-Rom, chroma B-spline
     wire signed [8:0] vcf0 = vc4[8:0], vcf1 = vc4[17:9], vcf2 = vc4[26:18], vcf3 = vc4[35:27];
+    wire signed [8:0] vbf0 = vb4[8:0], vbf1 = vb4[17:9], vbf2 = vb4[26:18], vbf3 = vb4[35:27];
     // cache words registered before the multipliers (the block-RAM output, the slot select and
     // the multiply-add in one clock left 0.17 ns at 74.25 MHz; MEASUREMENTS M81): products use
     // vi2, sums vi3, bank writes vi4
@@ -187,10 +189,10 @@ module out_path (
     reg signed [17:0] vpy0, vpy1, vpy2, vpy3, vpc0, vpc1, vpc2, vpc3;
     reg signed [19:0] vsy, vsc;
     always @(posedge clk) begin
-        vpy0 <= $signed({1'b0, ycomp(d0, vi2[0])}) * vcf0; vpc0 <= $signed({1'b0, ccomp(d0, vi2[0])}) * vcf0;
-        vpy1 <= $signed({1'b0, ycomp(d1, vi2[0])}) * vcf1; vpc1 <= $signed({1'b0, ccomp(d1, vi2[0])}) * vcf1;
-        vpy2 <= $signed({1'b0, ycomp(d2, vi2[0])}) * vcf2; vpc2 <= $signed({1'b0, ccomp(d2, vi2[0])}) * vcf2;
-        vpy3 <= $signed({1'b0, ycomp(d3, vi2[0])}) * vcf3; vpc3 <= $signed({1'b0, ccomp(d3, vi2[0])}) * vcf3;
+        vpy0 <= $signed({1'b0, ycomp(d0, vi2[0])}) * vcf0; vpc0 <= $signed({1'b0, ccomp(d0, vi2[0])}) * vbf0;
+        vpy1 <= $signed({1'b0, ycomp(d1, vi2[0])}) * vcf1; vpc1 <= $signed({1'b0, ccomp(d1, vi2[0])}) * vbf1;
+        vpy2 <= $signed({1'b0, ycomp(d2, vi2[0])}) * vcf2; vpc2 <= $signed({1'b0, ccomp(d2, vi2[0])}) * vbf2;
+        vpy3 <= $signed({1'b0, ycomp(d3, vi2[0])}) * vcf3; vpc3 <= $signed({1'b0, ccomp(d3, vi2[0])}) * vbf3;
         vsy <= vpy0 + vpy1 + vpy2 + vpy3;
         vsc <= vpc0 + vpc1 + vpc2 + vpc3;
     end
@@ -281,7 +283,7 @@ module out_path (
         act <= {act[5:0], act0};
     end
     // h1: taps in order (tap j = bank (s4 + j) & 3), products
-    wire [35:0] hy4 = cr_coef(r_ph), hc4 = cr_coef(r_phc);
+    wire [35:0] hy4 = cr_coef(r_ph), hc4 = bs_coef(r_phc);    // chroma: B-spline
     wire signed [8:0] hyc0 = hy4[8:0], hyc1 = hy4[17:9], hyc2 = hy4[26:18], hyc3 = hy4[35:27];
     wire signed [8:0] hcc0 = hc4[8:0], hcc1 = hc4[17:9], hcc2 = hc4[26:18], hcc3 = hc4[35:27];
     wire [7:0]  ty0 = yq[r_s], ty1 = yq[r_s + 2'd1], ty2 = yq[r_s + 2'd2], ty3 = yq[r_s + 2'd3];
