@@ -17,6 +17,7 @@ module hdmi_tx #(
     input  wire        dvi_only,   // 1 = no data islands / guard bands (DVI fallback)
     output reg  [10:0] hc = 0,     // pixel position being requested now
     output wire [10:0] hc_next,    // hc of the next clock (lets consumers register hc comparisons)
+    output wire [9:0]  vc_next,    // vc of the next clock
     output reg  [9:0]  vc = 0,
     output wire        req_de,     // (hc, vc) inside the 1280x720 active area
     output reg         frame_start,// one clock at hc=0, vc=0
@@ -39,6 +40,7 @@ module hdmi_tx #(
     localparam ISL_GB1  = ISL_PKT + 11'd32;   // trailing guard band 1326..1327
 
     assign hc_next = rst ? 11'd0 : (hc == h_total - 1) ? 11'd0 : hc + 11'd1;
+    assign vc_next = rst ? 10'd0 : (hc != h_total - 1) ? vc : (vc == V_TOTAL - 1) ? 10'd0 : vc + 10'd1;
     always @(posedge clk) begin
         if (rst) begin
             hc <= 0; vc <= 0;
@@ -118,9 +120,13 @@ module hdmi_tx #(
                           sp1_full[{pkt_idx, 1'b1}], sp0_full[{pkt_idx, 1'b1}]};
 
     // ---- delay control to meet the pixel source latency ----
-    reg [2:0] period_d [0:PIX_LATENCY-1];
-    reg       hs_d [0:PIX_LATENCY-1], vs_d [0:PIX_LATENCY-1];
-    reg [3:0] i0_d [0:PIX_LATENCY-1], i1_d [0:PIX_LATENCY-1], i2_d [0:PIX_LATENCY-1];
+    // flip-flops, not block-RAM shift registers (block RAM is full; PIX_LATENCY = 18 with OSD v2)
+    reg [2:0] period_d [0:PIX_LATENCY-1] /* synthesis syn_srlstyle = "registers" */;
+    reg       hs_d [0:PIX_LATENCY-1] /* synthesis syn_srlstyle = "registers" */;
+    reg       vs_d [0:PIX_LATENCY-1] /* synthesis syn_srlstyle = "registers" */;
+    reg [3:0] i0_d [0:PIX_LATENCY-1] /* synthesis syn_srlstyle = "registers" */;
+    reg [3:0] i1_d [0:PIX_LATENCY-1] /* synthesis syn_srlstyle = "registers" */;
+    reg [3:0] i2_d [0:PIX_LATENCY-1] /* synthesis syn_srlstyle = "registers" */;
     integer s;
     always @(posedge clk) begin
         period_d[0] <= period; hs_d[0] <= hs; vs_d[0] <= vs;

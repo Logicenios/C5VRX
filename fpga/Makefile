@@ -23,7 +23,7 @@ PATTERN_SRC := rtl/top_pattern.v rtl/clocks/pll_tmds_60.v $(HDMI_SRC)
 TOP_SRC  := rtl/top.v rtl/clocks/clk_gen.v rtl/clocks/pll_tmds_60.v $(HDMI_SRC) \
             rtl/dsp/fm_frontend.v rtl/dsp/video_timing.v rtl/dsp/chroma_dec.v rtl/dsp/chroma_log.v rtl/dsp/test_src.v \
             rtl/fb/fb_format.v rtl/fb/fb_ctrl.v rtl/mem/async_fifo.v rtl/mem/sdram_ctrl.v \
-            rtl/out/out_path.v rtl/osd/osd.v rtl/soc/soc.v rtl/soc/uart.v rtl/soc/cdc_bus.v rtl/link/link_mon.v rtl/link/link_cap.v \
+            rtl/out/out_path.v rtl/osd/osd2.v rtl/osd/pipe_dly.v rtl/soc/soc.v rtl/soc/uart.v rtl/soc/cdc_bus.v rtl/link/link_mon.v rtl/link/link_cap.v \
             third_party/picorv32/picorv32.v
 # Yosys 0.69 leaves $$buf cells for register bits whose low bits were trimmed (their
 # input is undriven); nextpnr has no BEL for them. Tie undriven bits to 0 and map the
@@ -41,7 +41,7 @@ all: top
 top: $(BUILD)/top.fs
 
 $(BUILD)/top-synth.json: $(TOP_SRC) $(TOP_HEX) tools/smul_map.v | $(BUILD)
-	yosys -q -l $(BUILD)/top-yosys.log -p "read_verilog -sv $(if $(SINGLE_PLL),-DSINGLE_PLL) -I rtl/out $(TOP_SRC); $(PRE_SYNTH); synth_gowin -top top -family gw2a; $(POST_SYNTH); write_json $@; tee -o $(BUILD)/top-stat.txt stat"
+	yosys -q -l $(BUILD)/top-yosys.log -p "read_verilog -sv $(if $(CASCADE_PLL),-DCASCADE_PLL) -I rtl/out $(TOP_SRC); $(PRE_SYNTH); synth_gowin -top top -family gw2a; $(POST_SYNTH); write_json $@; tee -o $(BUILD)/top-stat.txt stat"
 
 # timing: tangnano20k.sdc states the pclk / sclk / lclk periods (nextpnr does not derive
 # them from the PLLs). fclk (371.25 MHz) only clocks the OSER10 serialisers.
@@ -72,7 +72,7 @@ $(BUILD)/top.fs: $(BUILD)/top-pnr.json
 gowin/tangnano20k.cst: $(CST) gowin/make_cst.py
 	python3 gowin/make_cst.py
 gowin: $(TOP_HEX) gowin/tangnano20k.cst
-	tools/gowin.sh gowin/top.tcl > $(BUILD)/gowin-top.log 2>&1 || (tail -30 $(BUILD)/gowin-top.log; false)
+	CASCADE_PLL=$(CASCADE_PLL) tools/gowin.sh gowin/top.tcl > $(BUILD)/gowin-top.log 2>&1 || (tail -30 $(BUILD)/gowin-top.log; false)
 	python3 tools/gowin_timing.py impl/pnr
 prog-gowin:
 	@test -f impl/pnr/top.fs || { echo "no impl/pnr/top.fs: run 'make gowin' first"; exit 1; }

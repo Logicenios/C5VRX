@@ -155,8 +155,8 @@ module out_path (
     // pixel i = hc - 16 (0..719); stage v1 = cache data, v2 = products, v3 = sums, v4 = write
     reg  [2:0]  ts0, ts1, ts2, ts3;               // slots of taps 0..3
     reg  [4:0]  vph;
-    reg         vrun0, vrun1, vrun2, vrun3;
-    reg  [9:0]  vi0, vi1, vi2, vi3;
+    reg         vrun0, vrun1, vrun2, vrun3, vrun4;
+    reg  [9:0]  vi0, vi1, vi2, vi3, vi4;
     wire [9:0]  hrel = hc[9:0] - 10'd16;
     always @(posedge clk) begin
         if (hc == 11'd6) begin                    // stage A/B settled 3 clocks after posA
@@ -172,20 +172,25 @@ module out_path (
         vrun1 <= vrun0; vi1 <= vi0;
         vrun2 <= vrun1; vi2 <= vi1;
         vrun3 <= vrun2; vi3 <= vi2;
+        vrun4 <= vrun3; vi4 <= vi3;
     end
     // v1: select the component and multiply (Y and the co-sited chroma component)
     wire [35:0] vc4 = cr_coef(vph);
     wire signed [8:0] vcf0 = vc4[8:0], vcf1 = vc4[17:9], vcf2 = vc4[26:18], vcf3 = vc4[35:27];
-    wire [31:0] d0 = lc_q[ts0], d1 = lc_q[ts1], d2 = lc_q[ts2], d3 = lc_q[ts3];
+    // cache words registered before the multipliers (the block-RAM output, the slot select and
+    // the multiply-add in one clock left 0.17 ns at 74.25 MHz; MEASUREMENTS M81): products use
+    // vi2, sums vi3, bank writes vi4
+    reg  [31:0] d0, d1, d2, d3;
+    always @(posedge clk) begin d0 <= lc_q[ts0]; d1 <= lc_q[ts1]; d2 <= lc_q[ts2]; d3 <= lc_q[ts3]; end
     function [7:0] ycomp(input [31:0] d, input odd); ycomp = odd ? d[23:16] : d[7:0]; endfunction
     function [7:0] ccomp(input [31:0] d, input odd); ccomp = odd ? d[31:24] : d[15:8]; endfunction
     reg signed [17:0] vpy0, vpy1, vpy2, vpy3, vpc0, vpc1, vpc2, vpc3;
     reg signed [19:0] vsy, vsc;
     always @(posedge clk) begin
-        vpy0 <= $signed({1'b0, ycomp(d0, vi1[0])}) * vcf0; vpc0 <= $signed({1'b0, ccomp(d0, vi1[0])}) * vcf0;
-        vpy1 <= $signed({1'b0, ycomp(d1, vi1[0])}) * vcf1; vpc1 <= $signed({1'b0, ccomp(d1, vi1[0])}) * vcf1;
-        vpy2 <= $signed({1'b0, ycomp(d2, vi1[0])}) * vcf2; vpc2 <= $signed({1'b0, ccomp(d2, vi1[0])}) * vcf2;
-        vpy3 <= $signed({1'b0, ycomp(d3, vi1[0])}) * vcf3; vpc3 <= $signed({1'b0, ccomp(d3, vi1[0])}) * vcf3;
+        vpy0 <= $signed({1'b0, ycomp(d0, vi2[0])}) * vcf0; vpc0 <= $signed({1'b0, ccomp(d0, vi2[0])}) * vcf0;
+        vpy1 <= $signed({1'b0, ycomp(d1, vi2[0])}) * vcf1; vpc1 <= $signed({1'b0, ccomp(d1, vi2[0])}) * vcf1;
+        vpy2 <= $signed({1'b0, ycomp(d2, vi2[0])}) * vcf2; vpc2 <= $signed({1'b0, ccomp(d2, vi2[0])}) * vcf2;
+        vpy3 <= $signed({1'b0, ycomp(d3, vi2[0])}) * vcf3; vpc3 <= $signed({1'b0, ccomp(d3, vi2[0])}) * vcf3;
         vsy <= vpy0 + vpy1 + vpy2 + vpy3;
         vsc <= vpc0 + vpc1 + vpc2 + vpc3;
     end
@@ -197,13 +202,13 @@ module out_path (
 
     // line banks: Y 4 x (512 x 8), C 4 x (512 x 16) = {Cb, Cr}; address {parity, index >> 2}
     wire       wpp = ~vc[0];                 // parity of the target line t(vc)
-    wire [9:0] yp  = vi3 + 10'd4;            // luma position + 4
-    wire [8:0] cm  = vi3[9:1] + 9'd4;        // chroma position + 4 (at odd pixels)
+    wire [9:0] yp  = vi4 + 10'd4;            // luma position + 4
+    wire [8:0] cm  = vi4[9:1] + 9'd4;        // chroma position + 4 (at odd pixels)
     reg  [7:0] cb_hold;
-    always @(posedge clk) if (vrun3 && !vi3[0]) cb_hold <= vcv;
+    always @(posedge clk) if (vrun4 && !vi4[0]) cb_hold <= vcv;
     // bank write enables/addresses incl. edge padding (-2, -1 at the start; +1, +2 at the end)
-    wire yfirst = vrun3 && vi3 == 10'd0, ylast = vrun3 && vi3 == 10'd719;
-    wire cfirst = vrun3 && vi3 == 10'd1, clast = vrun3 && vi3 == 10'd719;
+    wire yfirst = vrun4 && vi4 == 10'd0, ylast = vrun4 && vi4 == 10'd719;
+    wire cfirst = vrun4 && vi4 == 10'd1, clast = vrun4 && vi4 == 10'd719;
     reg  [7:0]  ybk_d [0:3];
     reg  [15:0] cbk_d [0:3];
     reg  [7:0]  ybk_a [0:3], cbk_a [0:3];
@@ -214,10 +219,10 @@ module out_path (
             ybk_we[b] = 1'b0; ybk_a[b] = yp[9:2]; ybk_d[b] = vy;
             cbk_we[b] = 1'b0; cbk_a[b] = cm[8:2]; cbk_d[b] = {cb_hold, vcv};
         end
-        if (vrun3) ybk_we[yp[1:0]] = 1'b1;
+        if (vrun4) ybk_we[yp[1:0]] = 1'b1;
         if (yfirst) begin ybk_we[2] = 1'b1; ybk_a[2] = 8'd0; ybk_we[3] = 1'b1; ybk_a[3] = 8'd0; end   // p = -2, -1
         if (ylast)  begin ybk_we[0] = 1'b1; ybk_a[0] = 8'd181; ybk_we[1] = 1'b1; ybk_a[1] = 8'd181; end // p = 720, 721
-        if (vrun3 && vi3[0]) cbk_we[cm[1:0]] = 1'b1;
+        if (vrun4 && vi4[0]) cbk_we[cm[1:0]] = 1'b1;
         if (cfirst) begin cbk_we[2] = 1'b1; cbk_a[2] = 8'd0; cbk_we[3] = 1'b1; cbk_a[3] = 8'd0; end   // m = -2, -1
         if (clast)  begin cbk_we[0] = 1'b1; cbk_a[0] = 8'd91; cbk_we[1] = 1'b1; cbk_a[1] = 8'd91; end   // m = 360, 361
     end

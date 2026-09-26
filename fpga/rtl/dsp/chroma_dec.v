@@ -47,6 +47,10 @@ module chroma_dec #(
     localparam [10:0] BX0 = 11'd112, BX1 = 11'd144, BDEC = 11'd150, XACT0 = 11'd160;
     localparam signed [31:0] KILL_BU = 32'sd60000;
     localparam [32:0]        LOCK_GATE = 33'd150000;   // |bu| + |bv| below: no burst, hold the loop
+    // ACC (model/chroma_ref.py): burst magnitude max + 3/8 min of |bu|, |bv|, filtered 1/64 per line
+    // on lines with a burst and no colour killer; next line's saturation = sat * g >> 8,
+    // g = REF * 256 / filtered (serial divider), clamped to 128 .. 1023 (0.5 .. 4)
+    localparam [25:0]        ACC_REF_PAL = 26'd1003168, ACC_REF_NTSC = 26'd1125856;
 
     reg signed [9:0] sin_rom [0:255];
     reg signed [9:0] cos_rom [0:255];
@@ -118,6 +122,13 @@ module chroma_dec #(
         begin s = v >>> 8; sat16 = (s > 32767) ? 16'h7FFF : (s < -32768) ? 16'h8000 : s[15:0]; end
     endfunction
 
+    // ---------------- ACC state ----------------
+    reg  [25:0] acc_mf;                    // filtered burst magnitude
+    reg  [26:0] acc_mag; reg acc_upd, acc_go;
+    reg  [9:0]  sat_eff, sat_nxt;          // saturation in use / for the next line (from the ACC)
+    wire [31:0] acc_mx = (abu_r > abv_r) ? abu_r : abv_r, acc_mn = (abu_r > abv_r) ? abv_r : abu_r;
+    wire signed [27:0] acc_dif = $signed({1'b0, acc_mag}) - $signed({2'b0, acc_mf});
+
     // ---------------- stage A register (input sample) ----------------
     reg signed [11:0] a_cv;
     reg [15:0] a_phi;
@@ -129,7 +140,9 @@ module chroma_dec #(
             phi_line <= 0; phi_run <= 0; bv_prev <= 0; bu_prev <= 0; have_prev <= 1'b0; kill_cnt <= 0;
             corr_r <= 0; flip_r <= 1'b0; present_r <= 1'b0; have_r <= 1'b0; err_r <= 0; usum_pos <= 1'b0; bu_pos <= 1'b0;
             killed <= 1'b0; pal_sw_neg <= 1'b0;
+            acc_mf <= pal ? ACC_REF_PAL : ACC_REF_NTSC; acc_upd <= 1'b0; acc_go <= 1'b0;
         end else if (cv_valid) begin
+            acc_go <= 1'b0;
             phi_run <= phi_in;
             a_cv <= cv; a_phi <= phi_in; a_x <= cv_x; a_v <= 1'b1;
             d1_q <= lb1[cv_x]; d2_q <= lb2[cv_x];
@@ -153,6 +166,12 @@ module chroma_dec #(
             end
             if (cv_x == BDEC + 11'd2) begin
                 corr_r <= corr16; flip_r <= flip;
+                acc_mag <= acc_mx[26:0] + {2'b0, acc_mn[26:2]} + {3'b0, acc_mn[26:3]};   // |bu|, |bv| < 2^25
+                acc_upd <= present_r && !killed;
+            end
+            if (cv_x == BDEC + 11'd3) begin
+                if (acc_upd) acc_mf <= acc_mf + {{4{acc_dif[27]}}, acc_dif[27:6]};   // += (mag - mf) >>> 6
+                acc_go <= 1'b1;                                      // g and the next saturation
             end
             if (cv_x == LS - 1) begin
                 // corr = -(err >> 9) (+ half turn if bu > 0), err = bv (+ bv_prev for PAL)
@@ -168,6 +187,34 @@ module chroma_dec #(
                 end
                 log_we <= 1'b1; log_bu <= sat16(bu); log_bv <= sat16(bv); log_corr <= corr_r;
                 log_fl <= {flip_r, pal_sw_neg, killed};
+            end
+        end
+    end
+
+    // ACC: g = REF << 8 / acc_mf (restoring, 29 steps), clamp, then sat * g (10 shift-add steps):
+    // ~42 clocks from x = BDEC + 3, long before the line end where sat_eff takes the result
+    reg  [28:0] dv_n, dv_q; reg [25:0] dv_r, dv_d; reg [4:0] dv_k; reg dv_run = 1'b0;
+    reg  [9:0]  acc_g; reg [17:0] acc_p; reg [3:0] acc_k; reg acc_mrun = 1'b0;
+    wire [26:0] dv_t = {dv_r, dv_n[28]};
+    wire        dv_ge = dv_t >= {1'b0, dv_d};
+    wire [9:0]  gcl = (dv_q > 29'd1023) ? 10'd1023 : (dv_q < 29'd128) ? 10'd128 : dv_q[9:0];
+    wire [25:0] acc_ref = pal ? ACC_REF_PAL : ACC_REF_NTSC;
+    always @(posedge clk) begin
+        if (rst) begin dv_run <= 1'b0; acc_mrun <= 1'b0; sat_nxt <= {2'b0, sat}; end
+        else if (acc_go) begin
+            dv_n <= {acc_ref[20:0], 8'd0};              // REF < 2^21
+            dv_r <= 0; dv_q <= 0; dv_d <= acc_mf; dv_k <= 5'd29; dv_run <= 1'b1; acc_mrun <= 1'b0;
+        end else if (dv_run) begin
+            dv_r <= dv_ge ? dv_t[25:0] - dv_d : dv_t[25:0];
+            dv_n <= dv_n << 1; dv_q <= {dv_q[27:0], dv_ge};
+            dv_k <= dv_k - 5'd1;
+            if (dv_k == 5'd1) begin dv_run <= 1'b0; acc_mrun <= 1'b1; acc_k <= 4'd15; end
+        end else if (acc_mrun) begin
+            if (acc_k == 4'd15) begin acc_g <= gcl; acc_p <= 0; acc_k <= 4'd0; end          // quotient final
+            else if (acc_k == 4'd10) begin acc_mrun <= 1'b0; sat_nxt <= acc_p[17:8]; end
+            else begin
+                if (acc_g[acc_k]) acc_p <= acc_p + ({10'd0, sat} << acc_k);
+                acc_k <= acc_k + 4'd1;
             end
         end
     end
@@ -278,13 +325,17 @@ module chroma_dec #(
 
     // ---------------- saturation, V switch, gating, PAL-D average ----------------
     // saturation: U and V share one multiplier (U on the sample's clock, V on the next)
-    reg signed [37:0] sp /* synthesis syn_dspstyle = "dsp" */;
-    reg signed [37:0] us, vs;
+    reg signed [39:0] sp /* synthesis syn_dspstyle = "dsp" */;
+    reg signed [39:0] us, vs;
     reg signed [28:0] sv_h;
     reg signed [12:0] y_h, y_e; reg [10:0] x_h, x_e; reg v_e, sp_b, sp_c;
     wire signed [28:0] sma = v_d ? su2 : sv_h;
+    // a line's saturation changes where its first sample reaches this multiplier (sat_nxt was
+    // computed during the previous line), so every sample of a line uses the same value
+    wire [9:0] sat_m = (v_d && x_d == 11'd0) ? sat_nxt : sat_eff;
     always @(posedge clk) begin
-        sp <= sma * $signed({1'b0, sat});
+        if (rst) sat_eff <= {2'b0, sat}; else if (v_d) sat_eff <= sat_m;
+        sp <= sma * $signed({1'b0, sat_m});
         sp_b <= v_d; sp_c <= sp_b; v_e <= sp_c;
         if (v_d) begin sv_h <= sv2; y_h <= y_d; x_h <= x_d; end
         if (sp_b) us <= sp;

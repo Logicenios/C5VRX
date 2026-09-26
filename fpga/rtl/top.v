@@ -50,6 +50,9 @@ module top (
     reg  [1:0]  clog_done_s = 0;
     always @(posedge clk27) clog_done_s <= {clog_done_s[0], clog_done_l};
     wire        osd_we; wire [9:0] osd_waddr; wire [15:0] osd_wdata;
+    wire        osdr_we; wire [4:0] osdr_addr; wire [31:0] osdr_data;   // OSD v2 registers
+    wire        osd_ack_p; reg [1:0] osd_ack_s = 0;
+    always @(posedge clk27) osd_ack_s <= {osd_ack_s[0], osd_ack_p};
     reg  [3:0]  cpu_rst_cnt = 4'hF;
     always @(posedge clk27) if (cpu_rst_cnt != 0) cpu_rst_cnt <= cpu_rst_cnt - 4'd1;
     soc u_soc (
@@ -59,6 +62,7 @@ module top (
         .link_raw(link_raw), .link_freq(link_freq), .link_errp(link_errp), .link_errn(link_errn), .link_bits(link_bits),
         .cap_req(cap_req), .cap_done(cap_done_k), .cap_addr(cap_addr), .cap_data(cap_data),
         .clog_req(clog_req), .clog_done(clog_done_s[1]), .clog_addr(clog_addr), .clog_data(clog_data),
+        .osdr_we(osdr_we), .osdr_addr(osdr_addr), .osdr_data(osdr_data), .osd_ack(osd_ack_s[1]),
         .vt_dbg({8'd0, vt_dbg_k}), .vt_pulses({br_k, hs_k}), .diag({drops_a, drops_b, ovf_k, fbd_k}),
         .settings0(set0), .settings1(set1), .settings2(set2), .osd_ctrl(osd_ctrl));
 
@@ -72,7 +76,11 @@ module top (
     reg  [1:0] mode_req = 2'd0;
     reg  [23:0] hyst = 0;
     wire pal_eff_k = (std_mode == 2'd1) ? 1'b0 : (std_mode == 2'd2) ? 1'b1 : pal_det_k;
+`ifdef CASCADE_PLL
     wire [1:0] mode_want = force60 ? 2'd0 : (pal_eff_k ? 2'd2 : 2'd1);
+`else
+    wire [1:0] mode_want = (force60 || !pal_eff_k) ? 2'd0 : 2'd2;      // no 59.94 without the cascade
+`endif
     always @(posedge clk27) begin
         if (force60) begin mode_req <= 2'd0; hyst <= 0; end
         else if ((vlocked_k || std_mode != 2'd0) && mode_want != mode_req) begin
@@ -83,10 +91,16 @@ module top (
 
     wire fclk, pclk, plocked;
     wire [7:0] clk_restarts; wire [1:0] clk_cause;
-`ifdef SINGLE_PLL
-    // EXPERIMENT (make SINGLE_PLL=1): pixel clock from one rPLL fed by the crystal pin, as in the
-    // colour-bar bitstream (27 x 55/4 = 371.25 MHz, 74.25 MHz pixel clock). 60 and 50 Hz only
-    // (both use 74.25 MHz); 59.94 needs the cascade and is output with 60 Hz timing here.
+`ifdef CASCADE_PLL
+    // make CASCADE_PLL=1: cascaded PLLs, adds 720p59.94 (M58/M59), jitter-prone (M80)
+    clk_gen u_clk (.clk27(clk27), .mode(mode_req), .fclk(fclk), .pclk(pclk), .locked(plocked), .mode_cur(mode_cur),
+                   .restarts(clk_restarts), .last_cause(clk_cause), .drops_a(drops_a), .drops_b(drops_b));
+`else
+    // Pixel clock from one rPLL fed by the crystal pin (27 x 55/4 = 371.25 MHz TMDS, 74.25 MHz
+    // pixel clock): 720p60 and 720p50. The cascaded, retunable pair (clk_gen) also makes 59.94 Hz
+    // but its jitter broke the HDMI link under decoder activity (MEASUREMENTS M80): with it the
+    // capture card lost the signal ~10 s after every load, with this PLL it stayed locked. NTSC
+    // is therefore shown at 60 Hz (the frame buffer repeats a field every ~17 s).
     wire sp_lock;
     pll_tmds_60 u_pll1 (.clock_in(clk27), .clock_out(fclk), .locked(sp_lock));
     CLKDIV #(.DIV_MODE("5")) u_div1 (.CLKOUT(pclk), .HCLKIN(fclk), .RESETN(sp_lock), .CALIB(1'b0));
@@ -95,9 +109,6 @@ module top (
     assign plocked = sp_ls[1];
     assign mode_cur = (mode_req == 2'd1) ? 2'd0 : mode_req;
     assign clk_restarts = 8'd0; assign clk_cause = 2'd0; assign drops_a = 8'd0; assign drops_b = {7'd0, ~sp_ls[1]};
-`else
-    clk_gen u_clk (.clk27(clk27), .mode(mode_req), .fclk(fclk), .pclk(pclk), .locked(plocked), .mode_cur(mode_cur),
-                   .restarts(clk_restarts), .last_cause(clk_cause), .drops_a(drops_a), .drops_b(drops_b));
 `endif
     // debug word: {mode changes requested[7:0], restarts[7:0], cause, mode_want, mode_req, 8'd0, ...}
     reg [7:0] mode_changes = 0;
@@ -285,7 +296,7 @@ module top (
     wire [1:0] mode_p;
     cdc_bus #(.W(2)) u_mode_p (.clk(pclk), .d(mode_cur), .q(mode_p));
 
-    wire [10:0] hc, hc_next; wire [9:0] vc; wire de, fs;
+    wire [10:0] hc, hc_next; wire [9:0] vc, vc_next; wire de, fs;
     // signal loss: no new field for 8 output frames
     reg [7:0] fc_last; reg [3:0] stale; reg lost;
     always @(posedge pclk) begin
@@ -307,15 +318,18 @@ module top (
         .prev_valid(prev_valid), .lc_we(lc_we), .lc_slot(lc_slot), .lc_word(lc_word), .lc_wdata(lc_wdata),
         .rgb(rgb_v), .late_count(late_count));
 
-    osd u_osd (
-        .clk(pclk), .hc(hc), .vc(vc), .enable(osd_en_p), .x0(osd_x0), .y0(osd_y0),
+    // OSD v2 (menu redesign): palette, three rounded translucent layers, Scale2x text; the CPU
+    // writes a register set and commits it, applied during vertical blanking (rtl/osd/osd2.v)
+    osd2 u_osd (
+        .clk(pclk), .hc_nx(hc_next), .vc_nx(vc_next),
         .wclk(clk27), .we(osd_we), .waddr(osd_waddr), .wdata(osd_wdata),
+        .rwe(osdr_we), .raddr(osdr_addr), .rdata(osdr_data), .commit_req(), .commit_ack(osd_ack_p),
         .rgb_in(rgb_v), .rgb_out(rgb));
 
     wire [9:0] t0, t1, t2;
-    hdmi_tx #(.PIX_LATENCY(7)) u_tx (
+    hdmi_tx #(.PIX_LATENCY(18)) u_tx (
         .clk(pclk), .rst(prst), .fmt50(mode_p == 2'd2), .dvi_only(1'b0),
-        .hc(hc), .hc_next(hc_next), .vc(vc), .req_de(de), .frame_start(fs), .rgb(rgb),
+        .hc(hc), .hc_next(hc_next), .vc(vc), .vc_next(vc_next), .req_de(de), .frame_start(fs), .rgb(rgb),
         .tmds0(t0), .tmds1(t1), .tmds2(t2));
     hdmi_phy u_phy (.pclk(pclk), .fclk(fclk), .rst(prst), .d0(t0), .d1(t1), .d2(t2),
         .tmds_clk_p(tmds_clk_p), .tmds_clk_n(tmds_clk_n), .tmds_d_p(tmds_d_p), .tmds_d_n(tmds_d_n));

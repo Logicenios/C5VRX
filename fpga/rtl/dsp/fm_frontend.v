@@ -35,19 +35,34 @@ module fm_frontend #(
     wire [8:0]  r2 = lut_r[24:16];
 
     // ---- stage 1: discriminator + click repair (one-sample look-ahead) ----
-    reg [15:0] ph_prev;
+    // The phase difference is formed one stage earlier (when the LUT data arrives, vq) so it
+    // enters the click decision as a register; the jump is computed for both possible repaired
+    // previous samples in parallel and compared against +-threshold (no absolute value), and the
+    // registered click flag selects at the end. Same values as before (sim/tb_fm_frontend); the
+    // chained version missed 74.25 MHz once the chip filled up (MEASUREMENTS M81).
+    reg [15:0] ph_last;
+    reg        have_last, have_prev;
+    reg signed [15:0] d_r;                                       // ph[s] - ph[s-1] for the sample at v0
     reg [8:0]  r2_prev;
-    reg        have_prev;
     reg signed [15:0] d_p, y_pp;
     reg        click_p;
-    wire signed [15:0] d_s = have_prev ? $signed(ph - ph_prev) : 16'sd0;
+    always @(posedge clk) begin
+        if (rst) begin ph_last <= 0; have_last <= 1'b0; end
+        else if (vq) begin
+            d_r <= have_last ? $signed(lut_q[15:0] - ph_last) : 16'sd0;
+            ph_last <= lut_q[15:0]; have_last <= 1'b1;
+        end
+    end
+    wire signed [15:0] d_s = d_r;
     wire signed [16:0] ysum = $signed(y_pp) + $signed(d_s);
     wire signed [15:0] y_sm1 = click_p ? ysum[16:1] : d_p;          // y[s-1]
     wire [8:0] r2min = (r2 < r2_prev) ? r2 : r2_prev;
-    wire signed [16:0] d_abs = d_s[15] ? -$signed({d_s[15], d_s}) : $signed({d_s[15], d_s});
-    wire signed [17:0] jump = $signed(d_s) - $signed(y_sm1);
-    wire signed [17:0] jump_abs = jump[17] ? -jump : jump;
-    wire click_s = have_prev && ((d_abs > CLICK_ABS) || ((r2min < CLICK_R2_LOW) && (jump_abs > CLICK_JUMP)));
+    wire big_d = ($signed(d_s) > $signed({1'b0, CLICK_ABS})) || ($signed(d_s) < -$signed({1'b0, CLICK_ABS}));
+    wire signed [17:0] jump_a = $signed(d_s) - $signed(d_p);                // previous not repaired
+    wire signed [17:0] jump_b = $signed(d_s) - $signed(ysum[16:1]);         // previous repaired
+    wire big_a = (jump_a > CLICK_JUMP) || (jump_a < -CLICK_JUMP);
+    wire big_b = (jump_b > CLICK_JUMP) || (jump_b < -CLICK_JUMP);
+    wire click_s = have_prev && (big_d || ((r2min < CLICK_R2_LOW) && (click_p ? big_b : big_a)));
 
     reg signed [15:0] y_out;
     reg        y_valid;
@@ -55,9 +70,9 @@ module fm_frontend #(
     always @(posedge clk) begin
         y_valid <= 1'b0;
         if (rst) begin
-            have_prev <= 1'b0; d_p <= 0; y_pp <= 0; click_p <= 1'b0; ph_prev <= 0; r2_prev <= 0;
+            have_prev <= 1'b0; d_p <= 0; y_pp <= 0; click_p <= 1'b0; r2_prev <= 0;
         end else if (v0) begin
-            ph_prev <= ph; r2_prev <= r2; have_prev <= 1'b1;
+            r2_prev <= r2; have_prev <= 1'b1;
             d_p <= d_s; y_pp <= y_sm1; click_p <= click_s;
             click <= click_p;
             if (have_prev) begin y_out <= y_sm1; y_valid <= 1'b1; end   // emits y[s-1], s>=1

@@ -13,7 +13,9 @@
 #define SET0        REG(0x30000010u)
 #define SET1        REG(0x30000014u)
 #define SET2        REG(0x30000018u)
-#define OSD_CTRL    REG(0x3000001Cu)
+#define OSD_CTRL    REG(0x3000001Cu)   /* unused since OSD v2 */
+#define OSD_REG(i)  REG(0x60000000u + 4u * (i))   /* OSD v2 registers (rtl/osd/osd2.v) */
+#define OSD_ACK     REG(0x30000050u)   /* bit 0: osd2 commit acknowledge (toggle) */
 #define MS_COUNTER  REG(0x30000020u)
 #define ST_DEBUG    REG(0x30000024u)   /* {mode changes, clk restarts, cause, mode_want, mode_req, 0} */
 #define LINK_RAW    REG(0x30000028u)   /* {strobe edges[15:8], data pins[7:0]} (live) */
@@ -59,13 +61,16 @@
  * SET2: [7:0] brightness (signed), [15:8] contrast (128 = 1.0)
  * OSD_CTRL: [10:0] x0, [25:16] y0, [31] enable */
 
-/* OSD attribute byte */
-#define A_BOX   0x01u
-#define A_WHITE (0u << 1)
-#define A_YEL   (1u << 1)
-#define A_GRN   (2u << 1)
-#define A_RED   (3u << 1)
-#define A_CYAN  (4u << 1)
-#define A_GREY  (5u << 1)
-#define A_ORANGE (7u << 1)
-#define A_INV   0x10u
+/* OSD v2 cell attribute: [3:0] palette index, [4] dim text (rtl/osd/osd2.v) */
+enum { P_PANEL, P_TEXT, P_SEC, P_ACC, P_ONACC, P_GRN, P_YEL, P_RED, P_DIV, P_PANEL2 };
+#define A_DIM   0x10u
+/* v1 names (pages drawn before the redesign): the panel layer replaces the per-cell box */
+#define A_BOX   0x00u
+#define A_WHITE P_TEXT
+#define A_YEL   P_YEL
+#define A_GRN   P_GRN
+#define A_RED   P_RED
+#define A_CYAN  P_ACC
+#define A_GREY  P_SEC
+#define A_ORANGE P_YEL
+#define A_INV   0x00u

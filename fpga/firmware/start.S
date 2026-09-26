@@ -1,7 +1,16 @@
-/* Reset entry for the PicoRV32 control CPU. PicoRV32 sets sp to STACKADDR (top of RAM). */
+/* Reset entry for the PicoRV32 control CPU. PicoRV32 sets sp to STACKADDR (top of RAM).
+ * The stack reserve (link.ld) is filled with a pattern first, so main.c can report how much was never used. */
     .section .text.start
     .global _start
 _start:
+    la   t0, __stack_bottom
+    la   t1, __stack_top
+    li   t2, 0x5A5A5A5A
+0:  bgeu t0, t1, 4f
+    sw   t2, 0(t0)
+    addi t0, t0, 4
+    j    0b
+4:
     la   t0, __bss_start
     la   t1, __bss_end
 1:  bgeu t0, t1, 2f

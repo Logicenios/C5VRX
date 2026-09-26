@@ -22,9 +22,17 @@ define vl_run
 	./vobj/$(1)/V$(2) > $(D)/$(1).log 2>&1
 endef
 
-.PHONY: all quick soc-faults fe chroma sdram uart clkgen linkmon real fb fb-quick fb-short scaler scaler-quick soc full testsrc clean
-all: fe chroma sdram uart clkgen linkmon real fb fb-short scaler soc soc-faults full testsrc
-quick: fe chroma sdram uart clkgen linkmon real fb-quick scaler-quick soc testsrc
+# ---- OSD v2 against model/osd2_ref.py: random registers / text, full 1280x720 frames ----
+osd2: | $(D)
+	for seed in 1 2 3 4; do \
+	  (cd .. && $(PY) model/osd2_ref.py tbgen sim/$(D) $$seed > /dev/null) && \
+	  $(VL) --top-module tb_osd2 --Mdir vobj/osd2 tb_osd2.v ../rtl/osd/osd2.v ../rtl/osd/pipe_dly.v > vobj/osd2.build.log 2>&1 && ./vobj/osd2/Vtb_osd2 > /dev/null && \
+	  $(PY) -c "import sys; a=open('$(D)/osd2_rtl.txt').read().split(); b=open('$(D)/osd2_ref.txt').read().split(); n=sum(x!=y for x,y in zip(a,b)); print(f'tb_osd2 seed $$seed: {len(a)} pixels, mismatches {n}', 'PASS' if n==0 and len(a)==921600 else 'FAIL'); sys.exit(n!=0 or len(a)!=921600)" || exit 1; \
+	done
+
+.PHONY: all quick osd2 soc-faults fe chroma sdram uart clkgen linkmon real fb fb-quick fb-short scaler scaler-quick soc full testsrc clean
+all: fe chroma sdram uart clkgen linkmon real fb fb-short scaler soc soc-faults full testsrc osd2
+quick: fe chroma sdram uart clkgen linkmon real fb-quick scaler-quick soc testsrc osd2
 
 $(D):
 	mkdir -p $@ vobj
@@ -86,6 +94,12 @@ chroma: $(D)/chroma_in.txt $(D)/chroma_in_pal.txt
 	cd .. && $(PY) model/chroma_ref.py decode sim/$(D)/chroma_in_pal.txt sim/$(D)/chroma_ref_pal_old.txt pal legacy --log=sim/$(D)/chroma_log_ref_old.txt
 	$(PY) cmp_prefix.py $(D)/chroma_rtl_pal_old.txt $(D)/chroma_ref_pal_old.txt   # old burst lock
 	$(PY) cmp_prefix.py $(D)/chroma_log_rtl_old.txt $(D)/chroma_log_ref_old.txt
+	# ACC: the same PAL field at half amplitude (burst and chroma -6 dB): the gain climbs towards 2
+	awk '{printf "%d %d %s %s\n", $$1, int($$2 / 2), $$3, $$4}' $(D)/chroma_in_pal.txt > $(D)/chroma_in_pal_half.txt
+	$(IV) -Ptb_chroma_pal.IN='"$(D)/chroma_in_pal_half.txt"' -Ptb_chroma_pal.OUT='"$(D)/chroma_rtl_pal_half.txt"' \
+	  -Ptb_chroma_pal.LOG='"$(D)/chroma_log_rtl_half.txt"' -o chroma_ph.vvp tb_chroma_pal.v ../rtl/dsp/chroma_dec.v && vvp -n chroma_ph.vvp > /dev/null
+	cd .. && $(PY) model/chroma_ref.py decode sim/$(D)/chroma_in_pal_half.txt sim/$(D)/chroma_ref_pal_half.txt pal
+	$(PY) cmp_prefix.py $(D)/chroma_rtl_pal_half.txt $(D)/chroma_ref_pal_half.txt   # ACC active
 
 # ---- SDRAM controller vs behavioural model (protocol + data) ----
 sdram:

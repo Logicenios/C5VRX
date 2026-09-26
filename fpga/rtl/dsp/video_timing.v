@@ -307,9 +307,14 @@ module video_timing #(
     reg signed [48:0] adiff;
     reg        a_near;
     reg [47:0] rs_line_p, anchor_next;
+    // +-P/2, then the two comparisons, then a_near: three registered steps (one chained clock
+    // missed 74.25 MHz in a full chip, MEASUREMENTS M81); a_near is used ~1200 samples later
+    reg signed [48:0] ph_pos, ph_neg; reg a_lo, a_hi;
     always @(posedge clk) begin
         adiff <= $signed({1'b0, line_pos}) - $signed({1'b0, rs_line});
-        a_near <= adiff > -$signed({2'b0, period[47:1]}) && adiff < $signed({2'b0, period[47:1]});
+        ph_pos <= $signed({2'b0, period[47:1]}); ph_neg <= -$signed({2'b0, period[47:1]});
+        a_lo <= adiff > ph_neg; a_hi <= adiff < ph_pos;
+        a_near <= a_lo && a_hi;
         rs_line_p <= rs_line + period;
         anchor_next <= a_near ? next_pred : rs_line_p;
     end

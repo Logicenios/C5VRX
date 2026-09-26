@@ -8,14 +8,18 @@ set_option -include_path {rtl/out}
 set_option -output_base_name top
 # link_d[2], [3], [6] (pins 56, 54, 55) are SSPI dual-purpose pins
 set_option -use_sspi_as_gpio 1
+# make gowin CASCADE_PLL=1: the cascaded, 59.94-capable (jitter-prone, M80) TMDS PLLs (rtl/top.v)
+if {[info exists ::env(CASCADE_PLL)] && $::env(CASCADE_PLL) == "1"} { add_file gowin/cascade_pll.v }
 foreach f {
     rtl/top.v rtl/clocks/clk_gen.v rtl/clocks/pll_tmds_60.v
     rtl/hdmi/tmds_encoder.v rtl/hdmi/hdmi_tx.v rtl/hdmi/hdmi_phy.v
     rtl/dsp/fm_frontend.v rtl/dsp/video_timing.v rtl/dsp/chroma_dec.v rtl/dsp/chroma_log.v rtl/dsp/test_src.v
     rtl/fb/fb_format.v rtl/fb/fb_ctrl.v rtl/mem/async_fifo.v rtl/mem/sdram_ctrl.v
-    rtl/out/out_path.v rtl/osd/osd.v rtl/soc/soc.v rtl/soc/uart.v rtl/soc/cdc_bus.v
+    rtl/out/out_path.v rtl/osd/osd2.v rtl/osd/pipe_dly.v rtl/soc/soc.v rtl/soc/uart.v rtl/soc/cdc_bus.v
     rtl/link/link_mon.v rtl/link/link_cap.v third_party/picorv32/picorv32.v
 } { add_file $f }
+# GOWIN_SDF=1: also write the routed delays (impl/pnr/top.sdf), e.g. the clock skew at the serialisers
+if {[info exists ::env(GOWIN_SDF)] && $::env(GOWIN_SDF) == "1"} { set_option -gen_sdf 1 }
 add_file gowin/tangnano20k.cst
 add_file gowin/tangnano20k.sdc
 run all

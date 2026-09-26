@@ -44,7 +44,13 @@ module async_fifo #(
     end
 
     // ---- read side (FWFT: read address looks ahead on pop) ----
-    wire [AW:0] rbin_n = rbin + {{AW{1'b0}}, (rd_en && !empty)};
+    wire        pop = rd_en && !empty;
+    wire [AW:0] rbin_n = rbin + {{AW{1'b0}}, pop};
+    // empty for both outcomes, precomputed: the reader's pop decision only selects (the chained
+    // increment / gray / compare after it set the pixel clock's critical path, M81)
+    wire [AW:0] rbin_1 = rbin + 1'b1;
+    wire [AW:0] rgray_1 = (rbin_1 >> 1) ^ rbin_1;
+    wire        empty_pop = rgray_1 == wgray_r2, empty_stay = rgray == wgray_r2;
     wire [AW:0] rgray_n = (rbin_n >> 1) ^ rbin_n;
     // empty is registered from the next read pointer and the current synchronised write pointer:
     // writes only add words, so it can stay set one clock too long but is never wrongly clear.
@@ -54,7 +60,7 @@ module async_fifo #(
     // failed timing at 74.25 MHz; MEASUREMENTS M75)
     always @(posedge rclk) begin
         if (rrst) begin rbin <= 0; rgray <= 0; rd_level <= 0; empty <= 1'b1; end
-        else begin rbin <= rbin_n; rgray <= rgray_n; rd_level <= g2b(wgray_r2) - rbin_n; empty <= (rgray_n == wgray_r2); end
+        else begin rbin <= rbin_n; rgray <= rgray_n; rd_level <= g2b(wgray_r2) - rbin_n; empty <= pop ? empty_pop : empty_stay; end
         rd_data <= mem[rbin_n[AW-1:0]];
         wgray_r1 <= wgray; wgray_r2 <= wgray_r1;
     end

@@ -10,10 +10,14 @@ module hdmi_phy (
     output wire       tmds_clk_p, tmds_clk_n,
     output wire [2:0] tmds_d_p, tmds_d_n
 );
+    // one register stage right before the serialisers, so the last hop into the IO logic is short
+    // wherever the encoder is placed
+    reg [9:0] d0_r, d1_r, d2_r;
+    always @(posedge pclk) begin d0_r <= d0; d1_r <= d1; d2_r <= d2; end
     wire [9:0] lane [0:3];
-    assign lane[0] = d0;
-    assign lane[1] = d1;
-    assign lane[2] = d2;
+    assign lane[0] = d0_r;
+    assign lane[1] = d1_r;
+    assign lane[2] = d2_r;
     assign lane[3] = 10'b0000011111;
     wire [3:0] ser;
 

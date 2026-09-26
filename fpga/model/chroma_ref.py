@@ -42,6 +42,15 @@ class Boxcar:
 
 
 X_ACT0 = 160                               # U/V forced to 0 before this (burst/blanking)
+# ACC (automatic colour gain): the burst magnitude (max + 3/8 min of |bu|, |bv|) is filtered over
+# lines (1/64 per line, lines with a burst and no colour killer) and the saturation of the next
+# line is sat * g / 256 with g = ACC_REF * 256 / filtered, clamped to 0.5 .. 4. ACC_REF is the
+# median magnitude of a standard synthetic signal (model/iqsynth.py: burst = sync amplitude)
+# through the chain (sim/data/chroma_in*.txt), so a standard signal decodes with g = 1 and sat
+# keeps its meaning (146 = nominal, which already covers the resampler's roll-off at fsc).
+ACC_REF = {True: 1003168, False: 1125856}   # is_pal ->
+ACC_SHIFT = 6
+ACC_GMIN, ACC_GMAX = 128, 1023
 SAT_DEFAULT = 146                          # compensates the ~12 % chroma roll-off (fpga/README.md)
 
 
@@ -50,8 +59,12 @@ def sat16(v: int) -> int:
     return max(-32768, min(32767, v >> 8)) & 0xFFFF
 
 
+def acc_gain(mf: int, is_pal: bool) -> int:
+    return max(ACC_GMIN, min(ACC_GMAX, (ACC_REF[is_pal] << 8) // mf))
+
+
 def chroma_decode(lines, is_pal: bool, comb: bool = True, hue: int = 0, sat: int = SAT_DEFAULT, log=None,
-                  legacy_lock: bool = False, ff=None):
+                  legacy_lock: bool = False, ff=None, acc: bool = True):
     """lines: list of 1280-sample int arrays (composite mV). Returns list of (Y, U, V) arrays.
 
     Streaming order (mirrored by the RTL): the burst products are complete at
@@ -77,6 +90,8 @@ def chroma_decode(lines, is_pal: bool, comb: bool = True, hue: int = 0, sat: int
     bu_prev = 0
     have_prev = False
     kill_cnt = 0
+    acc_mf = ACC_REF[is_pal]                   # filtered burst magnitude
+    sat_eff = sat                              # this line's saturation (ACC: from the lines before)
     out = []
     # the notch sees the continuous stream (x-2 / x+2 cross line boundaries), zero before the start
     flat = np.concatenate([np.zeros(2, dtype=np.int64)] + [np.asarray(l, dtype=np.int64) for l in lines]
@@ -108,8 +123,8 @@ def chroma_decode(lines, is_pal: bool, comb: bool = True, hue: int = 0, sat: int
             kd = ((phi + hue) & 0xFFFF) >> 8
             u = u2.push(u1.push(ch * S[kd]))       # boxcar gain 48
             v = v2.push(v1.push(ch * C[kd]))
-            uo = (u * sat) >> 20                   # 511/2*48*128/2^20 = 1.497 per mV of U
-            vo = ((v * sat) >> 20) * sw
+            uo = (u * sat_eff) >> 20               # 511/2*48*128/2^20 = 1.497 per mV of U
+            vo = ((v * sat_eff) >> 20) * sw
             if x < X_ACT0 or killed:
                 uo = vo = 0
             if is_pal:                             # PAL-D delay-line average
@@ -132,6 +147,12 @@ def chroma_decode(lines, is_pal: bool, comb: bool = True, hue: int = 0, sat: int
                 bu_prev, bv_prev, have_prev = (-bu, -bv, True) if flip else (bu, bv, True)
             else:
                 bu_prev, bv_prev, have_prev = 0, 0, False
+        if acc:
+            if abs(bu) + abs(bv) >= LOCK_GATE and not killed:
+                a, b = abs(bu), abs(bv)
+                mx, mn = max(a, b), min(a, b)
+                acc_mf += (mx + (mn >> 2) + (mn >> 3) - acc_mf) >> ACC_SHIFT
+            sat_eff = (sat * acc_gain(acc_mf, is_pal)) >> 8     # for the next line
         ffv = 0 if (legacy_lock or ff is None) else ff[li][0 if is_pal else 1]
         phi_line = (phi_line + LS * inc + corr + ffv) & 0xFFFF
         if log is not None:

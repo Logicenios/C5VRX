@@ -41,6 +41,10 @@ module soc #(
     output wire [10:0] cap_addr,
     input  wire [15:0] cap_data,
     output reg         clog_req = 1'b0,// toggle: start a colour-lock recording (chroma_log.v)
+    output reg         osdr_we = 1'b0, // OSD v2 register write (osd2.v), 0x6000_0000 + 4 * index
+    output reg  [4:0]  osdr_addr,
+    output reg  [31:0] osdr_data,
+    input  wire        osd_ack,        // osd2 commit acknowledge (synchronised toggle)
     input  wire        clog_done,      // toggles when 256 lines are stored (synchronised)
     output wire [8:0]  clog_addr,
     input  wire [31:0] clog_data,
@@ -108,7 +112,7 @@ module soc #(
     // ---- bus: RAM takes two cycles (registered read), peripherals one ----
     reg ram_wait = 0;
     always @(posedge clk) begin
-        mem_ready <= 1'b0; tx_we <= 1'b0; rx_pop <= 1'b0; osd_we <= 1'b0;
+        mem_ready <= 1'b0; tx_we <= 1'b0; rx_pop <= 1'b0; osd_we <= 1'b0; osdr_we <= 1'b0;
         if (!resetn) begin
             ram_wait <= 1'b0;
             settings0 <= 32'd0; settings1 <= {8'd0, 8'd146, 16'd0}; settings2 <= {16'd0, 8'd128, 8'd0};
@@ -131,6 +135,9 @@ module soc #(
                     4'h2: if (mem_wstrb != 4'd0) begin
                               osd_we <= 1'b1; osd_waddr <= mem_addr[11:2]; osd_wdata <= mem_wdata[15:0];
                           end
+                    4'h6: if (mem_wstrb != 4'd0) begin
+                              osdr_we <= 1'b1; osdr_addr <= mem_addr[6:2]; osdr_data <= mem_wdata;
+                          end
                     4'h3: case (mem_addr[6:2])
                               5'd0: mem_rdata <= status;
                               5'd1: mem_rdata <= meas_tip;
@@ -152,6 +159,7 @@ module soc #(
                               5'd17: mem_rdata <= vt_pulses;
                               5'd18: mem_rdata <= diag;
                               5'd19: begin mem_rdata <= {31'd0, clog_done}; if (mem_wstrb != 0) clog_req <= ~clog_req; end
+                              5'd20: mem_rdata <= {31'd0, osd_ack};
                               default: ;
                           endcase
                     default: ;
