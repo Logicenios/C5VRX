@@ -10,10 +10,12 @@ module hdmi_phy (
     output wire       tmds_clk_p, tmds_clk_n,
     output wire [2:0] tmds_d_p, tmds_d_n
 );
-    // one register stage right before the serialisers, so the last hop into the IO logic is short
-    // wherever the encoder is placed
+    // The serialiser inputs are launched on the falling pclk edge: the OSER10 takes them on the
+    // rising edge, so the hop into the IO logic has half a pixel clock of setup and of hold margin
+    // wherever the placer puts these registers. With a rising-edge launch one build (timing clean)
+    // showed lane 1 inverted on a good cable: black as full green, white as magenta (M85).
     reg [9:0] d0_r, d1_r, d2_r;
-    always @(posedge pclk) begin d0_r <= d0; d1_r <= d1; d2_r <= d2; end
+    always @(negedge pclk) begin d0_r <= d0; d1_r <= d1; d2_r <= d2; end
     wire [9:0] lane [0:3];
     assign lane[0] = d0_r;
     assign lane[1] = d1_r;

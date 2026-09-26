@@ -18,6 +18,8 @@ foreach f {
     rtl/out/out_path.v rtl/osd/osd2.v rtl/osd/pipe_dly.v rtl/soc/soc.v rtl/soc/uart.v rtl/soc/cdc_bus.v
     rtl/link/link_mon.v rtl/link/link_cap.v third_party/picorv32/picorv32.v
 } { add_file $f }
+# GOWIN_PLACE=n: another placer strategy (a different placement of the same design, for A/B tests)
+if {[info exists ::env(GOWIN_PLACE)]} { set_option -place_option $::env(GOWIN_PLACE) }
 # GOWIN_SDF=1: also write the routed delays (impl/pnr/top.sdf), e.g. the clock skew at the serialisers
 if {[info exists ::env(GOWIN_SDF)] && $::env(GOWIN_SDF) == "1"} { set_option -gen_sdf 1 }
 add_file gowin/tangnano20k.cst
