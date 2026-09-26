@@ -38,4 +38,8 @@ def debug_text(p: bytes) -> str:
             names = ("have_newest", "w_started", "sd_req", "r_inflight", "r_active", "r_pend", "w_inflight", "w_line")
             text += (f"\n            diag: PLL LOCK drops A={dg >> 24} B={dg >> 16 & 255}, FIFO overflows {dg >> 8 & 255}, "
                      f"fb_ctrl [{' '.join(n for j, n in enumerate(names) if fb >> j & 1) or '-'}]")
+        if len(p) >= 64:
+            (ev, stk) = struct.unpack("<II", p[52:56] + p[60:64])
+            text += (f"\n            cpu: stack never used {stk} of 704 bytes, button events S1 {ev >> 8 & 255} "
+                     f"S2 {ev >> 16 & 255} C5 {ev >> 24}, wiring false starts {ev & 255}")
     return text
